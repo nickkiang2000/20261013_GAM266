@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>每日喝開水統計與記錄</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen pb-12 font-sans">
+
+    <!-- Header -->
+    <header class="bg-blue-600 text-white shadow-md">
+        <div class="max-w-4xl mx-auto px-4 py-6 flex justify-between items-center">
+            <div class="flex items-center space-x-3">
+                <i data-lucide="droplet" class="w-8 h-8 text-blue-200 fill-blue-200"></i>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-wide">每日喝水記錄</h1>
+                    <p class="text-xs text-blue-100">健康生活，從喝水開始</p>
+                </div>
+            </div>
+            <button onclick="openGoalModal()" class="text-xs bg-blue-700 hover:bg-blue-800 text-white px-3 py-1.5 rounded-lg flex items-center space-x-1 transition">
+                <i data-lucide="settings" class="w-4 h-4"></i>
+                <span>設定目標</span>
+            </button>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-4 mt-6 space-y-6">
+
+        <!-- Top Progress Overview -->
+        <section class="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 grid grid-cols-1 md:grid-cols-3 gap-6 items-center">
+            <!-- Progress Ring & Main Info -->
+            <div class="md:col-span-2 flex flex-col sm:flex-row items-center space-y-4 sm:space-y-0 sm:space-x-6">
+                <!-- Visual Water Level Indicator -->
+                <div class="relative w-36 h-36 rounded-full border-4 border-blue-100 flex items-center justify-center bg-blue-50/50 overflow-hidden shadow-inner flex-shrink-0">
+                    <div id="waterWave" class="absolute bottom-0 w-full bg-blue-500/80 transition-all duration-700 ease-out" style="height: 0%;"></div>
+                    <div class="relative z-10 text-center">
+                        <span id="progressPercent" class="text-3xl font-extrabold text-slate-800">0%</span>
+                        <p class="text-xs text-slate-500 font-medium mt-0.5">今日達成率</p>
+                    </div>
+                </div>
+                <!-- Stats Info -->
+                <div class="space-y-2 text-center sm:text-left">
+                    <div class="text-sm font-semibold text-slate-500">今日飲水量</div>
+                    <div class="text-4xl font-black text-blue-600 tracking-tight">
+                        <span id="currentAmount">0</span> <span class="text-lg font-normal text-slate-500">/ <span id="targetAmount">2000</span> ml</span>
+                    </div>
+                    <p id="remainingText" class="text-xs text-slate-500">還差 2000 ml 達到今日目標！</p>
+                </div>
+            </div>
+
+            <!-- Quick Add Container -->
+            <div class="bg-slate-50 p-4 rounded-xl border border-slate-100 flex flex-col justify-center space-y-3">
+                <div class="text-xs font-bold text-slate-500 uppercase tracking-wider text-center md:text-left">快速紀錄 (毫升)</div>
+                <div class="grid grid-cols-2 gap-2">
+                    <button onclick="addWater(200)" class="bg-white border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-slate-700 font-semibold py-2 px-3 rounded-lg text-sm transition shadow-sm flex items-center justify-center space-x-1">
+                        <i data-lucide="cup-soda" class="w-4 h-4 text-blue-500"></i>
+                        <span>+200 ml</span>
+                    </button>
+                    <button onclick="addWater(350)" class="bg-white border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-slate-700 font-semibold py-2 px-3 rounded-lg text-sm transition shadow-sm flex items-center justify-center space-x-1">
+                        <i data-lucide="glass-water" class="w-4 h-4 text-blue-500"></i>
+                        <span>+350 ml</span>
+                    </button>
+                    <button onclick="addWater(500)" class="bg-white border border-slate-200 hover:border-blue-400 hover:bg-blue-50 text-slate-700 font-semibold py-2 px-3 rounded-lg text-sm transition shadow-sm flex items-center justify-center space-x-1">
+                        <i data-lucide="container" class="w-4 h-4 text-blue-500"></i>
+                        <span>+500 ml</span>
+                    </button>
+                    <button onclick="openCustomInput()" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-3 rounded-lg text-sm transition shadow-sm flex items-center justify-center space-x-1">
+                        <i data-lucide="plus" class="w-4 h-4"></i>
+                        <span>自訂毫升</span>
+                    </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Main Content Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            
+            <!-- Today's Log History (2 cols) -->
+            <div class="md:col-span-2 bg-white rounded-2xl p-6 shadow-sm border border-slate-100 space-y-4">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-lg font-bold text-slate-800 flex items-center space-x-2">
+                        <i data-lucide="list-todo" class="w-5 h-5 text-blue-500"></i>
+                        <span>今日飲水明細</span>
+                    </h2>
+                    <span id="logCount" class="text-xs bg-slate-100 text-slate-600 px-2.5 py-1 rounded-full font-medium">0 筆記錄</span>
+                </div>
+
+                <div id="logsContainer" class="space-y-2 max-h-72 overflow-y-auto pr-1">
+                    <!-- Logs dynamically injected here -->
+                </div>
+            </div>
+
+            <!-- Stats Chart (1 col) -->
+            <div class="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 space-y-4 flex flex-col justify-between">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-800 flex items-center space-x-2 mb-4">
+                        <i data-lucide="bar-chart-2" class="w-5 h-5 text-blue-500"></i>
+                        <span>近 7 日趨勢</span>
+                    </h2>
+                    <div class="relative h-48 w-full">
+                        <canvas id="weeklyChart"></canvas>
+                    </div>
+                </div>
+                <div class="text-center pt-2 border-t border-slate-100">
+                    <p class="text-xs text-slate-400">每天補充足夠水分有助促進新陳代謝！</p>
+                </div>
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- Custom Water Input Modal -->
+    <div id="customModal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl space-y-4">
+            <h3 class="text-lg font-bold text-slate-800">自訂飲水量</h3>
+            <div>
+                <label for="customAmountInput" class="block text-xs font-semibold text-slate-500 mb-1">請輸入喝水量 (ml)</label>
+                <input type="number" id="customAmountInput" placeholder="例如: 250" min="10" step="10" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800 font-medium">
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+                <button onclick="closeCustomModal()" class="px-4 py-2 rounded-lg text-slate-600 text-sm font-medium hover:bg-slate-100 transition">取消</button>
+                <button onclick="submitCustomWater()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition">確認新增</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Goal Setting Modal -->
+    <div id="goalModal" class="fixed inset-0 bg-slate-900/40 backdrop-blur-sm hidden items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-2xl p-6 max-w-sm w-full shadow-xl space-y-4">
+            <h3 class="text-lg font-bold text-slate-800">修改每日目標</h3>
+            <div>
+                <label for="targetGoalInput" class="block text-xs font-semibold text-slate-500 mb-1">每日目標飲水量 (ml)</label>
+                <input type="number" id="targetGoalInput" placeholder="例如: 2000" min="500" step="100" class="w-full px-4 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-800 font-medium">
+            </div>
+            <div class="flex justify-end space-x-2 pt-2">
+                <button onclick="closeGoalModal()" class="px-4 py-2 rounded-lg text-slate-600 text-sm font-medium hover:bg-slate-100 transition">取消</button>
+                <button onclick="submitGoalSetting()" class="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium transition">儲存目標</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State Management
+        let dailyGoal = parseInt(localStorage.getItem('water_daily_goal')) || 2000;
+        let waterLogs = JSON.parse(localStorage.getItem('water_logs')) || [];
+
+        // Helper: Format Date Key (YYYY-MM-DD)
+        function getTodayKey() {
+            const now = new Date();
+            return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+        }
+
+        // Initialize Lucide Icons
+        lucide.createIcons();
+
+        // Chart.js Instance
+        let weeklyChartInstance = null;
+
+        // Initialize App
+        document.addEventListener('DOMContentLoaded', () => {
+            updateUI();
+            initChart();
+        });
+
+        // Add Water Entry
+        function addWater(amount) {
+            if (!amount || amount <= 0) return;
+            const now = new Date();
+            const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            
+            const newLog = {
+                id: Date.now(),
+                date: getTodayKey(),
+                time: timeStr,
+                amount: amount
+            };
+
+            waterLogs.unshift(newLog);
+            saveData();
+            updateUI();
+            updateChart();
+        }
+
+        // Delete Water Entry
+        function deleteLog(id) {
+            waterLogs = waterLogs.filter(log => log.id !== id);
+            saveData();
+            updateUI();
+            updateChart();
+        }
+
+        // Save to LocalStorage
+        function saveData() {
+            localStorage.setItem('water_daily_goal', dailyGoal);
+            localStorage.setItem('water_logs', JSON.stringify(waterLogs));
+        }
+
+        // Update Dashboard UI
+        function updateUI() {
+            const todayKey = getTodayKey();
+            const todayLogs = waterLogs.filter(log => log.date === todayKey);
+            const todayTotal = todayLogs.reduce((sum, log) => sum + log.amount, 0);
+
+            // Update amounts
+            document.getElementById('currentAmount').innerText = todayTotal;
+            document.getElementById('targetAmount').innerText = dailyGoal;
+
+            // Calculate percentage
+            const percentage = Math.min(Math.round((todayTotal / dailyGoal) * 100), 100);
+            document.getElementById('progressPercent').innerText = `${percentage}%`;
+            document.getElementById('waterWave').style.height = `${percentage}%`;
+
+            // Remaining text
+            const remaining = dailyGoal - todayTotal;
+            const remainingTextEl = document.getElementById('remainingText');
+            if (remaining > 0) {
+                remainingTextEl.innerText = `還差 ${remaining} ml 達到今日目標！`;
+                remainingTextEl.className = 'text-xs text-slate-500';
+            } else {
+                remainingTextEl.innerText = '太棒了！您已達成今日飲水目標！🎉';
+                remainingTextEl.className = 'text-xs text-emerald-600 font-bold';
+            }
+
+            // Update Logs List
+            const logsContainer = document.getElementById('logsContainer');
+            document.getElementById('logCount').innerText = `${todayLogs.length} 筆記錄`;
+
+            if (todayLogs.length === 0) {
+                logsContainer.innerHTML = `
+                    <div class="text-center py-8 text-slate-400 text-sm">
+                        <i data-lucide="cup-soda" class="w-10 h-10 mx-auto mb-2 stroke-1"></i>
+                        今日尚無喝水紀錄，點擊上方按鈕開始記錄吧！
+                    </div>
+                `;
+            } else {
+                logsContainer.innerHTML = todayLogs.map(log => `
+                    <div class="flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 rounded-xl transition group">
+                        <div class="flex items-center space-x-3">
+                            <div class="w-9 h-9 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center font-bold text-xs">
+                                ${log.amount}ml
+                            </div>
+                            <div>
+                                <p class="text-sm font-semibold text-slate-700">+${log.amount} ml</p>
+                                <p class="text-xs text-slate-400">${log.time}</p>
+                            </div>
+                        </div>
+                        <button onclick="deleteLog(${log.id})" class="text-slate-300 hover:text-red-500 p-1.5 transition">
+                            <i data-lucide="trash-2" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+                `).join('');
+            }
+            lucide.createIcons();
+        }
+
+        // Modal Controls
+        function openCustomInput() {
+            document.getElementById('customAmountInput').value = '';
+            document.getElementById('customModal').classList.remove('hidden');
+            document.getElementById('customModal').classList.add('flex');
+            document.getElementById('customAmountInput').focus();
+        }
+
+        function closeCustomModal() {
+            document.getElementById('customModal').classList.remove('flex');
+            document.getElementById('customModal').classList.add('hidden');
+        }
+
+        function submitCustomWater() {
+            const input = document.getElementById('customAmountInput');
+            const val = parseInt(input.value);
+            if (val && val > 0) {
+                addWater(val);
+                closeCustomModal();
+            }
+        }
+
+        function openGoalModal() {
+            document.getElementById('targetGoalInput').value = dailyGoal;
+            document.getElementById('goalModal').classList.remove('hidden');
+            document.getElementById('goalModal').classList.add('flex');
+            document.getElementById('targetGoalInput').focus();
+        }
+
+        function closeGoalModal() {
+            document.getElementById('goalModal').classList.remove('flex');
+            document.getElementById('goalModal').classList.add('hidden');
+        }
+
+        function submitGoalSetting() {
+            const input = document.getElementById('targetGoalInput');
+            const val = parseInt(input.value);
+            if (val && val >= 500) {
+                dailyGoal = val;
+                saveData();
+                updateUI();
+                closeGoalModal();
+            }
+        }
+
+        // Chart.js Setup for Last 7 Days
+        function getLast7DaysData() {
+            const labels = [];
+            const data = [];
+            
+            for (let i = 6; i >= 0; i--) {
+                const d = new Date();
+                d.setDate(d.getDate() - i);
+                const dateKey = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+                
+                const labelStr = (i === 0) ? '今天' : `${d.getMonth() + 1}/${d.getDate()}`;
+                labels.push(labelStr);
+
+                const dayTotal = waterLogs
+                    .filter(log => log.date === dateKey)
+                    .reduce((sum, log) => sum + log.amount, 0);
+                
+                data.push(dayTotal);
+            }
+            return { labels, data };
+        }
+
+        function initChart() {
+            const ctx = document.getElementById('weeklyChart').getContext('2d');
+            const { labels, data } = getLast7DaysData();
+
+            weeklyChartInstance = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: '飲水量 (ml)',
+                        data: data,
+                        backgroundColor: '#3b82f6',
+                        borderRadius: 6,
+                        borderSkipped: false,
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { display: false },
+                            ticks: { font: { size: 10 } }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            grid: { color: '#f1f5f9' },
+                            ticks: { font: { size: 10 } }
+                        }
+                    }
+                }
+            });
+        }
+
+        function updateChart() {
+            if (!weeklyChartInstance) return;
+            const { labels, data } = getLast7DaysData();
+            weeklyChartInstance.data.labels = labels;
+            weeklyChartInstance.data.datasets[0].data = data;
+            weeklyChartInstance.update();
+        }
+    </script>
+</body>
+</html>

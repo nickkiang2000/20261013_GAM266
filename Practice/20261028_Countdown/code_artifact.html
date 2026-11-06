@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="zh-TW" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>極簡倒數計時器</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts: Inter & JetBrains Mono for clean monospace numbers -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            transition: background-color 0.3s, color 0.3s;
+        }
+        /* Hide scrollbar for clean look */
+        ::-webkit-scrollbar {
+            display: none;
+        }
+        .timer-display {
+            font-size: clamp(4rem, 22vw, 25rem);
+            line-height: 0.9;
+            letter-spacing: -0.05em;
+        }
+        /* Gentle glowing effect for active timer */
+        .glow {
+            text-shadow: 0 0 30px rgba(255, 255, 255, 0.2);
+        }
+        
+        /* 視覺風格設定 */
+        /* 1. 黑曜極簡 */
+        body.theme-obsidian {
+            background-color: #121212;
+            color: #f4f4f5;
+        }
+        body.theme-obsidian .timer-glow {
+            text-shadow: 0 0 40px rgba(255, 255, 255, 0.15);
+        }
+        body.theme-obsidian .btn-primary {
+            background-color: #f4f4f5;
+            color: #121212;
+        }
+
+        /* 2. 日光極簡 */
+        body.theme-light {
+            background-color: #f8fafc;
+            color: #0f172a;
+        }
+        body.theme-light .timer-glow {
+            text-shadow: 0 10px 30px rgba(0, 0, 0, 0.05);
+        }
+        body.theme-light .btn-primary {
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+
+        /* 3. 賽博霓虹 */
+        body.theme-cyber {
+            background-color: #0d0221;
+            color: #00f6ff;
+        }
+        body.theme-cyber .timer-glow {
+            text-shadow: 0 0 20px #00f6ff, 0 0 40px #ff007f;
+        }
+        body.theme-cyber .btn-primary {
+            background-color: #ff007f;
+            color: #ffffff;
+            box-shadow: 0 0 15px #ff007f;
+        }
+
+        /* Modal Blur */
+        .backdrop-blur-custom {
+            backdrop-filter: blur(12px);
+        }
+
+        /* Custom Flash animation on complete */
+        @keyframes alert-flash {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.2; }
+        }
+        .animate-flash {
+            animation: alert-flash 0.8s infinite;
+        }
+    </style>
+</head>
+<body class="theme-obsidian h-full flex flex-col justify-between items-center p-6 select-none overflow-hidden transition-colors duration-500">
+
+    <!-- Top Toolbar -->
+    <header class="w-full max-w-5xl flex justify-between items-center z-10 opacity-60 hover:opacity-100 transition-opacity duration-300">
+        <div class="flex items-center space-x-2 text-sm tracking-widest uppercase font-light">
+            <i class="fa-regular font-bold fa-hourglass-half"></i>
+            <span>TIMER</span>
+        </div>
+        <div class="flex items-center space-x-3 text-xl">
+            <!-- Fullscreen Button -->
+            <button id="fullscreenBtn" title="全螢幕 (F)" class="p-2 hover:bg-white/10 rounded-full transition-colors w-10 h-10 flex items-center justify-center">
+                <i class="fa-solid fa-expand"></i>
+            </button>
+            <!-- Settings Gear Button -->
+            <button id="settingsBtn" title="設定" class="p-2 hover:bg-white/10 rounded-full transition-colors w-10 h-10 flex items-center justify-center">
+                <i class="fa-solid fa-gear"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content Area: Timer Display -->
+    <main class="flex-1 flex flex-col items-center justify-center w-full my-auto">
+        <!-- Displayed Timer Numbers -->
+        <div id="displayContainer" class="cursor-pointer flex items-center justify-center" title="點擊暫停/繼續">
+            <span id="timerDisplay" class="timer-display font-light tracking-tighter tabular-nums timer-glow transition-all duration-300">
+                25:00
+            </span>
+        </div>
+    </main>
+
+    <!-- Bottom Controls Area -->
+    <footer class="w-full max-w-md flex flex-col items-center space-y-4 pb-4">
+        <div class="flex items-center justify-center space-x-6">
+            <!-- Reset Button -->
+            <button id="resetBtn" class="w-14 h-14 rounded-full border border-current/20 hover:bg-white/10 flex items-center justify-center text-lg transition-all active:scale-95 opacity-80 hover:opacity-100" title="重設 (R)">
+                <i class="fa-solid fa-rotate-left"></i>
+            </button>
+
+            <!-- Main Start/Pause Button -->
+            <button id="startPauseBtn" class="btn-primary w-20 h-20 rounded-full flex items-center justify-center text-2xl font-bold shadow-lg transition-all active:scale-95" title="開始/暫停 (Space)">
+                <i class="fa-solid fa-play ml-1" id="playIcon"></i>
+            </button>
+
+            <!-- Mute Toggle Button -->
+            <button id="muteBtn" class="w-14 h-14 rounded-full border border-current/20 hover:bg-white/10 flex items-center justify-center text-lg transition-all active:scale-95 opacity-80 hover:opacity-100" title="切換靜音">
+                <i class="fa-solid fa-volume-high" id="muteIcon"></i>
+            </button>
+        </div>
+        <p class="text-xs opacity-50 font-light tracking-wide">按 [空白鍵] 開始/暫停 · 按 [R] 重設</p>
+    </footer>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-custom hidden">
+        <div class="bg-stone-900 text-stone-100 w-full max-w-md mx-4 rounded-3xl p-6 shadow-2xl border border-stone-800 space-y-6">
+            <!-- Modal Header -->
+            <div class="flex justify-between items-center border-b border-stone-800 pb-4">
+                <h2 class="text-lg font-medium tracking-wider flex items-center gap-2">
+                    <i class="fa-solid fa-sliders text-emerald-400"></i> 設定與風格
+                </h2>
+                <button id="closeSettingsBtn" class="text-stone-400 hover:text-white p-1 rounded-full hover:bg-stone-800 transition">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+
+            <!-- Visual Theme Selection -->
+            <div class="space-y-3">
+                <label class="text-xs font-semibold uppercase tracking-wider text-stone-400">視覺風格與配色</label>
+                <div class="grid grid-cols-3 gap-3">
+                    <button data-theme="theme-obsidian" class="theme-option flex flex-col items-center p-3 rounded-2xl border-2 border-emerald-500 bg-stone-950 hover:border-emerald-400 transition">
+                        <span class="w-6 h-6 rounded-full bg-stone-900 border border-stone-700 mb-2"></span>
+                        <span class="text-xs font-medium">黑曜極簡</span>
+                    </button>
+                    <button data-theme="theme-light" class="theme-option flex flex-col items-center p-3 rounded-2xl border-2 border-transparent bg-stone-800 hover:border-stone-600 transition">
+                        <span class="w-6 h-6 rounded-full bg-slate-100 border border-slate-300 mb-2"></span>
+                        <span class="text-xs font-medium text-stone-300">日光極簡</span>
+                    </button>
+                    <button data-theme="theme-cyber" class="theme-option flex flex-col items-center p-3 rounded-2xl border-2 border-transparent bg-stone-800 hover:border-stone-600 transition">
+                        <span class="w-6 h-6 rounded-full bg-purple-950 border border-cyan-400 mb-2"></span>
+                        <span class="text-xs font-medium text-stone-300">賽博霓虹</span>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Quick Presets -->
+            <div class="space-y-3">
+                <label class="text-xs font-semibold uppercase tracking-wider text-stone-400">快速預設時間</label>
+                <div class="flex flex-wrap gap-2">
+                    <button data-seconds="300" class="preset-btn px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-xs transition">5 分鐘</button>
+                    <button data-seconds="600" class="preset-btn px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-xs transition">10 分鐘</button>
+                    <button data-seconds="900" class="preset-btn px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-xs transition">15 分鐘</button>
+                    <button data-seconds="1500" class="preset-btn px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-xs transition">25 分鐘</button>
+                    <button data-seconds="3600" class="preset-btn px-3 py-1.5 rounded-xl bg-stone-800 hover:bg-stone-700 text-xs transition">1 小時</button>
+                </div>
+            </div>
+
+            <!-- Custom Time Inputs -->
+            <div class="space-y-3">
+                <label class="text-xs font-semibold uppercase tracking-wider text-stone-400">自訂倒數時間</label>
+                <div class="flex items-center justify-center space-x-2 bg-stone-950 py-3 rounded-2xl border border-stone-800">
+                    <div class="flex flex-col items-center">
+                        <input type="number" id="inputHours" min="0" max="99" value="00" class="w-16 text-center bg-transparent text-xl font-bold focus:outline-none border-b border-stone-700 focus:border-emerald-500 pb-1">
+                        <span class="text-[10px] text-stone-500 mt-1">時</span>
+                    </div>
+                    <span class="text-xl font-bold text-stone-500 pb-4">:</span>
+                    <div class="flex flex-col items-center">
+                        <input type="number" id="inputMinutes" min="0" max="59" value="25" class="w-16 text-center bg-transparent text-xl font-bold focus:outline-none border-b border-stone-700 focus:border-emerald-500 pb-1">
+                        <span class="text-[10px] text-stone-500 mt-1">分</span>
+                    </div>
+                    <span class="text-xl font-bold text-stone-500 pb-4">:</span>
+                    <div class="flex flex-col items-center">
+                        <input type="number" id="inputSeconds" min="0" max="59" value="00" class="w-16 text-center bg-transparent text-xl font-bold focus:outline-none border-b border-stone-700 focus:border-emerald-500 pb-1">
+                        <span class="text-[10px] text-stone-500 mt-1">秒</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Confirm Button -->
+            <button id="saveSettingsBtn" class="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-2xl text-sm font-medium transition shadow-lg shadow-emerald-900/40">
+                儲存並套用
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // State variables
+        let totalSeconds = 1500; // Default 25 minutes
+        let remainingSeconds = 1500;
+        let timerInterval = null;
+        let isRunning = false;
+        let isMuted = false;
+        let currentTheme = 'theme-obsidian';
+
+        // DOM Elements
+        const timerDisplay = document.getElementById('timerDisplay');
+        const displayContainer = document.getElementById('displayContainer');
+        const startPauseBtn = document.getElementById('startPauseBtn');
+        const playIcon = document.getElementById('playIcon');
+        const resetBtn = document.getElementById('resetBtn');
+        const muteBtn = document.getElementById('muteBtn');
+        const muteIcon = document.getElementById('muteIcon');
+        const fullscreenBtn = document.getElementById('fullscreenBtn');
+        
+        // Settings Modal Elements
+        const settingsBtn = document.getElementById('settingsBtn');
+        const settingsModal = document.getElementById('settingsModal');
+        const closeSettingsBtn = document.getElementById('closeSettingsBtn');
+        const saveSettingsBtn = document.getElementById('saveSettingsBtn');
+        const inputHours = document.getElementById('inputHours');
+        const inputMinutes = document.getElementById('inputMinutes');
+        const inputSeconds = document.getElementById('inputSeconds');
+
+        // Web Audio API for soft completion sound
+        let audioCtx = null;
+
+        function playBeep() {
+            if (isMuted) return;
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                
+                const times = [0, 0.2, 0.4];
+                times.forEach(delay => {
+                    const osc = audioCtx.createOscillator();
+                    const gain = audioCtx.createGain();
+                    
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(587.33, audioCtx.currentTime + delay);
+                    
+                    gain.gain.setValueAtTime(0, audioCtx.currentTime + delay);
+                    gain.gain.linearRampToValueAtTime(0.3, audioCtx.currentTime + delay + 0.03);
+                    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + delay + 0.18);
+                    
+                    osc.connect(gain);
+                    gain.connect(audioCtx.destination);
+                    
+                    osc.start(audioCtx.currentTime + delay);
+                    osc.stop(audioCtx.currentTime + delay + 0.2);
+                });
+            } catch (e) {
+                console.log('Audio feedback not available');
+            }
+        }
+
+        // Format seconds into HH:MM:SS or MM:SS
+        function formatTime(totalSecs) {
+            const h = Math.floor(totalSecs / 3600);
+            const m = Math.floor((totalSecs % 3600) / 60);
+            const s = totalSecs % 60;
+
+            const pad = num => String(num).padStart(2, '0');
+
+            if (h > 0) {
+                return `${pad(h)}:${pad(m)}:${pad(s)}`;
+            }
+            return `${pad(m)}:${pad(s)}`;
+        }
+
+        // Update display text and HTML page title
+        function updateDisplay() {
+            const formatted = formatTime(remainingSeconds);
+            timerDisplay.textContent = formatted;
+            document.title = `${formatted} - 倒數計時器`;
+        }
+
+        // Timer Logic
+        function startTimer() {
+            if (isRunning) return;
+            if (remainingSeconds <= 0) return;
+
+            isRunning = true;
+            playIcon.classList.remove('fa-play', 'ml-1');
+            playIcon.classList.add('fa-pause');
+
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+
+            timerInterval = setInterval(() => {
+                if (remainingSeconds > 0) {
+                    remainingSeconds--;
+                    updateDisplay();
+                } else {
+                    pauseTimer();
+                    timerDisplay.classList.add('animate-flash', 'text-red-500');
+                    playBeep();
+                }
+            }, 1000);
+        }
+
+        function pauseTimer() {
+            if (!isRunning) return;
+            isRunning = false;
+            clearInterval(timerInterval);
+            playIcon.classList.remove('fa-pause');
+            playIcon.classList.add('fa-play', 'ml-1');
+        }
+
+        function toggleTimer() {
+            if (isRunning) {
+                pauseTimer();
+            } else {
+                if (remainingSeconds === 0) {
+                    resetTimer();
+                }
+                startTimer();
+            }
+        }
+
+        function resetTimer() {
+            pauseTimer();
+            timerDisplay.classList.remove('animate-flash', 'text-red-500');
+            remainingSeconds = totalSeconds;
+            updateDisplay();
+        }
+
+        // Modal Logic
+        function openSettings() {
+            pauseTimer();
+            
+            const h = Math.floor(totalSeconds / 3600);
+            const m = Math.floor((totalSeconds % 3600) / 60);
+            const s = totalSeconds % 60;
+
+            inputHours.value = String(h).padStart(2, '0');
+            inputMinutes.value = String(m).padStart(2, '0');
+            inputSeconds.value = String(s).padStart(2, '0');
+
+            settingsModal.classList.remove('hidden');
+        }
+
+        function closeSettings() {
+            settingsModal.classList.add('hidden');
+        }
+
+        function applySettings() {
+            const h = parseInt(inputHours.value) || 0;
+            const m = parseInt(inputMinutes.value) || 0;
+            const s = parseInt(inputSeconds.value) || 0;
+
+            const calculated = h * 3600 + m * 60 + s;
+            if (calculated > 0) {
+                totalSeconds = calculated;
+                remainingSeconds = calculated;
+                timerDisplay.classList.remove('animate-flash', 'text-red-500');
+                updateDisplay();
+            }
+
+            closeSettings();
+        }
+
+        // Theme Switcher Logic
+        function setTheme(themeName) {
+            document.body.classList.remove('theme-obsidian', 'theme-light', 'theme-cyber');
+            document.body.classList.add(themeName);
+            currentTheme = themeName;
+
+            // Update modal active button state
+            document.querySelectorAll('.theme-option').forEach(btn => {
+                if (btn.dataset.theme === themeName) {
+                    btn.classList.add('border-emerald-500');
+                    btn.classList.remove('border-transparent');
+                } else {
+                    btn.classList.remove('border-emerald-500');
+                    btn.classList.add('border-transparent');
+                }
+            });
+        }
+
+        // Fullscreen Toggle
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(err => console.log(err));
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                }
+            }
+        }
+
+        // Event Listeners
+        startPauseBtn.addEventListener('click', toggleTimer);
+        displayContainer.addEventListener('click', toggleTimer);
+        resetBtn.addEventListener('click', resetTimer);
+
+        muteBtn.addEventListener('click', () => {
+            isMuted = !isMuted;
+            if (isMuted) {
+                muteIcon.classList.remove('fa-volume-high');
+                muteIcon.classList.add('fa-volume-xmark', 'opacity-50');
+            } else {
+                muteIcon.classList.remove('fa-volume-xmark', 'opacity-50');
+                muteIcon.classList.add('fa-volume-high');
+            }
+        });
+
+        fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+        // Modal Handlers
+        settingsBtn.addEventListener('click', openSettings);
+        closeSettingsBtn.addEventListener('click', closeSettings);
+        saveSettingsBtn.addEventListener('click', applySettings);
+
+        // Theme selector click events
+        document.querySelectorAll('.theme-option').forEach(btn => {
+            btn.addEventListener('click', () => {
+                setTheme(btn.dataset.theme);
+            });
+        });
+
+        // Preset buttons in modal
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const secs = parseInt(e.target.dataset.seconds);
+                const h = Math.floor(secs / 3600);
+                const m = Math.floor((secs % 3600) / 60);
+                const s = secs % 60;
+
+                inputHours.value = String(h).padStart(2, '0');
+                inputMinutes.value = String(m).padStart(2, '0');
+                inputSeconds.value = String(s).padStart(2, '0');
+            });
+        });
+
+        // Keyboard Shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (document.activeElement.tagName === 'INPUT') {
+                if (e.key === 'Enter') applySettings();
+                if (e.key === 'Escape') closeSettings();
+                return;
+            }
+
+            if (e.code === 'Space') {
+                e.preventDefault();
+                toggleTimer();
+            } else if (e.code === 'KeyR') {
+                resetTimer();
+            } else if (e.code === 'KeyF') {
+                toggleFullscreen();
+            }
+        });
+
+        // Initial setup
+        updateDisplay();
+    </script>
+</body>
+</html>
