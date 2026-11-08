@@ -6,6 +6,8 @@ const expandedTerms = new Set();
 let showAllTerms = false;
 let playingTermIndexes = new Set();
 let preloadKey = "";
+let loadGeneration = 0;
+let tabReloadTimer = null;
 
 const $ = id => document.getElementById(id);
 const clean = s => String(s || "").replace(/\s+/g, " ").trim();
@@ -262,7 +264,7 @@ async function ensureLocalKnowledgeTerms() {
     version: 5, method: "rule_based_v5_cue_timestamps", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, nativeLanguage:"zh", wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length,
-    defaultDisplayCount:/^zh/i.test(language)?18:60, terms
+    defaultDisplayCount:60, terms
   };
   await chrome.storage.local.set({ [key]: current });
 }
@@ -303,18 +305,18 @@ function renderKnowledgeTerms() {
     return;
   }
   target.className="terms";
+  const detailSlot=document.createElement("div");detailSlot.className="termDetailSlot";
   const cloud=document.createElement("div");cloud.className="termCloud";
-  const displayLimit=showAllTerms?result.terms.length:(result.defaultDisplayCount||30);
+  const displayLimit=showAllTerms?result.terms.length:60;
   result.terms.slice(0,displayLimit).forEach((term,index)=>{
     const tag=document.createElement("button");tag.className="termTag";tag.dataset.termIndex=String(index);
     const weight=Math.max(0,Math.min(1,(Number(term.score)||70)/100));
-    tag.style.fontSize=`${(12+weight*6).toFixed(1)}px`;
+    tag.style.fontSize=`${(11+weight*3).toFixed(1)}px`;
     tag.textContent=term.term;tag.title=`${term.type}・出現 ${term.frequency} 次`;
     if(expandedTerms.has(`${activeVideoId}:${index}`))tag.classList.add("selected");
     if(playingTermIndexes.has(index))tag.classList.add("playing");
     cloud.append(tag);
   });
-  target.append(cloud);
   const selectedIndex=result.terms.findIndex((_,index)=>expandedTerms.has(`${activeVideoId}:${index}`));
   if(selectedIndex>=0){
     const term=result.terms[selectedIndex],detail=document.createElement("article");detail.className="termCard termDetail";
@@ -330,8 +332,12 @@ function renderKnowledgeTerms() {
     const links=document.createElement("div");links.className="termLinks";
     if(wiki.url){const a=document.createElement("a");a.className="wikiLink";a.href=wiki.url;a.target="_blank";a.rel="noopener";a.textContent=wiki.status==="google_fallback"?"Google 搜尋":`${wiki.language}.wikipedia`;links.append(a)}
     for(const occurrence of (term.occurrences||[])){const button=document.createElement("button");button.className="termTime";button.textContent=fmtTime(occurrence.start);button.dataset.seconds=occurrence.start;links.append(button)}
-    detail.append(head,meta,explanation,links);target.append(detail);
+    detail.append(head,meta,explanation,links);detailSlot.append(detail);
+  }else{
+    const placeholder=document.createElement("div");placeholder.className="termDetailPlaceholder";
+    placeholder.textContent="點選下方專有名詞，或播放影片以查看目前提及的詞條。";detailSlot.append(placeholder);
   }
+  target.append(detailSlot,cloud);
   const resolved=result.terms.filter(term=>term.wikipedia?.status && term.wikipedia.status!=="not_queried").length;
   $("termStatus").textContent=`已找出 ${result.terms.length} 個候選；已預載 ${resolved} 個詞條`;
   $("moreTermsBtn").hidden=displayLimit>=result.terms.length;
@@ -347,7 +353,9 @@ async function getActiveTabInfo() {
 }
 
 async function loadData() {
+  const generation=++loadGeneration;
   const info = await getActiveTabInfo();
+  if(generation!==loadGeneration)return;
   if (!info?.videoId) {
     $("videoTitle").textContent = "請先開啟 YouTube 影片";
     $("status").textContent = "未偵測到 YouTube 影片";
@@ -358,6 +366,7 @@ async function loadData() {
   $("videoTitle").textContent = info.title || info.videoId;
   const key = PREFIX + activeVideoId;
   const stored = await chrome.storage.local.get(key);
+  if(generation!==loadGeneration)return;
   activeData = stored[key] || {
     schemaVersion:4, video:{videoId:activeVideoId,title:info.title,url:info.url},
     transcript:{sourceType:"none",completeness:"not_captured",segments:[]}, liveObservations:[]
@@ -486,6 +495,21 @@ chrome.runtime.onMessage.addListener(msg => {
     setTimeout(loadData,400);
   }
 });
+function scheduleTabReload(){
+  clearTimeout(tabReloadTimer);
+  tabReloadTimer=setTimeout(()=>{
+    loadGeneration++;
+    activeVideoId="";activeData=null;expandedTerms.clear();playingTermIndexes.clear();preloadKey="";showAllTerms=false;
+    $("videoTitle").textContent="正在切換影片…";
+    $("transcriptSourceLabel").textContent="目前處理逐字稿：正在偵測新分頁";
+    $("termList").className="terms empty";$("termList").textContent="正在載入此影片的專有名詞…";
+    loadData();
+  },150);
+}
+chrome.tabs.onActivated?.addListener(scheduleTabReload);
+chrome.tabs.onUpdated?.addListener((tabId,changeInfo,tab)=>{
+  if(tab?.active&&(changeInfo.url||changeInfo.status==="complete"))scheduleTabReload();
+});
 async function syncPlaybackTerm(){
   if(!activeVideoId||!activeData?.knowledgeTerms?.terms?.length)return;
   const tabs=await chrome.tabs.query({active:true,currentWindow:true}),tab=tabs[0];if(!tab?.id)return;
@@ -502,7 +526,7 @@ async function syncPlaybackTerm(){
   playingTermIndexes=nextSet;
   if(active.length){
     const index=active.sort((a,b)=>Math.abs(now-a.start)-Math.abs(now-b.start))[0].index;
-    if(index>=(activeData.knowledgeTerms.defaultDisplayCount||30))showAllTerms=true;
+    if(index>=60)showAllTerms=true;
     expandedTerms.clear();expandedTerms.add(`${activeVideoId}:${index}`)
   }
   renderKnowledgeTerms();

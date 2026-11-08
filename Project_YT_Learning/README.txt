@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.9.0
+YouTube Knowledge & Investment Immersion — Extension 0.10.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.9.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有 AI API、沒有後端；字幕與候選詞保存在本機 Chrome Storage。只有使用者展開某一候選詞時，該詞會送至 Wikipedia 查詢，完整字幕不會送出。
 
+
+0.10.0 Tab-safe Knowledge Focus：監聽瀏覽器分頁啟用與作用中分頁 URL 更新；切換影片時立即清空舊畫面並載入新 videoId。每次載入帶世代編號，舊分頁較晚完成的非同步結果無法覆蓋新分頁。中文與非中文統一先顯示 60 個候選。詞條詳情移到文字雲上方並固定 190px 高度、內容內部捲動，避免不同摘要長度造成整體抖動；標籤字體與間距同步縮小。
 
 0.9.0 Live Track + Cue Highlight：播放器收到不同原文／翻譯字幕 payload 時，立即以最新請求取代現有逐字稿並重建詞雲，不再要求重新整理頁面；修正手動重新檢查的訊息名稱。專有名詞改以原始字幕 cue 記錄每一次出現時間，同時出現的多個詞可一起高亮，詳細卡片選擇最接近目前播放時間者。詞雲依首次出現時間排列，新增 Sudan／蘇丹。主畫面移除三組技術計數、完整逐字稿與即時觀察，重新檢查、JSON、匯入和診斷集中到頁尾工具區。
 
