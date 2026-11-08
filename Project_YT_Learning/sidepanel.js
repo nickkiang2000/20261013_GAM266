@@ -1,338 +1,188 @@
-const $ = (id) => document.getElementById(id);
-const statusText = $("statusText");
-const statusDot = $("statusDot");
-const captionList = $("captionList");
-const emptyState = $("emptyState");
+const PREFIX = "ytki03:";
+let activeVideoId = "";
+let activeData = null;
 
-let activeTabId = null;
-let currentVideo = { videoId: "", title: "", url: "" };
-let sessions = {};
-let activeSession = null;
+const $ = id => document.getElementById(id);
+const clean = s => String(s || "").replace(/\s+/g, " ").trim();
 
-function blankSession(video) {
-  return {
-    video: video || { videoId: "", title: "", url: "" },
-    captionTrack: {
-      language: $("languageInput").value.trim() || null,
-      sourceType: "mixed",
-      sourceMethod: "visible_dom",
-      completeness: "partial"
-    },
-    segments: [],
-    updatedAt: new Date().toISOString()
-  };
+function secondsFromTimestamp(s) {
+  const m = String(s).trim().match(/^(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?:[.,](\d+))?$/);
+  if (!m) return null;
+  const h = Number(m[1] || 0), min = Number(m[2]), sec = Number(m[3]);
+  if (min > 59 || sec > 59) return null;
+  return h*3600 + min*60 + sec + (m[4] ? Number("0."+m[4]) : 0);
 }
 
-function sessionKey(videoId) {
-  return videoId || "__no_video__";
+// Handles YouTube's copied UI text where the visible timestamp is concatenated
+// with an accessible/localized label, e.g. "3:103 分 10 秒字幕".
+function parseYouTubeCopiedLine(line) {
+  const s = String(line || "").trim();
+  const m = s.match(/^(\d{1,2}):(\d{2})(?:\s*(\d{1,2})\s*分\s*(\d{1,2})\s*秒|\s*(\d{1,2})\s*秒)?\s*(.*)$/u);
+  if (!m) return null;
+  const mm = Number(m[1]), ss = Number(m[2]);
+  if (ss > 59) return null;
+  // The visible m:ss is authoritative; the duplicated localized label is discarded.
+  const text = clean(m[7] || m[6] || m[5] || "");
+  if (!text) return null;
+  return { start: mm*60+ss, end:null, duration:null, text };
 }
 
-function getSession() {
-  const key = sessionKey(currentVideo.videoId);
-  if (!sessions[key]) sessions[key] = blankSession(currentVideo);
-  sessions[key].video = { ...sessions[key].video, ...currentVideo };
-  return sessions[key];
-}
-
-async function persist() {
-  await chrome.storage.local.set({ ytKnowledgeSessions: sessions });
-}
-
-async function loadSaved() {
-  const saved = await chrome.storage.local.get("ytKnowledgeSessions");
-  sessions = saved.ytKnowledgeSessions || {};
-}
-
-function setStatus(text, ok = false) {
-  statusText.textContent = text;
-  statusDot.classList.toggle("ok", ok);
-}
-
-function formatTime(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return "—";
-  const total = Math.floor(seconds);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  return h > 0
-    ? `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
-    : `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
-}
-
-function render() {
-  const session = getSession();
-  const segments = session.segments || [];
-  $("videoId").textContent = currentVideo.videoId || "—";
-  $("videoTitle").textContent = currentVideo.title || "—";
-  $("count").textContent = String(segments.length);
-  $("shownCount").textContent = `${segments.length} 筆`;
-  captionList.replaceChildren();
-  emptyState.hidden = segments.length > 0;
-
-  for (const item of segments.slice(-300)) {
-    const li = document.createElement("li");
-    const time = document.createElement("button");
-    time.className = "time";
-    time.type = "button";
-    time.textContent = item.timestamp || formatTime(item.start);
-    time.title = "跳至字幕時間";
-    time.addEventListener("click", async () => {
-      if (activeTabId && item.sourceMethod === "visible_dom") {
-        await chrome.tabs.sendMessage(activeTabId, {
-          type: "YT_CAPTION_SEEK", seconds: item.start
-        }).catch(() => {});
-      } else if (currentVideo.url) {
-        const url = new URL(currentVideo.url);
-        if (Number.isFinite(item.start)) url.searchParams.set("t", `${Math.floor(item.start)}s`);
-        await chrome.tabs.update(activeTabId, { url: url.toString() }).catch(() => {});
-      }
-    });
-    const text = document.createElement("span");
-    text.className = "caption-text";
-    text.textContent = item.text;
-    li.append(time, text);
-    captionList.append(li);
-  }
-}
-
-function normalizeText(text) {
-  return (text || "").replace(/\s+/g, " ").trim();
-}
-
-function parseTimestamp(value) {
-  const match = value.trim().match(/(?:(\d{1,2}):)?(\d{1,2}):(\d{2})[,.](\d{1,3})/);
-  if (!match) return null;
-  const hours = Number(match[1] || 0);
-  const minutes = Number(match[2]);
-  const seconds = Number(match[3]);
-  const millis = Number((match[4] || "0").padEnd(3, "0").slice(0, 3));
-  return hours * 3600 + minutes * 60 + seconds + millis / 1000;
-}
-
-function parseSubtitleFile(raw, filename = "") {
-  const content = raw.replace(/^\uFEFF/, "").replace(/\r/g, "");
-  const isVtt = /^WEBVTT/m.test(content);
-  const blocks = content.split(/\n\s*\n/);
+function parseTranscript(raw) {
+  const text = String(raw || "").replace(/\r/g, "").trim();
+  if (!text) return [];
+  const lines = text.split("\n").map(x => x.trim()).filter(Boolean);
   const out = [];
-
-  for (const block of blocks) {
-    const lines = block.split("\n").map(x => x.trim()).filter(Boolean);
-    const timingIndex = lines.findIndex(line => line.includes("-->"));
-    if (timingIndex >= 0) {
-      const timing = lines[timingIndex].split("-->");
-      const start = parseTimestamp(timing[0]);
-      const end = timing[1] ? parseTimestamp(timing[1].trim().split(/\s+/)[0]) : null;
-      const text = normalizeText(lines.slice(timingIndex + 1)
-        .join(" ").replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " "));
-      if (text && start !== null) {
-        out.push({
-          text, start, end,
-          duration: end !== null ? Math.max(0, end - start) : null,
-          timestamp: formatTime(start)
-        });
-      }
+  let srtMode = false;
+  for (let i=0; i<lines.length; i++) {
+    const line = lines[i];
+    const timeLine = line.match(/^(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)\s*-->\s*(\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?)/);
+    if (timeLine) {
+      srtMode = true;
+      const start = secondsFromTimestamp(timeLine[1]), end = secondsFromTimestamp(timeLine[2]);
+      const body = [];
+      while (i+1 < lines.length && !/^\d+$/.test(lines[i+1]) && !/^\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?\s*-->/.test(lines[i+1])) body.push(lines[++i]);
+      const value = clean(body.join(" "));
+      if (start !== null && value) out.push({start,end,duration:end===null?null:end-start,text:value});
       continue;
     }
-  }
-
-  if (out.length) return { segments: out, format: isVtt ? "vtt" : "srt" };
-
-  // Plain transcript: accept lines with [00:12] / 00:12 / 01:02:03 prefixes.
-  for (const line of content.split("\n")) {
-    const match = line.trim().match(/^\[?((?:\d{1,2}:)?\d{1,2}:\d{2}(?:[,.]\d{1,3})?)\]?\s+(.+)$/);
-    if (match) {
-      const start = parseTimestamp(match[1].replace(",", "."));
-      const text = normalizeText(match[2]);
-      if (start !== null && text) out.push({
-        text, start, end: null, duration: null, timestamp: formatTime(start)
-      });
+    const yt = parseYouTubeCopiedLine(line);
+    if (yt) { out.push(yt); continue; }
+    const prefix = line.match(/^\[?(\d{1,2}:\d{2}(?::\d{2})?)\]?\s+(.+)$/);
+    if (prefix) {
+      const start = secondsFromTimestamp(prefix[1]);
+      if (start !== null) { out.push({start,end:null,duration:null,text:clean(prefix[2])}); continue; }
     }
+    // Preserve plain text as one segment only when no timestamped cues were parsed.
   }
-  if (out.length) return { segments: out, format: "timestamped_text" };
-
-  const text = normalizeText(content);
-  if (!text) throw new Error("檔案沒有可匯入的文字。");
-  return {
-    segments: [{ text, start: null, end: null, duration: null, timestamp: "—" }],
-    format: "plain_text"
-  };
+  if (out.length) {
+    const unique = new Map();
+    for (const seg of out) unique.set(`${seg.start}|${seg.text}`, seg);
+    return [...unique.values()].sort((a,b)=>a.start-b.start).map((s,i)=>({id:`imp-${i+1}`,...s,sourceType:"user_pasted_transcript"}));
+  }
+  return [{id:"imp-1",start:null,end:null,duration:null,text:clean(lines.join(" ")),sourceType:"user_pasted_plain_text"}];
 }
 
-function mergeSegments(existing, incoming, sourceMethod, sourceType) {
-  const seen = new Set(existing.map(x =>
-    `${x.sourceMethod}|${x.start ?? "na"}|${normalizeText(x.text).toLocaleLowerCase()}`
-  ));
-  const additions = [];
-  for (const segment of incoming) {
-    const text = normalizeText(segment.text);
-    if (!text) continue;
-    const key = `${sourceMethod}|${segment.start ?? "na"}|${text.toLocaleLowerCase()}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    additions.push({
-      id: crypto.randomUUID(),
-      text,
-      start: segment.start ?? null,
-      end: segment.end ?? null,
-      duration: segment.duration ?? null,
-      timestamp: segment.timestamp || (segment.start != null ? formatTime(segment.start) : "—"),
-      sourceMethod,
-      sourceType,
-      observedAt: new Date().toISOString()
-    });
-  }
-  return additions;
+function fmtTime(sec) {
+  if (!Number.isFinite(sec)) return "—";
+  sec = Math.floor(sec);
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  return h ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}` : `${m}:${String(s).padStart(2,"0")}`;
 }
 
-async function getActiveYouTubeTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
-  if (!tab?.id || !tab.url?.startsWith("https://www.youtube.com/")) {
-    activeTabId = null;
-    currentVideo = { videoId: "", title: "", url: "" };
-    setStatus("請先切換到 YouTube 影片頁面", false);
-    render();
+function renderSegments(target, segments, isObservation=false) {
+  target.innerHTML = "";
+  if (!segments?.length) {
+    target.className = "segments empty";
+    target.textContent = isObservation ? "尚無觀察紀錄" : "尚未取得逐字稿";
     return;
   }
-  activeTabId = tab.id;
-  try {
-    const state = await chrome.tabs.sendMessage(tab.id, { type: "YT_CAPTION_GET_STATE" });
-    currentVideo = state.video || {
-      videoId: new URL(tab.url).searchParams.get("v") || "",
-      title: tab.title || "",
-      url: tab.url
-    };
-    getSession();
-    setStatus("已連線；可觀察字幕或匯入逐字稿", true);
-    await persist();
-    render();
-  } catch {
-    currentVideo = {
-      videoId: new URL(tab.url).searchParams.get("v") || "",
-      title: tab.title || "",
-      url: tab.url
-    };
-    setStatus("無法連線；請重新載入 YouTube 分頁", false);
-    render();
-  }
-}
-
-async function importSegments(segments, sourceMethod, sourceType, language) {
-  if (!currentVideo.videoId) {
-    alert("請先切換到一支 YouTube 影片，再匯入字幕。");
-    return;
-  }
-  const session = getSession();
-  const additions = mergeSegments(session.segments, segments, sourceMethod, sourceType);
-  session.segments.push(...additions);
-  if (language) session.captionTrack.language = language;
-  session.captionTrack.sourceMethod = sourceMethod;
-  session.captionTrack.sourceType = sourceType;
-  session.captionTrack.completeness = sourceMethod === "user_file_import" || sourceMethod === "user_paste"
-    ? "user_provided_not_verified" : "partial";
-  session.updatedAt = new Date().toISOString();
-  await persist();
-  render();
-  setStatus(`匯入完成：新增 ${additions.length} 段`, true);
-}
-
-chrome.runtime.onMessage.addListener(async (message, sender) => {
-  if (!message) return;
-  if (message.type === "YT_CAPTION_RESET" && sender.tab?.id === activeTabId) {
-    const previousId = currentVideo.videoId;
-    if (previousId) await persist();
-    currentVideo = message.video || { videoId: "", title: "", url: "" };
-    getSession();
-    await persist();
-    setStatus("影片已切換；舊影片資料已保留", true);
-    render();
-  }
-  if (message.type === "YT_CAPTION_UPDATE" && sender.tab?.id === activeTabId) {
-    currentVideo = message.video || currentVideo;
-    const session = getSession();
-    const item = message.item;
-    const previous = session.segments[session.segments.length - 1];
-    const normalized = normalizeText(item.text).toLocaleLowerCase();
-    if (previous && previous.sourceMethod === "visible_dom"
-        && normalizeText(previous.text).toLocaleLowerCase() === normalized
-        && item.start != null && previous.start != null
-        && Math.abs(item.start - previous.start) <= 1.5) {
-      previous.repeatObservations = (previous.repeatObservations || 1) + 1;
-      previous.lastObservedAt = item.observedAt;
-    } else {
-      session.segments.push({
-        id: item.id,
-        text: item.text,
-        start: item.start,
-        end: null,
-        duration: null,
-        timestamp: item.timestamp,
-        sourceMethod: "visible_dom",
-        sourceType: "youtube_rendered_caption",
-        observedAt: item.observedAt,
-        repeatObservations: 1
-      });
-    }
-    if (session.segments.length > 5000) session.segments = session.segments.slice(-5000);
-    session.captionTrack.sourceMethod = "visible_dom";
-    session.captionTrack.completeness = "partial";
-    session.updatedAt = new Date().toISOString();
-    await persist();
-    setStatus("正在觀察 YouTube 可見字幕", true);
-    render();
-  }
-});
-
-$("refreshBtn").addEventListener("click", getActiveYouTubeTab);
-$("clearBtn").addEventListener("click", async () => {
-  if (!confirm("確定清除目前影片的字幕資料？此操作無法復原。")) return;
-  delete sessions[sessionKey(currentVideo.videoId)];
-  await persist();
-  render();
-  setStatus("目前影片資料已清除", true);
-});
-
-$("importTextBtn").addEventListener("click", async () => {
-  try {
-    const parsed = parseSubtitleFile($("transcriptInput").value, "pasted.txt");
-    await importSegments(parsed.segments, "user_paste", parsed.format, $("languageInput").value.trim());
-    $("transcriptInput").value = "";
-  } catch (error) { alert(error.message || "匯入失敗"); }
-});
-
-$("fileInput").addEventListener("change", async (event) => {
-  const file = event.target.files?.[0];
-  if (!file) return;
-  try {
-    const parsed = parseSubtitleFile(await file.text(), file.name);
-    await importSegments(parsed.segments, "user_file_import", parsed.format, $("languageInput").value.trim());
-  } catch (error) { alert(error.message || "匯入失敗"); }
-  event.target.value = "";
-});
-
-$("exportBtn").addEventListener("click", () => {
-  const session = getSession();
-  const output = {
-    schemaVersion: "0.2",
-    exportedAt: new Date().toISOString(),
-    video: session.video,
-    captionTrack: session.captionTrack,
-    segments: session.segments
-  };
-  const blob = new Blob([JSON.stringify(output, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `youtube-captions-${currentVideo.videoId || "transcript"}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-(async function init() {
-  await loadSaved();
-  await getActiveYouTubeTab();
-  chrome.tabs.onActivated.addListener(getActiveYouTubeTab);
-  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-    if (tabId === activeTabId && changeInfo.status === "complete") getActiveYouTubeTab();
+  target.className = "segments";
+  const frag = document.createDocumentFragment();
+  const display = [...segments].sort((a,b) => {
+    const aa = Number.isFinite(a.start) ? a.start : Number.isFinite(a.observedPlaybackTime) ? a.observedPlaybackTime : Infinity;
+    const bb = Number.isFinite(b.start) ? b.start : Number.isFinite(b.observedPlaybackTime) ? b.observedPlaybackTime : Infinity;
+    return aa-bb;
   });
-})();
+  for (const seg of display) {
+    const row = document.createElement("div"); row.className = "segment";
+    const time = document.createElement("button"); time.className = "time";
+    time.textContent = fmtTime(Number.isFinite(seg.start) ? seg.start : seg.observedPlaybackTime);
+    if (Number.isFinite(seg.start)) time.addEventListener("click", () => chrome.tabs.query({active:true,currentWindow:true}, tabs => {
+      if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id,{type:"YTKI_SEEK",seconds:seg.start});
+    }));
+    else time.disabled = true;
+    const body = document.createElement("div"); body.className = "segmentText"; body.textContent = seg.text || "";
+    row.append(time,body);
+    if (isObservation && seg.repeatObservations > 1) {
+      const count = document.createElement("span"); count.className = "repeat"; count.textContent = `×${seg.repeatObservations}`; row.append(count);
+    }
+    frag.append(row);
+  }
+  target.append(frag);
+}
+
+async function getActiveTabInfo() {
+  const tabs = await chrome.tabs.query({active:true,currentWindow:true});
+  const tab = tabs[0];
+  if (!tab?.id || !tab.url?.includes("youtube.com/watch")) return null;
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tab.id,{type:"YT_GET_VIDEO_INFO"},res=>resolve(chrome.runtime.lastError?null:res));
+  });
+}
+
+async function loadData() {
+  const info = await getActiveTabInfo();
+  if (!info?.videoId) {
+    $("videoTitle").textContent = "請先開啟 YouTube 影片";
+    $("status").textContent = "未偵測到 YouTube 影片";
+    return;
+  }
+  activeVideoId = info.videoId;
+  $("videoTitle").textContent = info.title || info.videoId;
+  const key = PREFIX + activeVideoId;
+  const stored = await chrome.storage.local.get(key);
+  activeData = stored[key] || {
+    schemaVersion:3, video:{videoId:activeVideoId,title:info.title,url:info.url},
+    transcript:{sourceType:"none",completeness:"not_captured",segments:[]}, liveObservations:[]
+  };
+  $("transcriptCount").textContent = activeData.transcript?.segments?.length || 0;
+  $("observationCount").textContent = activeData.liveObservations?.length || 0;
+  renderSegments($("transcriptList"),activeData.transcript?.segments || []);
+  renderSegments($("observationList"),activeData.liveObservations || [],true);
+  const status = activeData.transcript?.completeness || "等待自動擷取";
+  $("status").textContent = status === "captured_from_rendered_panel_not_independently_verified"
+    ? `已擷取 ${activeData.transcript.segments.length} 段（待測試完整性）`
+    : status;
+}
+
+$("refreshBtn").addEventListener("click", async () => {
+  const info = await getActiveTabInfo();
+  if (!info?.videoId) return;
+  $("status").textContent = "正在重新檢查…";
+  chrome.tabs.query({active:true,currentWindow:true}, tabs => {
+    if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id,{type:"YT_RECAPTURE",videoId:info.videoId},()=>setTimeout(loadData,1200));
+  });
+});
+
+$("importBtn").addEventListener("click", async () => {
+  const parsed = parseTranscript($("pasteArea").value);
+  if (!activeVideoId || !parsed.length) { $("importStatus").textContent = "沒有可匯入的內容。"; return; }
+  const key = PREFIX + activeVideoId;
+  const stored = await chrome.storage.local.get(key);
+  const data = stored[key] || activeData || {schemaVersion:3,video:{videoId:activeVideoId,title:$("videoTitle").textContent},liveObservations:[]};
+  data.transcript = {
+    sourceType:"user_pasted_transcript",
+    sourceMethod:"user_paste",
+    language:null,
+    completeness:"user_provided_not_verified",
+    capturedAt:new Date().toISOString(),
+    segments:parsed
+  };
+  await chrome.storage.local.set({[key]:data});
+  $("importStatus").textContent = `成功解析 ${parsed.length} 段；即時觀察紀錄未刪除。`;
+  $("pasteArea").value = "";
+  await loadData();
+});
+
+$("exportBtn").addEventListener("click", async () => {
+  if (!activeVideoId) return;
+  const key = PREFIX + activeVideoId;
+  const stored = await chrome.storage.local.get(key);
+  const data = stored[key] || activeData;
+  if (!data) return;
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href=url; a.download=`youtube-captions-${activeVideoId}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+
+chrome.storage.onChanged.addListener((changes,area) => {
+  if (area === "local" && activeVideoId && changes[PREFIX+activeVideoId]) loadData();
+});
+chrome.runtime.onMessage.addListener(msg => {
+  if (msg?.type === "YT_AUTO_CAPTURE_STATUS" && msg.videoId === activeVideoId) {
+    $("status").textContent = msg.status + (msg.detail ? `：${msg.detail}` : "");
+    setTimeout(loadData,400);
+  }
+});
+loadData();

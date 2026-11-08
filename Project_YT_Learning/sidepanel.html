@@ -2,57 +2,43 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>YouTube Knowledge 0.2</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>YouTube Knowledge Panel</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <header>
-    <h1>YouTube 知識學習器</h1>
-    <p class="version">Phase 0.2 · 字幕整理與匯入原型</p>
+    <div class="brand">YouTube Knowledge & Investment Immersion</div>
+    <div id="videoTitle" class="muted">等待 YouTube 影片…</div>
+    <div id="status" class="status">等待影片資訊</div>
   </header>
-
-  <section class="status-card">
-    <div class="status-line"><span id="statusDot" class="dot"></span><strong id="statusText">等待 YouTube 影片…</strong></div>
-    <div class="meta"><span>Video ID</span><code id="videoId">—</code></div>
-    <div class="meta"><span>影片</span><span id="videoTitle" class="title-value">—</span></div>
-    <div class="meta"><span>目前片段</span><strong id="count">0</strong></div>
-  </section>
-
-  <section class="notice">
-    <strong>資料來源說明</strong>
-    <p>即時觀察只記錄畫面當下呈現的字幕，不等於完整逐字稿。完整字幕請使用者自行從有權使用的來源提供 SRT、VTT、TXT，或貼上 YouTube 原生逐字稿。</p>
-  </section>
-
-  <section class="panel">
-    <h2>字幕匯入</h2>
-    <label for="languageInput">字幕語言（例如 ja、en、zh-TW）</label>
-    <input id="languageInput" type="text" placeholder="未指定" maxlength="20">
-    <label for="transcriptInput">貼上逐字稿（可含時間戳）</label>
-    <textarea id="transcriptInput" rows="5" placeholder="貼上從 YouTube 原生逐字稿複製的文字，或帶時間戳的字幕文字…"></textarea>
-    <div class="button-row">
-      <button id="importTextBtn" type="button">匯入貼上的文字</button>
-      <label class="file-button" for="fileInput">選擇字幕檔</label>
-      <input id="fileInput" type="file" accept=".srt,.vtt,.txt,text/plain">
-    </div>
-    <p class="hint">支援 SRT、WebVTT 及一般 TXT。匯入資料會與目前影片建立關聯；請確認目前 YouTube 分頁是正確影片。</p>
-  </section>
-
-  <section class="controls">
-    <button id="refreshBtn" type="button">重新讀取狀態</button>
-    <button id="exportBtn" type="button">匯出 JSON</button>
-    <button id="clearBtn" type="button" class="secondary">清除目前影片資料</button>
-  </section>
-
-  <section>
-    <div class="section-heading"><h2>字幕片段</h2><span id="shownCount">0 筆</span></div>
-    <div id="emptyState" class="empty">尚無字幕。請播放並開啟 CC，或匯入字幕資料。</div>
-    <ol id="captionList" class="caption-list"></ol>
-  </section>
-
-  <footer>
-    <p>資料僅保存在此瀏覽器的 Extension 本機儲存空間，不會自動上傳伺服器。匯入字幕的完整性取決於使用者提供的檔案或文字。</p>
-  </footer>
+  <main>
+    <section class="toolbar">
+      <button id="refreshBtn">重新檢查逐字稿</button>
+      <button id="exportBtn" class="secondary">匯出 JSON</button>
+    </section>
+    <section class="summary">
+      <div><strong id="transcriptCount">0</strong><span>完整逐字稿段落</span></div>
+      <div><strong id="observationCount">0</strong><span>即時觀察紀錄</span></div>
+    </section>
+    <section>
+      <h2>完整逐字稿</h2>
+      <p class="hint">開啟 YouTube 影片後會自動嘗試擷取。若 YouTube 未提供逐字稿，或頁面結構改變，這裡會顯示狀態。</p>
+      <div id="transcriptList" class="segments empty">尚未取得逐字稿</div>
+    </section>
+    <details>
+      <summary>手動貼上逐字稿（備援）</summary>
+      <p class="hint">支援 YouTube 複製格式（例如「3:103 分 10 秒字幕文字」）、SRT、VTT，以及一般純文字。匯入後會取代本影片的主要逐字稿，但不會刪除即時觀察紀錄。</p>
+      <textarea id="pasteArea" rows="7" placeholder="在此貼上 YouTube 逐字稿…"></textarea>
+      <button id="importBtn">解析並匯入</button>
+      <div id="importStatus" class="hint"></div>
+    </details>
+    <details>
+      <summary>即時字幕觀察（備援／除錯）</summary>
+      <div id="observationList" class="segments empty">尚無觀察紀錄</div>
+    </details>
+    <footer>資料僅儲存在本機 Chrome Storage；不會上傳至外部伺服器。</footer>
+  </main>
   <script src="sidepanel.js"></script>
 </body>
 </html>

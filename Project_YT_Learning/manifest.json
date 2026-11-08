@@ -1,25 +1,34 @@
 {
   "manifest_version": 3,
-  "name": "YouTube Knowledge & Investment Immersion - Phase 0.2",
-  "version": "0.2.0",
-  "description": "Capture visible YouTube captions, import user-provided transcripts, normalize segments, and export structured JSON locally.",
-  "minimum_chrome_version": "114",
-  "permissions": ["sidePanel", "storage"],
-  "host_permissions": ["https://www.youtube.com/*"],
+  "name": "YouTube Knowledge & Investment Immersion",
+  "version": "0.3.0",
+  "description": "Automatically captures YouTube transcript panel text and observes visible captions locally.",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
+  "action": {
+    "default_title": "Open learning panel"
+  },
   "side_panel": {
     "default_path": "sidepanel.html"
   },
-  "action": {
-    "default_title": "Open YouTube Knowledge side panel"
-  }
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
