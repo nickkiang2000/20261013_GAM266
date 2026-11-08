@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.3.3.0
+YouTube Knowledge & Investment Immersion — Extension 0.3.4.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.3.3.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有外部網路請求、沒有 AI API、沒有後端；字幕資料保存在本機 Chrome Storage。
 
+
+0.3.4 新增：逐字稿入口會在 YouTube SPA 與播放器載入期間持續等待最多 18 秒，不再只檢查一次。失敗時狀態欄會顯示字幕軌／按鈕／面板／字幕列／video readyState 摘要；完整安全診斷寫入 captureDiagnostics 並隨 JSON 匯出，側欄亦可展開查看。診斷不包含字幕本文、Cookie 或字幕簽名網址。
 
 0.3.3 修正：忽略 YouTube 預先建立但仍隱藏的逐字稿面板與隱藏按鈕；必要時先展開影片說明，再點擊真正可見的「顯示轉錄稿」。這會修正「按到隱藏按鈕後等待逾時」造成的 transcript_not_loaded。
 

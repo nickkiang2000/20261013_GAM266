@@ -129,6 +129,9 @@ async function loadData() {
   $("observationCount").textContent = activeData.liveObservations?.length || 0;
   renderSegments($("transcriptList"),activeData.transcript?.segments || []);
   renderSegments($("observationList"),activeData.liveObservations || [],true);
+  $("diagnostics").textContent = activeData.captureDiagnostics?.latest
+    ? JSON.stringify(activeData.captureDiagnostics.latest, null, 2)
+    : "尚無診斷資料";
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;

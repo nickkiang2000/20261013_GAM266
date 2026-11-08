@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Knowledge & Investment Immersion",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Captures complete YouTube transcripts with a caption-track fast path and verified panel fallback.",
   "permissions": [
     "storage",

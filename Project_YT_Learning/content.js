@@ -11,11 +11,20 @@
   let captureRunning = false;
   let latestCaptionTracks = [];
   let captionTrackWaiters = [];
+  let storageWriteChain = Promise.resolve();
+  const DIAGNOSTIC_VERSION = 1;
+  const EXTENSION_VERSION = "0.3.4";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
   const videoEl = () => document.querySelector("video.html5-main-video") || document.querySelector("video");
   const getTitle = () => (document.querySelector("h1.ytd-watch-metadata")?.innerText || document.title || "").replace(/\s*-\s*YouTube$/, "").trim();
+
+  function queueStorageWrite(task) {
+    const run = storageWriteChain.catch(() => {}).then(task);
+    storageWriteChain = run.catch(() => {});
+    return run;
+  }
 
   // MAIN-world page scripts can see YouTube's player state while an ordinary
   // content script cannot. Treat its messages as untrusted page input and
@@ -96,22 +105,22 @@
   async function tryDirectCaptionTrack() {
     const tracks = await requestCaptionTracks();
     const track = chooseCaptionTrack(tracks);
-    if (!track) return null;
+    if (!track) return { ok: false, reason: "no_safe_caption_track", trackCount: tracks.length };
     const url = new URL(track.baseUrl);
     url.searchParams.set("fmt", "json3");
     try {
       const response = await fetch(url.href, { credentials: "include" });
-      if (!response.ok) return null;
+      if (!response.ok) return { ok: false, reason: "timedtext_http_error", httpStatus: response.status, trackCount: tracks.length };
       const body = await response.text();
       // A current YouTube anti-abuse variant returns HTTP 200 with an empty
       // body. It is a failed fast path, not an empty transcript.
-      if (!body.trim()) return null;
+      if (!body.trim()) return { ok: false, reason: "timedtext_empty_body", httpStatus: response.status, trackCount: tracks.length };
       const segments = segmentsFromJson3(JSON.parse(body));
-      if (!segments.length) return null;
+      if (!segments.length) return { ok: false, reason: "json3_has_no_segments", httpStatus: response.status, trackCount: tracks.length };
       const coverage = transcriptCoverage(segments, Number(videoEl()?.duration) || null);
-      return { segments, coverage, language: track.languageCode || null, trackType: track.kind === "asr" ? "ASR" : "manual" };
-    } catch (_) {
-      return null;
+      return { ok: true, segments, coverage, language: track.languageCode || null, trackType: track.kind === "asr" ? "ASR" : "manual", trackCount: tracks.length };
+    } catch (error) {
+      return { ok: false, reason: "timedtext_fetch_or_parse_error", error: String(error?.message || error).slice(0, 240), trackCount: tracks.length };
     }
   }
 
@@ -166,28 +175,135 @@
   }
 
   async function saveStored(data) {
-    data.updatedAt = new Date().toISOString();
-    await chrome.storage.local.set({ [STORE_PREFIX + data.video.videoId]: data });
+    const key = STORE_PREFIX + data.video.videoId;
+    await queueStorageWrite(async () => {
+      const existing = (await chrome.storage.local.get(key))[key];
+      if (existing) {
+        if (!data.captureDiagnostics && existing.captureDiagnostics) data.captureDiagnostics = existing.captureDiagnostics;
+        if (!data.lastCapture && existing.lastCapture) data.lastCapture = existing.lastCapture;
+        const mergedObservations = new Map();
+        for (const observation of [...(existing.liveObservations || []), ...(data.liveObservations || [])]) {
+          if (observation?.id) mergedObservations.set(observation.id, observation);
+        }
+        data.liveObservations = [...mergedObservations.values()].slice(-5000);
+        const existingTranscriptCount = existing.transcript?.segments?.length || 0;
+        const incomingTranscriptCount = data.transcript?.segments?.length || 0;
+        if (existingTranscriptCount && !incomingTranscriptCount) data.transcript = existing.transcript;
+      }
+      data.updatedAt = new Date().toISOString();
+      await chrome.storage.local.set({ [key]: data });
+    });
     chrome.runtime.sendMessage({ type: "YT_AUTO_CAPTURE_STATUS", videoId: data.video.videoId,
       title: data.video.title, count: data.transcript?.segments?.length || 0,
       status: data.transcript?.completeness || "unknown" }).catch(() => {});
   }
 
-  function setStatus(status, detail = "") {
+  function collectCaptureDiagnostics(stage, extra = {}) {
+    const v = videoEl();
+    const transcriptPattern = /show transcript|transcript|顯示轉錄稿|逐字稿|轉錄稿|文字記錄/i;
+    const buttons = [...document.querySelectorAll("button, tp-yt-paper-button, a, yt-button-shape button")]
+      .filter(el => transcriptPattern.test(normalizeText((el.innerText || "") + " " + (el.getAttribute("aria-label") || ""))))
+      .slice(0, 20)
+      .map(el => ({
+        tag: el.tagName.toLowerCase(),
+        rendered: isRendered(el),
+        disabled: !!el.disabled,
+        text: normalizeText(el.innerText || "").slice(0, 80),
+        ariaLabel: normalizeText(el.getAttribute("aria-label") || "").slice(0, 80)
+      }));
+    const panels = [...document.querySelectorAll("ytd-engagement-panel-section-list-renderer")]
+      .filter(el => /transcript/i.test(el.getAttribute("target-id") || ""))
+      .slice(0, 10)
+      .map(el => ({
+        targetId: el.getAttribute("target-id") || "",
+        visibility: el.getAttribute("visibility") || "",
+        rendered: isRendered(el),
+        rowCount: el.querySelectorAll("ytd-transcript-segment-renderer, .segment, [class*='transcript-segment']").length
+      }));
+    const expanders = [...document.querySelectorAll(
+      "#description-inline-expander #expand, ytd-text-inline-expander #expand, tp-yt-paper-button#expand"
+    )];
+    const safeTracks = latestCaptionTracks.filter(track => isSafeTimedTextUrl(track.baseUrl));
+    const root = document.querySelector(".ytp-caption-window-container");
+    return {
+      diagnosticVersion: DIAGNOSTIC_VERSION,
+      extensionVersion: EXTENSION_VERSION,
+      stage,
+      capturedAt: new Date().toISOString(),
+      page: {
+        readyState: document.readyState,
+        videoId: videoIdFromUrl(),
+        ytAppPresent: !!document.querySelector("ytd-app"),
+        watchMetadataPresent: !!document.querySelector("ytd-watch-metadata"),
+        descriptionTranscriptSections: document.querySelectorAll("ytd-video-description-transcript-section-renderer").length
+      },
+      video: {
+        present: !!v,
+        readyState: v?.readyState ?? null,
+        duration: Number.isFinite(v?.duration) ? v.duration : null,
+        currentTime: Number.isFinite(v?.currentTime) ? v.currentTime : null,
+        paused: v?.paused ?? null
+      },
+      renderedCaptions: {
+        containerPresent: !!root,
+        segmentCount: root?.querySelectorAll(".ytp-caption-segment").length || 0,
+        hasVisibleText: !!normalizeText(root?.innerText || "")
+      },
+      playerCaptionTracks: {
+        received: latestCaptionTracks.length,
+        safeTimedText: safeTracks.length,
+        languages: [...new Set(latestCaptionTracks.map(track => String(track.languageCode || "")).filter(Boolean))].slice(0, 20),
+        kinds: [...new Set(latestCaptionTracks.map(track => track.kind || "manual"))].slice(0, 10)
+      },
+      transcriptUi: {
+        matchingButtonCount: buttons.length,
+        renderedButtonCount: buttons.filter(button => button.rendered).length,
+        buttons,
+        matchingPanelCount: panels.length,
+        renderedPanelCount: panels.filter(panel => panel.rendered).length,
+        panels,
+        transcriptRendererCount: document.querySelectorAll("ytd-transcript-renderer, ytd-transcript-segment-list-renderer").length,
+        renderedRowCount: transcriptRows().length,
+        expanderCount: expanders.length,
+        renderedExpanderCount: expanders.filter(isRendered).length
+      },
+      extra
+    };
+  }
+
+  function diagnosticSummary(snapshot) {
+    const tracks = snapshot?.playerCaptionTracks;
+    const ui = snapshot?.transcriptUi;
+    const video = snapshot?.video;
+    return `diag tracks=${tracks?.received || 0}/${tracks?.safeTimedText || 0}, buttons=${ui?.renderedButtonCount || 0}/${ui?.matchingButtonCount || 0}, panels=${ui?.renderedPanelCount || 0}/${ui?.matchingPanelCount || 0}, rows=${ui?.renderedRowCount || 0}, videoReady=${video?.readyState ?? "n/a"}`;
+  }
+
+  async function setStatus(status, detail = "", diagnostics = null) {
     document.documentElement.dataset.ytki03Status = status;
     const id = videoIdFromUrl();
     if (id) {
       const key = STORE_PREFIX + id;
-      chrome.storage.local.get(key).then(result => {
-        const data = result[key] || {
-          schemaVersion: 3,
-          video: { videoId: id, title: getTitle(), url: location.href.split("&")[0] },
-          transcript: { sourceType: "none", language: null, completeness: "not_captured", segments: [] },
-          liveObservations: []
-        };
-        data.lastCapture = { status, detail, at: new Date().toISOString() };
-        return chrome.storage.local.set({ [key]: data });
-      }).catch(() => {});
+      try {
+        await queueStorageWrite(async () => {
+          const result = await chrome.storage.local.get(key);
+          const data = result[key] || {
+            schemaVersion: 3,
+            video: { videoId: id, title: getTitle(), url: location.href.split("&")[0] },
+            transcript: { sourceType: "none", language: null, completeness: "not_captured", segments: [] },
+            liveObservations: []
+          };
+          data.lastCapture = { status, detail, at: new Date().toISOString() };
+          if (diagnostics) {
+            const history = Array.isArray(data.captureDiagnostics?.history) ? data.captureDiagnostics.history : [];
+            data.captureDiagnostics = {
+              diagnosticVersion: DIAGNOSTIC_VERSION,
+              latest: diagnostics,
+              history: [...history, diagnostics].slice(-12)
+            };
+          }
+          await chrome.storage.local.set({ [key]: data });
+        });
+      } catch (_) {}
     }
     chrome.runtime.sendMessage({ type: "YT_AUTO_CAPTURE_STATUS", videoId: id,
       title: getTitle(), status, detail }).catch(() => {});
@@ -227,9 +343,7 @@
     const selectors = [
       "#description-inline-expander #expand",
       "ytd-text-inline-expander #expand",
-      "tp-yt-paper-button#expand",
-      "button[aria-label*='more' i]",
-      "button[aria-label*='更多']"
+      "tp-yt-paper-button#expand"
     ];
     for (const selector of selectors) {
       const expander = [...document.querySelectorAll(selector)].find(isRendered);
@@ -240,6 +354,23 @@
       if (button) return button;
     }
     return null;
+  }
+
+  async function waitForTranscriptEntry(videoId, timeout = 18000) {
+    const startedAt = Date.now();
+    let attempts = 0;
+    while (Date.now() - startedAt < timeout && videoId === videoIdFromUrl()) {
+      attempts++;
+      if (attempts === 1 || attempts % 6 === 0) {
+        window.postMessage({ type: "ytki03:request-caption-tracks" }, location.origin);
+      }
+      const panel = transcriptPanel();
+      if (panel) return { panel, button: null, attempts, waitedMs: Date.now() - startedAt };
+      const button = await revealTranscriptButton();
+      if (button) return { panel: null, button, attempts, waitedMs: Date.now() - startedAt };
+      await sleep(500);
+    }
+    return { panel: null, button: null, attempts, waitedMs: Date.now() - startedAt };
   }
 
   function transcriptPanel() {
@@ -401,10 +532,10 @@
   async function autoCaptureTranscript(videoId) {
     if (captureRunning || videoId !== videoIdFromUrl()) return;
     captureRunning = true;
-    setStatus("checking_transcript");
+    await setStatus("checking_transcript");
     try {
       const direct = await tryDirectCaptionTrack();
-      if (direct?.coverage?.reachesEnd) {
+      if (direct?.ok && direct.coverage?.reachesEnd) {
         const data = await readStored(videoId);
         data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
         data.transcript = {
@@ -418,30 +549,53 @@
           segments: direct.segments.map((s, i) => ({ id: `tr-${i+1}`, ...s, sourceType: "youtube_caption_track" }))
         };
         await saveStored(data);
-        setStatus("transcript_captured_complete", `${direct.segments.length} 段（字幕軌快速取得）`);
+        await setStatus("transcript_captured_complete", `${direct.segments.length} 段（字幕軌快速取得）`);
         return;
       }
 
       let panel = transcriptPanel();
       if (!panel) {
-        const btn = await revealTranscriptButton();
-        if (!btn) {
-          setStatus("transcript_unavailable", "找不到 YouTube 原生逐字稿入口；可能沒有字幕、面板尚未載入或 YouTube 介面已變更。");
-          return;
+        const entry = await waitForTranscriptEntry(videoId);
+        panel = entry.panel;
+        const btn = entry.button;
+        if (panel) {
+          // The user or YouTube opened the panel while the page was settling.
+          panelOpenedByUs = false;
         }
-        panelOpenedByUs = true;
-        btn.click();
-        await sleep(500);
+        if (!btn) {
+          if (!panel) {
+            const diagnostics = collectCaptureDiagnostics("transcript_entry_unavailable", {
+              direct: { ok: direct?.ok || false, reason: direct?.reason || "unknown", trackCount: direct?.trackCount || 0, httpStatus: direct?.httpStatus || null },
+              uiWait: { attempts: entry.attempts, waitedMs: entry.waitedMs }
+            });
+            await setStatus(
+              "transcript_unavailable",
+              `等待 ${Math.round(entry.waitedMs / 1000)} 秒仍找不到可見的 YouTube 逐字稿入口；${diagnosticSummary(diagnostics)}`,
+              diagnostics
+            );
+            return;
+          }
+        } else {
+          panelOpenedByUs = true;
+          btn.click();
+          await sleep(500);
+        }
       }
       const ready = await waitForPanel();
       if (!ready) {
-        setStatus("transcript_not_loaded", "已嘗試開啟逐字稿面板，但沒有讀到字幕行。");
+        const diagnostics = collectCaptureDiagnostics("transcript_panel_has_no_rows", {
+          direct: { ok: direct?.ok || false, reason: direct?.reason || "unknown", trackCount: direct?.trackCount || 0, httpStatus: direct?.httpStatus || null }
+        });
+        await setStatus("transcript_not_loaded", `已嘗試開啟逐字稿面板，但沒有讀到字幕行；${diagnosticSummary(diagnostics)}`, diagnostics);
         return;
       }
       const capture = await scrollTranscriptToLoadAll();
       const { segments, coverage } = capture;
       if (!segments.length) {
-        setStatus("transcript_empty", "面板已開啟，但未讀到可解析的字幕行。");
+        const diagnostics = collectCaptureDiagnostics("transcript_rows_not_parseable", {
+          direct: { ok: direct?.ok || false, reason: direct?.reason || "unknown", trackCount: direct?.trackCount || 0, httpStatus: direct?.httpStatus || null }
+        });
+        await setStatus("transcript_empty", `面板已開啟，但未讀到可解析的字幕行；${diagnosticSummary(diagnostics)}`, diagnostics);
         return;
       }
       const data = await readStored(videoId);
@@ -461,7 +615,7 @@
       const endText = coverage.duration
         ? `；最後時間 ${Math.floor(coverage.lastStart)}s / 影片 ${Math.floor(coverage.duration)}s`
         : "；無法讀取影片總長度，尚未驗證完整性";
-      setStatus(coverage.reachesEnd ? "transcript_captured_complete" : "transcript_captured_partial", `${segments.length} 段${endText}`);
+      await setStatus(coverage.reachesEnd ? "transcript_captured_complete" : "transcript_captured_partial", `${segments.length} 段${endText}`);
       if (panelOpenedByUs) {
         await sleep(300);
         const close = document.querySelector("ytd-transcript-renderer #close-button, ytd-transcript-renderer button[aria-label*='Close'], ytd-transcript-renderer button[aria-label*='關閉']");
@@ -469,7 +623,8 @@
         panelOpenedByUs = false;
       }
     } catch (err) {
-      setStatus("capture_error", String(err?.message || err));
+      const diagnostics = collectCaptureDiagnostics("capture_exception", { error: String(err?.message || err).slice(0, 500) });
+      await setStatus("capture_error", `${String(err?.message || err)}；${diagnosticSummary(diagnostics)}`, diagnostics);
     } finally {
       captureRunning = false;
     }
@@ -525,7 +680,7 @@
     lastCaptionText = "";
     lastCaptionTime = 0;
     panelOpenedByUs = false;
-    setStatus("video_detected");
+    await setStatus("video_detected");
     const data = await readStored(id);
     data.video = { videoId: id, title: getTitle(), url: location.href.split("&")[0] };
     await saveStored(data);
