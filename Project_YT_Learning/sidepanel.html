@@ -27,6 +27,16 @@
       <p class="hint">開啟 YouTube 影片後會自動嘗試擷取。若 YouTube 未提供逐字稿，或頁面結構改變，這裡會顯示狀態。</p>
       <div id="transcriptList" class="segments empty">尚未取得逐字稿</div>
     </section>
+    <section>
+      <h2>知識專有名詞</h2>
+      <p class="hint">以本機規則、詞頻、跨段落分布與專名格式排序；按下分析後只會把候選詞送往對應語言的 Wikipedia 查詢，不會傳送完整字幕。</p>
+      <div class="toolbar termToolbar">
+        <button id="analyzeTermsBtn">分析專有名詞</button>
+        <button id="showMoreTermsBtn" class="secondary" hidden>再顯示 10 個</button>
+      </div>
+      <div id="termStatus" class="hint">尚未分析</div>
+      <div id="termList" class="terms empty">尚無專有名詞</div>
+    </section>
     <details>
       <summary>手動貼上逐字稿（備援）</summary>
       <p class="hint">支援 YouTube 複製格式（例如「3:103 分 10 秒字幕文字」）、SRT、VTT，以及一般純文字。匯入後會取代本影片的主要逐字稿，但不會刪除即時觀察紀錄。</p>
@@ -43,9 +53,10 @@
       <p class="hint">失敗時會記錄安全診斷資料；不包含字幕本文、Cookie 或字幕簽名網址。匯出 JSON 時會一併包含完整紀錄。</p>
       <pre id="diagnostics" class="diagnostics">尚無診斷資料</pre>
     </details>
-    <footer>資料僅儲存在本機 Chrome Storage；不會上傳至外部伺服器。</footer>
+    <footer>字幕與分析結果儲存在本機 Chrome Storage；只有按下「分析專有名詞」後，候選詞會傳送至 Wikipedia 查詢，完整字幕不會送出。</footer>
   </main>
   <script src="transcript-utils.js"></script>
+  <script src="term-extractor.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

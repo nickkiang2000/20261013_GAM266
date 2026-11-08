@@ -38,4 +38,20 @@ if (analysis[1].end !== 40 || analysis[1].duration !== 0) throw new Error('Null 
 const plainText = utilsContext.YTKITranscriptUtils.buildPlainText(rawSegments);
 const stats = utilsContext.YTKITranscriptUtils.transcriptStats(rawSegments, analysis, plainText);
 if (plainText !== 'Alpha\nBeta\nGamma' || stats.rawSegmentCount !== 3 || stats.analysisSegmentCount !== 2) throw new Error('Transcript derived data failed');
+
+const termSource = fs.readFileSync(__dirname + '/term-extractor.js','utf8');
+const termContext = {};
+vm.createContext(termContext);
+vm.runInContext(termSource,termContext);
+const terms = termContext.YTKITermExtractor.extractTerms({
+  language:'ja',title:'東京とOpenAI',analysisSegments:[
+    {start:0,end:10,text:'東京でOpenAIとGPTについて話します。ソウルにも行きます。',sourceSegmentIds:['tr-1']},
+    {start:12,end:20,text:'東京ではGPTを使いました。',sourceSegmentIds:['tr-2']}
+  ]
+});
+for (const expected of ['東京','OpenAI','GPT','ソウル']) {
+  if (!terms.some(term => term.term === expected)) throw new Error('Term extraction missing: '+expected);
+}
+const tokyo = terms.find(term => term.term === '東京');
+if (tokyo.frequency < 2 || tokyo.occurrences.length !== 2) throw new Error('Term occurrence mapping failed');
 console.log("Parser tests passed.");

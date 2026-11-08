@@ -1,6 +1,8 @@
 const PREFIX = "ytki03:";
 let activeVideoId = "";
 let activeData = null;
+let visibleTermLimit = 10;
+let lastTermVideoId = "";
 
 const $ = id => document.getElementById(id);
 const clean = s => String(s || "").replace(/\s+/g, " ").trim();
@@ -101,6 +103,125 @@ function renderSegments(target, segments, isObservation=false) {
   target.append(frag);
 }
 
+function wikipediaLanguage(language) {
+  if (/^ja/i.test(language || "")) return "ja";
+  if (/^zh/i.test(language || "")) return "zh";
+  return "en";
+}
+
+function normalizedWikiTitle(value) {
+  return clean(value).replace(/[＿_]/g, " ").toLocaleLowerCase();
+}
+
+function wikiMatchConfidence(term, title, index) {
+  const a = normalizedWikiTitle(term), b = normalizedWikiTitle(title);
+  if (a === b) return 1;
+  if (b.startsWith(a) || a.startsWith(b)) return 0.9;
+  if (b.includes(a) || a.includes(b)) return 0.76;
+  return Math.max(0.42, 0.62 - index * 0.08);
+}
+
+async function searchWikipediaTerm(term, language) {
+  const params = new URLSearchParams({
+    action:"query", list:"search", srsearch:term, srnamespace:"0", srlimit:"3",
+    srprop:"snippet", format:"json", formatversion:"2", origin:"*"
+  });
+  try {
+    const response = await fetch(`https://${language}.wikipedia.org/w/api.php?${params}`, { credentials:"omit" });
+    if (!response.ok) return null;
+    const results = (await response.json())?.query?.search || [];
+    if (!results.length) return null;
+    const best=results.map((page,index)=>({
+      pageId:page.pageid, title:page.title,
+      matchConfidence:wikiMatchConfidence(term,page.title,index),
+      searchSnippet:clean(String(page.snippet||"").replace(/<[^>]+>/g,""))
+    })).sort((a,b)=>b.matchConfidence-a.matchConfidence)[0];
+    return best?.matchConfidence>=0.7?best:null;
+  } catch (_) { return null; }
+}
+
+async function fetchWikipediaExtracts(matches, language) {
+  const byId = new Map();
+  for (let i=0; i<matches.length; i+=20) {
+    const batch = matches.slice(i,i+20).filter(Boolean);
+    if (!batch.length) continue;
+    const params = new URLSearchParams({
+      action:"query", prop:"extracts|info", inprop:"url", exintro:"1", explaintext:"1",
+      exchars:"360", pageids:batch.map(item=>item.pageId).join("|"),
+      format:"json", formatversion:"2", origin:"*"
+    });
+    try {
+      const response = await fetch(`https://${language}.wikipedia.org/w/api.php?${params}`, { credentials:"omit" });
+      if (!response.ok) continue;
+      for (const page of (await response.json())?.query?.pages || []) byId.set(page.pageid,page);
+    } catch (_) {}
+  }
+  return byId;
+}
+
+async function enrichTermsWithWikipedia(terms, language) {
+  const selected = terms.slice(0,25);
+  const matches = new Array(selected.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < selected.length) {
+      const index = cursor++;
+      matches[index] = await searchWikipediaTerm(selected[index].term,language);
+    }
+  }
+  await Promise.all(Array.from({length:Math.min(4,selected.length)},worker));
+  const pages = await fetchWikipediaExtracts(matches,language);
+  return terms.map((term,index)=>{
+    const match = index < matches.length ? matches[index] : null;
+    if (!match) return {...term,wikipedia:{status:index<25?"not_found":"not_queried",language},score:term.localScore};
+    const page = pages.get(match.pageId);
+    const explanation = clean(page?.extract || match.searchSnippet || "");
+    return {
+      ...term,
+      score:Number(Math.min(100,term.localScore+match.matchConfidence*15).toFixed(2)),
+      wikipedia:{
+        status:"matched",language,title:match.title,pageId:match.pageId,
+        url:page?.fullurl || `https://${language}.wikipedia.org/wiki/${encodeURIComponent(match.title.replace(/ /g,"_"))}`,
+        matchConfidence:Number(match.matchConfidence.toFixed(2)),explanation
+      }
+    };
+  }).sort((a,b)=>b.score-a.score||b.segmentCount-a.segmentCount||a.term.localeCompare(b.term));
+}
+
+function renderKnowledgeTerms() {
+  const target=$("termList"), result=activeData?.knowledgeTerms;
+  target.innerHTML="";
+  if (!result?.terms?.length) {
+    target.className="terms empty"; target.textContent="尚無專有名詞";
+    $("termStatus").textContent=result?.error||"尚未分析";
+    $("showMoreTermsBtn").hidden=true;
+    return;
+  }
+  target.className="terms";
+  const shown=result.terms.slice(0,visibleTermLimit), frag=document.createDocumentFragment();
+  shown.forEach((term,index)=>{
+    const card=document.createElement("article"); card.className="termCard";
+    const head=document.createElement("div"); head.className="termHead";
+    const rank=document.createElement("span"); rank.className="termRank"; rank.textContent=`#${index+1}`;
+    const name=document.createElement("span"); name.className="termName"; name.textContent=term.term;
+    const score=document.createElement("span"); score.className="termScore"; score.textContent=`${Math.round(term.score)} 分`;
+    head.append(rank,name,score);
+    const meta=document.createElement("div"); meta.className="termMeta";
+    meta.textContent=`${term.type}・出現 ${term.frequency} 次・跨 ${term.segmentCount} 段`;
+    const explanation=document.createElement("div"); explanation.className="termExplanation";
+    explanation.textContent=term.wikipedia?.explanation||"尚無 Wikipedia 簡介；此項由本機規則選出。";
+    const links=document.createElement("div"); links.className="termLinks";
+    if(term.wikipedia?.url){const a=document.createElement("a");a.className="wikiLink";a.href=term.wikipedia.url;a.target="_blank";a.rel="noopener";a.textContent=`${term.wikipedia.language}.wikipedia`;links.append(a)}
+    for(const occurrence of (term.occurrences||[]).slice(0,5)){
+      const button=document.createElement("button");button.className="termTime";button.textContent=fmtTime(occurrence.start);button.dataset.seconds=occurrence.start;links.append(button)
+    }
+    card.append(head,meta,explanation,links);frag.append(card);
+  });
+  target.append(frag);
+  $("termStatus").textContent=`規則版 ${result.terms.length} 個候選；Wikipedia 已查詢 ${result.wikipediaQueriedCandidates||0} 個；顯示前 ${shown.length} 個`;
+  $("showMoreTermsBtn").hidden=visibleTermLimit>=result.terms.length;
+}
+
 async function getActiveTabInfo() {
   const tabs = await chrome.tabs.query({active:true,currentWindow:true});
   const tab = tabs[0];
@@ -118,6 +239,7 @@ async function loadData() {
     return;
   }
   activeVideoId = info.videoId;
+  if (lastTermVideoId !== activeVideoId) { visibleTermLimit=10; lastTermVideoId=activeVideoId; }
   $("videoTitle").textContent = info.title || info.videoId;
   const key = PREFIX + activeVideoId;
   const stored = await chrome.storage.local.get(key);
@@ -133,6 +255,7 @@ async function loadData() {
   $("diagnostics").textContent = activeData.captureDiagnostics?.latest
     ? JSON.stringify(activeData.captureDiagnostics.latest, null, 2)
     : "尚無診斷資料";
+  renderKnowledgeTerms();
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
@@ -150,6 +273,44 @@ async function loadData() {
     $("status").textContent = display[status] || status;
   }
 }
+
+$("analyzeTermsBtn").addEventListener("click",async()=>{
+  if(!activeVideoId||!activeData?.transcript?.segments?.length){$("termStatus").textContent="請先取得完整逐字稿。";return}
+  const button=$("analyzeTermsBtn");button.disabled=true;
+  $("termStatus").textContent="正在以本機規則找出候選詞…";
+  try{
+    const utils=globalThis.YTKITranscriptUtils, extractor=globalThis.YTKITermExtractor;
+    const analysisSegments=activeData.transcript.analysisSegments?.length
+      ? activeData.transcript.analysisSegments
+      : utils.buildAnalysisSegments(activeData.transcript.segments);
+    const language=activeData.transcript.language||"en";
+    const candidates=extractor.extractTerms({analysisSegments,title:activeData.video?.title||"",language,limit:80});
+    if(!candidates.length){
+      const key=PREFIX+activeVideoId,current=(await chrome.storage.local.get(key))[key]||activeData;
+      current.knowledgeTerms={version:1,method:"rule_based_v1",generatedAt:new Date().toISOString(),language,terms:[],error:"規則未找到可信候選詞。"};
+      await chrome.storage.local.set({[key]:current});return
+    }
+    $("termStatus").textContent=`找到 ${candidates.length} 個候選；正在以 Wikipedia 驗證前 ${Math.min(25,candidates.length)} 個…`;
+    const wikiLanguage=wikipediaLanguage(language);
+    const terms=await enrichTermsWithWikipedia(candidates,wikiLanguage);
+    const key=PREFIX+activeVideoId,current=(await chrome.storage.local.get(key))[key]||activeData;
+    current.knowledgeTerms={
+      version:1,method:"rule_based_v1",generatedAt:new Date().toISOString(),
+      sourceTranscriptSha256:current.transcript?.contentSha256||null,
+      language,wikipediaLanguage:wikiLanguage,candidateCount:candidates.length,
+      wikipediaQueriedCandidates:Math.min(25,candidates.length),defaultDisplayCount:10,terms
+    };
+    await chrome.storage.local.set({[key]:current});
+  }catch(error){$("termStatus").textContent=`分析失敗：${String(error?.message||error)}`}
+  finally{button.disabled=false}
+});
+
+$("showMoreTermsBtn").addEventListener("click",()=>{visibleTermLimit+=10;renderKnowledgeTerms()});
+$("termList").addEventListener("click",event=>{
+  const button=event.target.closest("button[data-seconds]");if(!button)return;
+  const seconds=Number(button.dataset.seconds);if(!Number.isFinite(seconds))return;
+  chrome.tabs.query({active:true,currentWindow:true},tabs=>{if(tabs[0]?.id)chrome.tabs.sendMessage(tabs[0].id,{type:"YTKI_SEEK",seconds})});
+});
 
 $("refreshBtn").addEventListener("click", async () => {
   const info = await getActiveTabInfo();

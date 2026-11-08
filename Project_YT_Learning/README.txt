@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.4.0.0
+YouTube Knowledge & Investment Immersion — Extension 0.5.0.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.4.0.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有外部網路請求、沒有 AI API、沒有後端；字幕資料保存在本機 Chrome Storage。
 
+
+0.5.0 Rule-based Knowledge Terms：以本機語言分詞、專名格式、對數詞頻、跨段落分布與標題命中產生候選並排序；預設顯示前 10 個，可每次再顯示 10 個。使用者按下分析後，只把前 25 個候選詞送至對應語言 Wikipedia，以搜尋、摘要與消歧分數補強；完整字幕不會送出。每個詞保留分數、排名訊號、Wikipedia 資料、原字幕證據及可跳轉時間戳。
 
 0.4.0 Transcript Foundation：儲存可追溯的原始字幕 cues、分析用合併段落、純文字、字幕軌清單、語言、人工／ASR 類型、來源格式、覆蓋率、統計與 SHA-256。成功擷取會寫入 transcript_capture_success 診斷，避免 latest 仍停留在舊失敗。資料 schemaVersion 升為 4，供非 AI 專有名詞與 Ticker 關鍵字演算法使用。
 
