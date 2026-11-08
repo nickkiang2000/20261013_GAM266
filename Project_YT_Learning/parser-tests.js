@@ -8,6 +8,7 @@ vm.createContext(context);
 vm.runInContext(source + `
 ;globalThis.__parseTranscript=parseTranscript;
 ;globalThis.__parseYouTubeCopiedLine=parseYouTubeCopiedLine;
+;globalThis.__refineOccurrencesFromRawCues=refineOccurrencesFromRawCues;
 `, context);
 const cases = [
   ["3:103 分 10 秒字幕文字", 190, "字幕文字"],
@@ -67,4 +68,13 @@ const englishTerms=termContext.YTKITermExtractor.extractTerms({language:'en',tit
 ]});
 for(const expected of ['Sudan','Congo','Mozambique','Nigeria','Somalia','Sahel','Africa','Greenland','Denmark','GRML','China','Russia','South Africa','BRICS','Skaergaard','platinum','palladium','Sarfartoq','Europe','Robert Jackson','Carl Rosberg','post-colonial Africa','Khartoum','Darfur','Katanga','United Nations','Belgium','America','The United States','Soviet Union','Cuba','France','Angola']) if(!englishTerms.some(term=>term.term===expected))throw new Error('English entity extraction missing: '+expected);
 if(englishTerms.some(term=>term.term==='In Nigeria'))throw new Error('English preposition was included in entity');
+const splitCues=[
+  {id:'split-1',start:16,end:18,text:'《枪炮、病菌'},
+  {id:'split-2',start:18,end:21,text:'与钢铁》是一本书'}
+];
+const splitAnalysis=utilsContext.YTKITranscriptUtils.buildAnalysisSegments(splitCues);
+const splitTerms=termContext.YTKITermExtractor.extractTerms({language:'zh',analysisSegments:splitAnalysis});
+const refined=context.__refineOccurrencesFromRawCues(splitTerms,splitCues);
+const splitTitle=refined.find(term=>term.term==='枪炮、病菌与钢铁');
+if(!splitTitle||splitTitle.occurrences[0]?.start!==16||splitTitle.occurrences[0]?.end!==21)throw new Error('Cross-cue entity timing failed');
 console.log("Parser tests passed.");

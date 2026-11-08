@@ -1,5 +1,6 @@
 (() => {
   const normalize = value => String(value || "").replace(/\s+/g, " ").trim().normalize("NFKC");
+  const compact = value => normalize(value).toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
   const languageFamily = language => /^ja/i.test(language || "") ? "ja" : /^zh/i.test(language || "") ? "zh" : "en";
 
   // High-precision seed lexicon. It deliberately contains named people,
@@ -98,7 +99,9 @@
     for (const segment of prepared) {
       const text = normalize(segment.text);
       for (const entity of ENTITY_LEXICON) {
-        const matched = entity.aliases.filter(alias => alias && text.toLocaleLowerCase().includes(alias.toLocaleLowerCase()));
+        const lowerText=text.toLocaleLowerCase(),compactText=compact(text);
+        const matched = entity.aliases.filter(alias => alias &&
+          (lowerText.includes(alias.toLocaleLowerCase()) || (/\p{Script=Han}/u.test(alias) && compactText.includes(compact(alias)))));
         if (!matched.length) continue;
         const latinAlias=matched.find(alias=>/\p{Script=Latin}/u.test(alias));
         const displayTerm=entity.label.includes("(")?entity.label:(family==="en"?(latinAlias||matched[0]):(matched.find(alias=>/\p{Script=Han}/u.test(alias))||matched[0]));

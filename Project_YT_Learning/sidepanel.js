@@ -8,6 +8,8 @@ let playingTermIndexes = new Set();
 let preloadKey = "";
 let loadGeneration = 0;
 let tabReloadTimer = null;
+let activeTabId = null;
+let observedTabKey = "";
 
 const $ = id => document.getElementById(id);
 const clean = s => String(s || "").replace(/\s+/g, " ").trim();
@@ -243,25 +245,54 @@ async function resolveTermReference(term, primaryLanguage) {
   };
 }
 
+function refineOccurrencesFromRawCues(terms, rawSegments) {
+  const compact=value=>clean(value).toLocaleLowerCase().replace(/[^\p{L}\p{N}]/gu,"");
+  const cues=[...(rawSegments||[])].filter(cue=>Number.isFinite(cue.start)&&cue.text).sort((a,b)=>a.start-b.start);
+  return terms.map(term=>{
+    const needles=[...new Set([term.term,...(term.lookupTerms||[])].map(compact).filter(value=>value.length>=2))];
+    const occurrences=[];
+    for(let i=0;i<cues.length;i++){
+      const firstCue=compact(cues[i].text);
+      const relevantNeedles=needles.filter(needle=>firstCue.includes(needle)||firstCue.includes(needle.slice(0,Math.min(3,needle.length))));
+      if(!relevantNeedles.length)continue;
+      let joined="",matchedEnd=-1;
+      for(let j=i;j<Math.min(cues.length,i+8);j++){
+        joined+=compact(cues[j].text);
+        if(relevantNeedles.some(needle=>joined.includes(needle))){matchedEnd=j;break}
+      }
+      if(matchedEnd<0)continue;
+      const last=cues[matchedEnd],next=cues[matchedEnd+1];
+      occurrences.push({
+        start:cues[i].start,
+        end:Number.isFinite(last.end)&&last.end>cues[i].start?last.end:(Number.isFinite(next?.start)?next.start:last.start+6),
+        text:cues.slice(i,matchedEnd+1).map(cue=>clean(cue.text)).join(" ").slice(0,260),
+        sourceSegmentIds:cues.slice(i,matchedEnd+1).map(cue=>cue.id).filter(Boolean)
+      });
+      i=matchedEnd;
+    }
+    return occurrences.length?{...term,frequency:occurrences.length,segmentCount:occurrences.length,occurrences}:term;
+  });
+}
+
 async function ensureLocalKnowledgeTerms() {
   const transcript = activeData?.transcript;
   if (!activeVideoId || !transcript?.segments?.length) return;
-  if (activeData.knowledgeTerms?.method === "rule_based_v5_cue_timestamps" &&
+  if (activeData.knowledgeTerms?.method === "rule_based_v6_cross_cue" &&
       activeData.knowledgeTerms.sourceTranscriptSha256 === (transcript.contentSha256 || null)) return;
   const utils = globalThis.YTKITranscriptUtils, extractor = globalThis.YTKITermExtractor;
-  // Use original caption cues here. Grouped 30-second analysis segments make
-  // unrelated terms share one broad timestamp and break playback highlighting.
-  const analysisSegments = transcript.segments.map(segment=>({
-    ...segment,sourceSegmentIds:segment.sourceSegmentIds||[segment.id]
-  }));
+  // Grouped text finds entities split across adjacent caption cues. After
+  // extraction, map each entity back to the smallest matching raw-cue window
+  // so playback highlighting stays precise.
+  const analysisSegments=transcript.analysisSegments?.length
+    ? transcript.analysisSegments:utils.buildAnalysisSegments(transcript.segments);
   const language = transcript.language || "en";
-  const terms = extractor.extractTerms({
+  const terms = refineOccurrencesFromRawCues(extractor.extractTerms({
     analysisSegments, title: activeData.video?.title || "", language, limit: 120
-  }).map(term => ({ ...term, wikipedia: { status: "not_queried", language: wikipediaLanguage(language) } }));
+  }),transcript.segments).map(term => ({ ...term, wikipedia: { status: "not_queried", language: wikipediaLanguage(language) } }));
   const key = PREFIX + activeVideoId;
   const current = (await chrome.storage.local.get(key))[key] || activeData;
   current.knowledgeTerms = {
-    version: 5, method: "rule_based_v5_cue_timestamps", generatedAt: new Date().toISOString(),
+    version: 6, method: "rule_based_v6_cross_cue", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, nativeLanguage:"zh", wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length,
     defaultDisplayCount:60, terms
@@ -272,7 +303,7 @@ async function ensureLocalKnowledgeTerms() {
 async function preloadKnowledgeDetails() {
   const result=activeData?.knowledgeTerms;
   if(!activeVideoId||!result?.terms?.length)return;
-  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v5`;
+  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v6`;
   if(preloadKey===keyId)return;
   const pending=result.terms.map((term,index)=>({term,index})).filter(item=>item.term.wikipedia?.status==="not_queried");
   if(!pending.length){preloadKey=keyId;return}
@@ -348,7 +379,7 @@ async function getActiveTabInfo() {
   const tab = tabs[0];
   if (!tab?.id || !tab.url?.includes("youtube.com/watch")) return null;
   return new Promise(resolve => {
-    chrome.tabs.sendMessage(tab.id,{type:"YT_GET_VIDEO_INFO"},res=>resolve(chrome.runtime.lastError?null:res));
+    chrome.tabs.sendMessage(tab.id,{type:"YT_GET_VIDEO_INFO"},res=>resolve(chrome.runtime.lastError?null:(res?{...res,tabId:tab.id}:null)));
   });
 }
 
@@ -362,6 +393,8 @@ async function loadData() {
     return;
   }
   activeVideoId = info.videoId;
+  activeTabId = info.tabId;
+  observedTabKey=`${activeTabId}:${activeVideoId}`;
   if (lastTermVideoId !== activeVideoId) { expandedTerms.clear(); showAllTerms=false; playingTermIndexes.clear(); preloadKey=""; lastTermVideoId=activeVideoId; }
   $("videoTitle").textContent = info.title || info.videoId;
   const key = PREFIX + activeVideoId;
@@ -382,7 +415,7 @@ async function loadData() {
     : "尚無診斷資料";
   renderKnowledgeTerms();
   ensureLocalKnowledgeTerms().catch(error => { $("termStatus").textContent=`本機分析失敗：${String(error?.message||error)}`; });
-  if(activeData.knowledgeTerms?.method==="rule_based_v5_cue_timestamps")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
+  if(activeData.knowledgeTerms?.method==="rule_based_v6_cross_cue")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
@@ -510,6 +543,13 @@ chrome.tabs.onActivated?.addListener(scheduleTabReload);
 chrome.tabs.onUpdated?.addListener((tabId,changeInfo,tab)=>{
   if(tab?.active&&(changeInfo.url||changeInfo.status==="complete"))scheduleTabReload();
 });
+async function monitorActiveTab(){
+  const tabs=await chrome.tabs.query({active:true,currentWindow:true}),tab=tabs[0];
+  if(!tab?.id||!tab.url?.includes("youtube.com/watch"))return;
+  let videoId="";try{videoId=new URL(tab.url).searchParams.get("v")||""}catch(_){}
+  const key=`${tab.id}:${videoId}`;
+  if(key!==observedTabKey){observedTabKey=key;scheduleTabReload()}
+}
 async function syncPlaybackTerm(){
   if(!activeVideoId||!activeData?.knowledgeTerms?.terms?.length)return;
   const tabs=await chrome.tabs.query({active:true,currentWindow:true}),tab=tabs[0];if(!tab?.id)return;
@@ -532,4 +572,5 @@ async function syncPlaybackTerm(){
   renderKnowledgeTerms();
 }
 setInterval(()=>syncPlaybackTerm().catch(()=>{}),800);
+setInterval(()=>monitorActiveTab().catch(()=>{}),500);
 loadData();

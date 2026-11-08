@@ -33,6 +33,10 @@
     const signature = `${info.videoId}|${info.languageCode}|${info.translationLanguageCode}|${info.format}|${body.length}|${body.slice(0, 32)}|${body.slice(-32)}`;
     const duplicateIndex=capturedPayloads.findIndex(item=>item.signature===signature);
     if(duplicateIndex>=0){
+      // Repeated requests for the already-active track are common while the
+      // player runs. Only notify again when an older payload becomes active,
+      // which represents switching back to a previous language/translation.
+      if(duplicateIndex===capturedPayloads.length-1)return;
       const existing=capturedPayloads.splice(duplicateIndex,1)[0];
       existing.capturedAt=new Date().toISOString();
       existing.source=source;
