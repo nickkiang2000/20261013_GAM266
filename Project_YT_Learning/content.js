@@ -18,7 +18,7 @@
   let captionTrackWaiters = [];
   let storageWriteChain = Promise.resolve();
   const DIAGNOSTIC_VERSION = 1;
-  const EXTENSION_VERSION = "0.7.0";
+  const EXTENSION_VERSION = "0.8.0";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
@@ -120,7 +120,7 @@
     return declared || "unknown";
   }
 
-  async function buildTranscriptRecord({ segments, sourceType, sourceMethod, language, trackType, completeness, coverage, rawFormat }) {
+  async function buildTranscriptRecord({ segments, sourceType, sourceMethod, language, originalLanguage = null, translationLanguage = null, trackType, completeness, coverage, rawFormat }) {
     const rawSegments = segments.map((segment, index) => ({
       id: segment.id || `tr-${index + 1}`,
       start: segment.start != null && Number.isFinite(Number(segment.start)) ? Number(segment.start) : null,
@@ -142,6 +142,8 @@
       sourceType,
       sourceMethod,
       language: language || null,
+      originalLanguage: originalLanguage || language || null,
+      translationLanguage: translationLanguage || null,
       trackType: trackType || null,
       completeness,
       capturedAt: new Date().toISOString(),
@@ -278,6 +280,8 @@
         segments,
         coverage,
         language: language === "unknown" ? null : language,
+        originalLanguage: languageKey.split("->")[0] === "unknown" ? null : languageKey.split("->")[0],
+        translationLanguage: languageKey.split("->")[0] === language ? null : language,
         trackType: inferTrackType(language, "player_observed"),
         sourceMethod: "player_observed_merged_timedtext_responses",
         interceptedFormat: "json3",
@@ -758,6 +762,8 @@
           sourceType: "youtube_caption_track",
           sourceMethod: direct.sourceMethod || "player_caption_track_json3",
           language: direct.language,
+          originalLanguage: direct.originalLanguage || direct.language,
+          translationLanguage: direct.translationLanguage || null,
           trackType: direct.trackType,
           completeness: "caption_track_reaches_video_end",
           coverage: direct.coverage,
@@ -801,6 +807,8 @@
                 sourceType: "youtube_caption_track",
                 sourceMethod: latestDirect.sourceMethod,
                 language: latestDirect.language,
+                originalLanguage: latestDirect.originalLanguage || latestDirect.language,
+                translationLanguage: latestDirect.translationLanguage || null,
                 trackType: latestDirect.trackType,
                 completeness: "caption_track_reaches_video_end",
                 coverage: latestDirect.coverage,
@@ -973,6 +981,11 @@
     }
     if (message?.type === "YT_GET_VIDEO_INFO") {
       sendResponse({ videoId: videoIdFromUrl(), title: getTitle(), url: location.href });
+      return true;
+    }
+    if (message?.type === "YTKI_GET_PLAYBACK_TIME") {
+      const v=videoEl();
+      sendResponse({videoId:videoIdFromUrl(),currentTime:Number.isFinite(v?.currentTime)?v.currentTime:null,paused:v?.paused??null});
       return true;
     }
   });

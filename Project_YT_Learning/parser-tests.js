@@ -3,7 +3,7 @@ const fs = require('fs'), vm = require('vm');
 const source = fs.readFileSync(__dirname + '/sidepanel.js','utf8').replace(/\nloadData\(\);\s*$/, '');
 const context = { document: { getElementById: () => ({ addEventListener(){}, textContent:'', innerHTML:'', className:'', append(){}, value:'' }) },
   chrome: { tabs:{query(){}}, storage:{local:{get:async()=>({}),set:async()=>{}},onChanged:{addListener(){}}}, runtime:{onMessage:{addListener(){},lastError:null} } },
-  Blob, URL, setTimeout, console };
+  Blob, URL, setTimeout, setInterval:()=>0, console };
 vm.createContext(context);
 vm.runInContext(source + `
 ;globalThis.__parseTranscript=parseTranscript;
@@ -48,12 +48,23 @@ const terms = termContext.YTKITermExtractor.extractTerms({
     {start:0,end:30,text:'贾雷德·戴蒙德写了《枪炮、病菌与钢铁》，讨论地理决定论。文明、馴化、事情和方法都只是一般用字。',sourceSegmentIds:['tr-1']},
     {start:31,end:60,text:'马克思、奥卡姆剃刀、达尔文演化论、燃素说、爱因斯坦、量子力学与牛顿力学。',sourceSegmentIds:['tr-2']},
     {start:61,end:90,text:'爱丁顿 Arthur Eddington 的日食实验；三峡、长江、太平洋、洞庭湖、黄河、渤海和印度。',sourceSegmentIds:['tr-3']},
-    {start:91,end:120,text:'格陵兰岛的维京人来自挪威，另有雅利安、欧亚大草原、吉尔吉斯人与东方学家。',sourceSegmentIds:['tr-4']}
+    {start:91,end:120,text:'格陵兰岛的维京人来自挪威，另有雅利安、欧亚大草原、吉尔吉斯人与东方学家。',sourceSegmentIds:['tr-4']},
+    {start:121,end:150,text:'在前幾年經常出賈雷德.戴蒙德的書，但是我覺得賈雷德.戴蒙德太注重物理性的一些原因。包括達爾文演化論，那時候牛頓力學。',sourceSegmentIds:['tr-5']}
   ]
 });
 const expectedTerms=['贾雷德·戴蒙德','枪炮、病菌与钢铁','地理决定论','马克思','奥卡姆剃刀','达尔文演化论','燃素说','爱因斯坦','量子力学','牛顿力学','爱丁顿 (Arthur Eddington)','日食实验','三峡','长江','太平洋','洞庭湖','黄河','渤海','印度','格陵兰岛','维京人','挪威','雅利安','欧亚大草原','吉尔吉斯人','东方学家'];
 for (const expected of expectedTerms) if (!terms.some(term => term.term === expected)) throw new Error('High-precision term extraction missing: '+expected);
 for (const rejected of ['文明','馴化','事情','方法','力学']) if (terms.some(term => term.term === rejected)) throw new Error('Generic term was not rejected: '+rejected);
+for (const rejected of ['在前幾年經常出賈雷德.戴蒙德的書','但是我覺得賈雷德.戴蒙德太注重物理性的一些原因','包括達爾文演化論','那時候牛頓力學']) if (terms.some(term => term.term === rejected)) throw new Error('Sentence fragment was not rejected: '+rejected);
 const diamond=terms.find(term=>term.term==='贾雷德·戴蒙德');
 if (!diamond.occurrences.length || diamond.occurrences[0].start !== 0) throw new Error('Term occurrence mapping failed');
+
+const englishTerms=termContext.YTKITermExtractor.extractTerms({language:'en',title:'Africa and Greenland',analysisSegments:[
+  {start:0,end:30,text:'Congo Mozambique Nigeria Somalia and the Sahel are in Africa. Greenland is part of Denmark and GRML explores there.',sourceSegmentIds:['en-1']},
+  {start:31,end:60,text:'China Russia South Africa and BRICS discuss Skaergaard platinum palladium and Sarfartoq in Europe.',sourceSegmentIds:['en-2']},
+  {start:61,end:90,text:'Political scientists Robert Jackson and Carl Rosberg later wrote about post-colonial Africa, Khartoum and Darfur.',sourceSegmentIds:['en-3']},
+  {start:91,end:130,text:'In Nigeria, Katanga, the United Nations, Belgium, America, The United States, Soviet Union, Cuba, France and Angola were discussed.',sourceSegmentIds:['en-4']}
+]});
+for(const expected of ['Congo','Mozambique','Nigeria','Somalia','Sahel','Africa','Greenland','Denmark','GRML','China','Russia','South Africa','BRICS','Skaergaard','platinum','palladium','Sarfartoq','Europe','Robert Jackson','Carl Rosberg','post-colonial Africa','Khartoum','Darfur','Katanga','United Nations','Belgium','America','The United States','Soviet Union','Cuba','France','Angola']) if(!englishTerms.some(term=>term.term===expected))throw new Error('English entity extraction missing: '+expected);
+if(englishTerms.some(term=>term.term==='In Nigeria'))throw new Error('English preposition was included in entity');
 console.log("Parser tests passed.");
