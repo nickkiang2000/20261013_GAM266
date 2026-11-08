@@ -133,9 +133,17 @@ async function loadData() {
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
   } else {
-    $("status").textContent = status === "captured_from_rendered_panel_not_independently_verified"
-      ? `已擷取 ${activeData.transcript.segments.length} 段（待測試完整性）`
-      : status;
+    const count = activeData.transcript?.segments?.length || 0;
+    const coverage = activeData.transcript?.coverage;
+    const suffix = coverage?.duration
+      ? `（最後 ${Math.floor(coverage.lastStart || 0)}s / 影片 ${Math.floor(coverage.duration)}s）`
+      : "";
+    const display = {
+      caption_track_reaches_video_end: `已完整擷取 ${count} 段（字幕軌快速路徑）${suffix}`,
+      captured_from_rendered_panel_reaches_video_end: `已完整擷取 ${count} 段（YouTube 逐字稿面板）${suffix}`,
+      captured_from_rendered_panel_may_be_partial: `已擷取 ${count} 段，但可能不完整${suffix}`
+    };
+    $("status").textContent = display[status] || status;
   }
 }
 

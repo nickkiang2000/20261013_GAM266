@@ -9,11 +9,25 @@
   let lastCaptionTime = 0;
   let panelOpenedByUs = false;
   let captureRunning = false;
+  let latestCaptionTracks = [];
+  let captionTrackWaiters = [];
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
   const videoEl = () => document.querySelector("video.html5-main-video") || document.querySelector("video");
   const getTitle = () => (document.querySelector("h1.ytd-watch-metadata")?.innerText || document.title || "").replace(/\s*-\s*YouTube$/, "").trim();
+
+  // MAIN-world page scripts can see YouTube's player state while an ordinary
+  // content script cannot. Treat its messages as untrusted page input and
+  // validate every URL again before fetching it.
+  window.addEventListener("message", event => {
+    if (event.source !== window || event.origin !== location.origin || event.data?.type !== "ytki03:caption-tracks") return;
+    const tracks = Array.isArray(event.data.tracks) ? event.data.tracks : [];
+    latestCaptionTracks = tracks.filter(track => track && typeof track.baseUrl === "string").slice(0, 80);
+    const waiters = captionTrackWaiters;
+    captionTrackWaiters = [];
+    waiters.forEach(resolve => resolve(latestCaptionTracks));
+  });
 
   function parseClock(value) {
     if (!value) return null;
@@ -27,6 +41,78 @@
 
   function normalizeText(s) {
     return String(s || "").replace(/\s+/g, " ").trim().normalize("NFKC");
+  }
+
+  function isSafeTimedTextUrl(value) {
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" &&
+        (url.hostname === "youtube.com" || url.hostname.endsWith(".youtube.com")) &&
+        /^\/api\/timedtext$/.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function requestCaptionTracks(timeout = 1600) {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        captionTrackWaiters = captionTrackWaiters.filter(waiter => waiter !== done);
+        resolve(latestCaptionTracks);
+      }, timeout);
+      const done = tracks => { clearTimeout(timer); resolve(tracks); };
+      captionTrackWaiters.push(done);
+      window.postMessage({ type: "ytki03:request-caption-tracks" }, location.origin);
+    });
+  }
+
+  function chooseCaptionTrack(tracks) {
+    const preferences = [
+      ...(navigator.languages || []).map(x => x.toLowerCase()),
+      "zh-hant", "zh-tw", "zh", "en"
+    ];
+    const score = track => {
+      const lang = String(track.languageCode || "").toLowerCase();
+      const languageRank = preferences.findIndex(pref => lang === pref || lang.startsWith(pref + "-"));
+      // Prefer a human-authored track when language suitability is identical.
+      return (languageRank < 0 ? 1000 : languageRank * 10) + (track.kind === "asr" ? 1 : 0);
+    };
+    return tracks.filter(track => isSafeTimedTextUrl(track.baseUrl)).sort((a, b) => score(a) - score(b))[0] || null;
+  }
+
+  function segmentsFromJson3(data) {
+    const result = [];
+    for (const event of data?.events || []) {
+      const text = normalizeText((event.segs || []).map(seg => seg.utf8 || "").join(""));
+      const start = Number(event.tStartMs) / 1000;
+      const duration = Number(event.dDurationMs) / 1000;
+      if (text && Number.isFinite(start)) result.push({ start, end: Number.isFinite(duration) ? start + duration : null, duration, text });
+    }
+    const unique = new Map();
+    for (const segment of result) unique.set(`${segment.start}|${segment.text}`, segment);
+    return [...unique.values()].sort((a, b) => a.start - b.start);
+  }
+
+  async function tryDirectCaptionTrack() {
+    const tracks = await requestCaptionTracks();
+    const track = chooseCaptionTrack(tracks);
+    if (!track) return null;
+    const url = new URL(track.baseUrl);
+    url.searchParams.set("fmt", "json3");
+    try {
+      const response = await fetch(url.href, { credentials: "include" });
+      if (!response.ok) return null;
+      const body = await response.text();
+      // A current YouTube anti-abuse variant returns HTTP 200 with an empty
+      // body. It is a failed fast path, not an empty transcript.
+      if (!body.trim()) return null;
+      const segments = segmentsFromJson3(JSON.parse(body));
+      if (!segments.length) return null;
+      const coverage = transcriptCoverage(segments, Number(videoEl()?.duration) || null);
+      return { segments, coverage, language: track.languageCode || null, trackType: track.kind === "asr" ? "ASR" : "manual" };
+    } catch (_) {
+      return null;
+    }
   }
 
   async function readStored(videoId) {
@@ -107,6 +193,10 @@
       title: getTitle(), status, detail }).catch(() => {});
   }
 
+  function isRendered(el) {
+    return !!el && el.getClientRects().length > 0;
+  }
+
   function findTranscriptButton() {
     const preferred = [
       "ytd-video-description-transcript-section-renderer button",
@@ -114,25 +204,54 @@
       "ytd-engagement-panel-section-list-renderer #header"
     ];
     for (const sel of preferred) {
-      const el = document.querySelector(sel);
-      if (el && /transcript|轉錄|逐字稿|文字記錄/i.test((el.innerText || "") + " " + (el.getAttribute("aria-label") || ""))) return el;
+      for (const el of document.querySelectorAll(sel)) {
+        if (isRendered(el) && /show transcript|transcript|顯示轉錄稿|逐字稿|轉錄稿|文字記錄/i.test(
+          (el.innerText || "") + " " + (el.getAttribute("aria-label") || "")
+        )) return el;
+      }
     }
     const candidates = [...document.querySelectorAll("button, tp-yt-paper-button, a, yt-button-shape button")];
     return candidates.find(el => {
       const text = normalizeText((el.innerText || "") + " " + (el.getAttribute("aria-label") || ""));
       return /show transcript|transcript|顯示轉錄稿|逐字稿|轉錄稿|文字記錄/i.test(text) &&
-        el.getClientRects().length > 0;
+        isRendered(el);
     }) || null;
+  }
+
+  async function revealTranscriptButton() {
+    let button = findTranscriptButton();
+    if (button) return button;
+    // In some layouts YouTube keeps the transcript CTA inside the collapsed
+    // description. Expanding the description is preferable to clicking a
+    // hidden duplicate button, which has no effect.
+    const selectors = [
+      "#description-inline-expander #expand",
+      "ytd-text-inline-expander #expand",
+      "tp-yt-paper-button#expand",
+      "button[aria-label*='more' i]",
+      "button[aria-label*='更多']"
+    ];
+    for (const selector of selectors) {
+      const expander = [...document.querySelectorAll(selector)].find(isRendered);
+      if (!expander) continue;
+      expander.click();
+      await sleep(350);
+      button = findTranscriptButton();
+      if (button) return button;
+    }
+    return null;
   }
 
   function transcriptPanel() {
     // YouTube has moved the transcript UI between engagement-panel containers
     // over time. Prefer known renderers, but fall back to the segment list.
-    return document.querySelector("ytd-transcript-renderer") ||
-      document.querySelector("ytd-transcript-segment-list-renderer") ||
-      document.querySelector("ytd-engagement-panel-section-list-renderer[target-id*='transcript']") ||
-      document.querySelector("ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED']") ||
-      null;
+    const candidates = [
+      ...document.querySelectorAll("ytd-transcript-renderer"),
+      ...document.querySelectorAll("ytd-transcript-segment-list-renderer"),
+      ...document.querySelectorAll("ytd-engagement-panel-section-list-renderer[target-id*='transcript' i]"),
+      ...document.querySelectorAll("ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED']")
+    ];
+    return candidates.find(isRendered) || null;
   }
 
   function transcriptRows() {
@@ -190,30 +309,84 @@
     return [...unique.values()];
   }
 
+  function findTranscriptScroller(panel) {
+    // The segment list itself is not consistently the scroll container. YouTube
+    // has used the list, the transcript renderer, and an ancestor engagement
+    // panel across layouts. Pick a genuinely scrollable element, not just the
+    // first matching renderer.
+    const candidates = [];
+    const add = el => {
+      if (el && !candidates.includes(el)) candidates.push(el);
+    };
+    add(panel?.querySelector("#segments-container, .segments-container"));
+    add(panel?.querySelector("ytd-transcript-segment-list-renderer"));
+    add(panel);
+    let ancestor = panel?.parentElement;
+    for (let i = 0; ancestor && i < 7; i++, ancestor = ancestor.parentElement) add(ancestor);
+    for (const el of candidates) {
+      if (el.scrollHeight > el.clientHeight + 2) return el;
+    }
+    return candidates[0] || null;
+  }
+
+  function transcriptCoverage(segments, duration) {
+    const lastStart = segments.reduce((max, seg) => Math.max(max, seg.start || 0), 0);
+    // Captions commonly finish a few seconds before media.duration. Do not call
+    // a transcript complete merely because its row count stopped changing.
+    const tolerance = duration ? Math.max(12, Math.min(45, duration * 0.025)) : null;
+    return {
+      lastStart,
+      duration,
+      reachesEnd: duration ? lastStart >= duration - tolerance : false
+    };
+  }
+
   async function scrollTranscriptToLoadAll() {
     const panel = transcriptPanel();
-    const scroller = (panel && (
-      panel.querySelector("#segments-container, .segments-container, ytd-transcript-segment-list-renderer") ||
-      panel
-    )) || document.querySelector("#segments-container, .segments-container, ytd-transcript-segment-list-renderer");
+    const scroller = findTranscriptScroller(panel);
     const collected = new Map();
-    let stableRounds = 0;
-    let previousCount = -1;
-    for (let i = 0; i < 100; i++) {
-      for (const seg of extractRows()) collected.set(`${seg.start}|${seg.text}`, seg);
-      const count = collected.size;
-      stableRounds = count === previousCount ? stableRounds + 1 : 0;
-      if (stableRounds >= 4) break;
-      previousCount = count;
-      if (!scroller) break;
-      const before = scroller.scrollTop;
-      scroller.scrollTop = Math.min(scroller.scrollTop + Math.max(300, scroller.clientHeight * 0.8), scroller.scrollHeight);
+    const duration = Number(videoEl()?.duration) || null;
+    // Long transcripts are virtualized. Four 250ms no-growth checks (the old
+    // logic) can end before the next chunk appears. Use a duration-scaled
+    // deadline and page through the list so every virtualized row crosses the
+    // viewport at least once.
+    const deadline = Date.now() + Math.min(240000, Math.max(30000, (duration || 1800) * 1000 / 60));
+    let idleRounds = 0;
+    let lastCount = 0;
+    let bottomRounds = 0;
+
+    if (scroller) {
+      scroller.scrollTop = 0;
       scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
-      await sleep(250);
-      if (scroller.scrollTop === before && i > 5) break;
+      await sleep(350);
+    }
+
+    while (Date.now() < deadline) {
+      for (const seg of extractRows()) collected.set(`${seg.start}|${seg.text}`, seg);
+      const segments = [...collected.values()];
+      const coverage = transcriptCoverage(segments, duration);
+      const atBottom = !scroller || scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 3;
+      if (coverage.reachesEnd && atBottom) break;
+
+      if (segments.length === lastCount) idleRounds++; else idleRounds = 0;
+      lastCount = segments.length;
+      if (!scroller) break;
+
+      const before = scroller.scrollTop;
+      const step = Math.max(120, Math.floor(scroller.clientHeight * 0.72));
+      scroller.scrollTop = Math.min(before + step, scroller.scrollHeight);
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await sleep(atBottom ? 500 : 300);
+
+      const stillAtBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 3;
+      bottomRounds = stillAtBottom && scroller.scrollTop === before ? bottomRounds + 1 : 0;
+      // Only give up after sustained no-progress at the actual bottom. The
+      // result remains explicitly marked partial below unless it reaches end.
+      if (bottomRounds >= 12 || (idleRounds >= 28 && stillAtBottom)) break;
     }
     for (const seg of extractRows()) collected.set(`${seg.start}|${seg.text}`, seg);
-    return [...collected.values()].sort((a,b) => a.start - b.start);
+    const segments = [...collected.values()].sort((a,b) => a.start - b.start);
+    return { segments, coverage: transcriptCoverage(segments, duration) };
   }
 
   async function waitForPanel(timeout = 12000) {
@@ -230,9 +403,28 @@
     captureRunning = true;
     setStatus("checking_transcript");
     try {
+      const direct = await tryDirectCaptionTrack();
+      if (direct?.coverage?.reachesEnd) {
+        const data = await readStored(videoId);
+        data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
+        data.transcript = {
+          sourceType: "youtube_caption_track",
+          sourceMethod: "player_caption_track_json3",
+          language: direct.language,
+          trackType: direct.trackType,
+          completeness: "caption_track_reaches_video_end",
+          capturedAt: new Date().toISOString(),
+          coverage: direct.coverage,
+          segments: direct.segments.map((s, i) => ({ id: `tr-${i+1}`, ...s, sourceType: "youtube_caption_track" }))
+        };
+        await saveStored(data);
+        setStatus("transcript_captured_complete", `${direct.segments.length} 段（字幕軌快速取得）`);
+        return;
+      }
+
       let panel = transcriptPanel();
       if (!panel) {
-        const btn = findTranscriptButton();
+        const btn = await revealTranscriptButton();
         if (!btn) {
           setStatus("transcript_unavailable", "找不到 YouTube 原生逐字稿入口；可能沒有字幕、面板尚未載入或 YouTube 介面已變更。");
           return;
@@ -246,7 +438,8 @@
         setStatus("transcript_not_loaded", "已嘗試開啟逐字稿面板，但沒有讀到字幕行。");
         return;
       }
-      const segments = await scrollTranscriptToLoadAll();
+      const capture = await scrollTranscriptToLoadAll();
+      const { segments, coverage } = capture;
       if (!segments.length) {
         setStatus("transcript_empty", "面板已開啟，但未讀到可解析的字幕行。");
         return;
@@ -257,12 +450,18 @@
         sourceType: "youtube_transcript_panel_dom",
         sourceMethod: "auto_open_and_read_dom",
         language: null,
-        completeness: "captured_from_rendered_panel_not_independently_verified",
+        completeness: coverage.reachesEnd
+          ? "captured_from_rendered_panel_reaches_video_end"
+          : "captured_from_rendered_panel_may_be_partial",
         capturedAt: new Date().toISOString(),
+        coverage,
         segments: segments.map((s, i) => ({ id: `tr-${i+1}`, ...s, sourceType: "youtube_transcript_panel_dom" }))
       };
       await saveStored(data);
-      setStatus("transcript_captured", `${segments.length} 段`);
+      const endText = coverage.duration
+        ? `；最後時間 ${Math.floor(coverage.lastStart)}s / 影片 ${Math.floor(coverage.duration)}s`
+        : "；無法讀取影片總長度，尚未驗證完整性";
+      setStatus(coverage.reachesEnd ? "transcript_captured_complete" : "transcript_captured_partial", `${segments.length} 段${endText}`);
       if (panelOpenedByUs) {
         await sleep(300);
         const close = document.querySelector("ytd-transcript-renderer #close-button, ytd-transcript-renderer button[aria-label*='Close'], ytd-transcript-renderer button[aria-label*='關閉']");

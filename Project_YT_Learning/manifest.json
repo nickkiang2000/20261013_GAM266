@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "YouTube Knowledge & Investment Immersion",
-  "version": "0.3.1",
-  "description": "Automatically captures YouTube transcript panel text and observes visible captions locally.",
+  "version": "0.3.3",
+  "description": "Captures complete YouTube transcripts with a caption-track fast path and verified panel fallback.",
   "permissions": [
     "storage",
     "sidePanel",
@@ -21,6 +21,16 @@
     "default_path": "sidepanel.html"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "page-bridge.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
     {
       "matches": [
         "https://www.youtube.com/*"
