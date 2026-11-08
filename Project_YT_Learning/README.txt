@@ -1,40 +1,64 @@
-YouTube Knowledge & Investment Immersion — Phase 0.1
+YouTube Knowledge & Investment Immersion - Phase 0.2
+=====================================================
 
-Purpose
-- Observe captions currently rendered visibly in the YouTube player.
-- Show the observed text and approximate playback timestamp in Chrome's Side Panel.
-- This is NOT a full transcript extractor and does not fetch caption-track files.
+本版目標
+--------
+在 Phase 0.1 可見字幕觀察基礎上，加入：
+1. Video ID、標題與 URL 關聯。
+2. 短時間重複字幕事件合併。
+3. 使用者提供 SRT / VTT / TXT / 貼上逐字稿匯入。
+4. 統一字幕資料結構。
+5. 本機保存與 JSON 匯出。
 
-Requirements
-- Google Chrome 114 or newer
-- Windows 10/11
-- Internet access and a YouTube video page
+重要界線
+--------
+- 可見字幕觀察仍不是完整逐字稿。
+- 本版不會呼叫 YouTube 非公開字幕端點、不擷取音訊、不呼叫 AI。
+- 完整字幕需由使用者自行提供有權使用的字幕檔或文字。
+- 匯入資料會標示 user_provided_not_verified，不會假設完整性已獲驗證。
+- 資料只儲存在 Chrome Extension 本機 chrome.storage.local，不會自動上傳。
 
-Install
-1. Extract this ZIP to a normal folder, e.g. Desktop\YouTube-Knowledge-Extension-0.1.
-2. In Chrome, open chrome://extensions
-3. Enable Developer mode.
-4. Click "Load unpacked".
-5. Select the extracted folder containing manifest.json.
-6. Open a YouTube video page and click the extension toolbar icon to open the side panel.
-7. Turn on CC in the YouTube player and play the video.
+安裝／更新
+----------
+1. 解壓縮 ZIP。
+2. 開啟 Chrome：chrome://extensions/
+3. 確認 Developer mode 已開啟。
+4. 若已有 0.1：
+   - 可先保留 0.1 資料夾作備份。
+   - 在原本 Extension 卡片按「重新載入」，或移除 0.1 後載入 0.2。
+   - 建議先移除舊版，再按「載入未封裝項目」選取本資料夾。
+5. 開啟 YouTube 影片，按 Extension 圖示開啟側邊欄。
+6. 開啟 CC 並播放，確認可見字幕持續出現。
 
-Test
-- Test an ordinary public video with creator-uploaded captions.
-- Test an ordinary public video with auto-generated captions.
-- Test a video with captions disabled, and a video without captions.
-- Record whether text appears, whether it is duplicated, and whether timestamps are close to the player time.
+字幕匯入
+--------
+- 先切換到對應 YouTube 影片頁。
+- 可將從 YouTube 原生逐字稿複製的文字貼入文字框。
+- 或選擇 .srt / .vtt / .txt 檔案。
+- 語言欄可填 ja、en、zh-TW 等代碼。
+- SRT / VTT 會解析每段起始與結束時間。
+- TXT 支援每行前綴時間戳，例如：
+  00:01:12 這是字幕文字
+  [01:12] 另一段字幕
+- 沒有時間戳的一般 TXT 會作為單一文字段落匯入，不會自行推算時間。
 
-Limitations
-- The prototype reads .ytp-caption-segment elements currently rendered in the player.
-- It only observes captions while the extension content script is active; it cannot recover earlier captions.
-- Caption display timing may differ from the exact start/end timing of the underlying caption cue.
-- YouTube may change its page structure at any time.
-- This prototype does not use YouTube Data API, does not call an LLM, and does not download caption files.
-- Technical success does not establish permission for commercial or public distribution. Review YouTube Terms and Developer Policies before productizing.
+匯出
+----
+按「匯出 JSON」，會輸出目前影片的結構化字幕資料。
 
-Troubleshooting
-- If the panel says it cannot connect, reload the YouTube tab and reopen the panel.
-- Make sure the video is on youtube.com/watch?v=...
-- Turn on CC and ensure captions are visibly appearing on the video.
-- After editing files, open chrome://extensions and click the reload icon for this extension, then refresh the YouTube tab.
+測試建議
+--------
+A. 觀察字幕時，連續字幕不要大量重複顯示。
+B. 播放影片 A，收集字幕後切換影片 B，再切回 A，確認兩部影片資料分開保存。
+C. 匯入一份 SRT 或 VTT，確認每段時間戳正確。
+D. 貼上一份純文字逐字稿，確認匯入後沒有虛構時間戳。
+E. 關閉側邊欄再開啟，確認資料仍存在。
+F. 匯出 JSON，檢查 videoId、sourceMethod、completeness 與 segments。
+
+已知限制
+--------
+- 影片切換後，需等待 YouTube 頁面完成導覽，側欄才會更新目前影片。
+- YouTube 原生逐字稿面板目前不會由 Extension 自動讀取；請使用者自行複製後貼上。
+- TXT 沒有時間戳時無法精準跳轉。
+- 重複事件合併採相同文字且播放時間差不超過 1.5 秒的簡單規則；這是原型規則，需用實測資料調整。
+- 這不是正式商用版本；YouTube 條款與相關政策仍須另行審查。
