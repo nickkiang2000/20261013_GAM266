@@ -18,7 +18,7 @@
   let captionTrackWaiters = [];
   let storageWriteChain = Promise.resolve();
   const DIAGNOSTIC_VERSION = 1;
-  const EXTENSION_VERSION = "0.5.0";
+  const EXTENSION_VERSION = "0.6.0";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
@@ -58,10 +58,10 @@
     latestCaptionPayloads = payloads.filter(payload =>
       payload && typeof payload.body === "string" && payload.body.length <= 8 * 1024 * 1024 &&
       (!payload.videoId || payload.videoId === videoIdFromUrl())
-    ).slice(-6);
+    ).slice(-12);
     const newestPayload = latestCaptionPayloads[latestCaptionPayloads.length - 1];
     if (newestPayload) {
-      const signature = `${newestPayload.videoId}|${newestPayload.languageCode}|${newestPayload.format}|${newestPayload.body.length}|${newestPayload.capturedAt}`;
+      const signature = `${newestPayload.videoId}|${newestPayload.languageCode}|${newestPayload.translationLanguageCode || ""}|${newestPayload.format}|${newestPayload.body.length}|${newestPayload.capturedAt}`;
       if (signature !== lastCaptionPayloadSignature) {
         lastCaptionPayloadSignature = signature;
         scheduleInterceptedCaptionRetry();
@@ -253,22 +253,61 @@
   }
 
   function interceptedCaptionResult() {
-    for (const payload of [...latestCaptionPayloads].reverse()) {
+    const groups = new Map();
+    for (const payload of latestCaptionPayloads) {
       const segments = segmentsFromCaptionBody(payload.body);
       if (!segments.length) continue;
-      const duration = Number(videoEl()?.duration) || latestPlayerDuration || null;
+      const effectiveLanguage = payload.translationLanguageCode || payload.languageCode || "unknown";
+      const key = `${payload.languageCode || "unknown"}->${effectiveLanguage}`;
+      if (!groups.has(key)) groups.set(key, { segments: new Map(), hasWholeTrackResponse: false });
+      const group = groups.get(key);
+      if (payload.requestScope === "whole_track") group.hasWholeTrackResponse = true;
+      for (const segment of segments) group.segments.set(`${segment.start}|${segment.text}`, segment);
+    }
+    const duration = Number(videoEl()?.duration) || latestPlayerDuration || null;
+    const candidates = [...groups.entries()].map(([languageKey, group]) => {
+      const segments = [...group.segments.values()].sort((a, b) => a.start - b.start);
+      const language = languageKey.split("->")[1];
+      const coverage = transcriptCoverage(segments, duration);
+      if (group.hasWholeTrackResponse && segments.length >= 10) {
+        coverage.reachesEnd = true;
+        coverage.verificationMethod = "youtube_whole_track_response";
+      }
       return {
         ok: true,
         segments,
-        coverage: transcriptCoverage(segments, duration),
-        language: payload.languageCode || null,
-        trackType: inferTrackType(payload.languageCode, "player_observed"),
-        sourceMethod: `player_observed_${payload.source || "timedtext"}`,
-        interceptedFormat: detectCaptionBodyFormat(payload.body, payload.format),
+        coverage,
+        language: language === "unknown" ? null : language,
+        trackType: inferTrackType(language, "player_observed"),
+        sourceMethod: "player_observed_merged_timedtext_responses",
+        interceptedFormat: "json3",
         trackCount: latestCaptionTracks.length
       };
-    }
-    return null;
+    });
+    return candidates.sort((a, b) =>
+      Number(b.coverage.reachesEnd) - Number(a.coverage.reachesEnd) ||
+      b.coverage.lastStart - a.coverage.lastStart || b.segments.length - a.segments.length
+    )[0] || null;
+  }
+
+  function captionPayloadDiagnostics() {
+    return latestCaptionPayloads.map(payload => {
+      const segments = segmentsFromCaptionBody(payload.body);
+      const starts = segments.map(segment => segment.start).filter(Number.isFinite);
+      return {
+        language: payload.languageCode || null,
+        translationLanguage: payload.translationLanguageCode || null,
+        declaredFormat: payload.format || "unknown",
+        detectedFormat: detectCaptionBodyFormat(payload.body, payload.format),
+        source: payload.source || null,
+        requestScope: payload.requestScope || "unknown",
+        queryKeys: Array.isArray(payload.queryKeys) ? payload.queryKeys.slice(0, 40) : [],
+        bodyBytes: new TextEncoder().encode(payload.body || "").length,
+        parsedSegmentCount: segments.length,
+        firstStart: starts.length ? Math.min(...starts) : null,
+        lastStart: starts.length ? Math.max(...starts) : null
+      };
+    });
   }
 
   async function tryDirectCaptionTrack() {
@@ -427,7 +466,8 @@
         observedPayloads: latestCaptionPayloads.length,
         observedFormats: [...new Set(latestCaptionPayloads.map(payload => payload.format || "unknown"))].slice(0, 10),
         languages: [...new Set(latestCaptionTracks.map(track => String(track.languageCode || "")).filter(Boolean))].slice(0, 20),
-        kinds: [...new Set(latestCaptionTracks.map(track => track.kind || "manual"))].slice(0, 10)
+        kinds: [...new Set(latestCaptionTracks.map(track => track.kind || "manual"))].slice(0, 10),
+        payloadDetails: captionPayloadDiagnostics()
       },
       transcriptUi: {
         matchingButtonCount: buttons.length,
@@ -748,8 +788,40 @@
         }
         if (!btn) {
           if (!panel) {
+            // Payloads can arrive while we wait for YouTube's UI. Re-evaluate
+            // them before declaring failure instead of using the stale result
+            // captured at the beginning of this run.
+            const latestDirect = interceptedCaptionResult();
+            if (latestDirect?.coverage?.reachesEnd) {
+              const data = await readStored(videoId);
+              data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
+              data.schemaVersion = 4;
+              data.transcript = await buildTranscriptRecord({
+                segments: latestDirect.segments,
+                sourceType: "youtube_caption_track",
+                sourceMethod: latestDirect.sourceMethod,
+                language: latestDirect.language,
+                trackType: latestDirect.trackType,
+                completeness: "caption_track_reaches_video_end",
+                coverage: latestDirect.coverage,
+                rawFormat: latestDirect.interceptedFormat
+              });
+              await saveStored(data);
+              const successDiagnostics = collectCaptureDiagnostics("transcript_capture_success", {
+                sourceMethod: data.transcript.sourceMethod,
+                rawSegmentCount: data.transcript.stats.rawSegmentCount,
+                mergedPayloadCount: latestCaptionPayloads.length
+              });
+              await setStatus("transcript_captured_complete", `${latestDirect.segments.length} 段（合併播放器字幕回應）`, successDiagnostics);
+              return;
+            }
             const diagnostics = collectCaptureDiagnostics("transcript_entry_unavailable", {
-              direct: { ok: direct?.ok || false, reason: direct?.reason || "unknown", trackCount: direct?.trackCount || 0, httpStatus: direct?.httpStatus || null },
+              direct: {
+                ok: direct?.ok || false, reason: direct?.reason || "unknown", trackCount: direct?.trackCount || 0,
+                httpStatus: direct?.httpStatus || null, parsedSegmentCount: latestDirect?.segments?.length || direct?.segments?.length || 0,
+                lastStart: latestDirect?.coverage?.lastStart ?? direct?.coverage?.lastStart ?? null,
+                duration: latestDirect?.coverage?.duration ?? direct?.coverage?.duration ?? null
+              },
               uiWait: { attempts: entry.attempts, waitedMs: entry.waitedMs }
             });
             await setStatus(

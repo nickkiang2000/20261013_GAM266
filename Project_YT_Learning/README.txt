@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.5.0.0
+YouTube Knowledge & Investment Immersion — Extension 0.6.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -28,10 +28,13 @@ YouTube Knowledge & Investment Immersion — Extension 0.5.0.0
 - 面板路徑會以影片總長度及最後字幕時間戳判定完整性；總長度尚未載入、字幕本來就在結尾前結束或 YouTube 介面變動時，狀態會保守地顯示「可能不完整」。請在長影片測試時核對末段時間戳。
 - 若影片沒有可用字幕，原生逐字稿不存在，這版不會自行執行 ASR。
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
-- 本版沒有外部網路請求、沒有 AI API、沒有後端；字幕資料保存在本機 Chrome Storage。
+- 本版沒有 AI API、沒有後端；字幕與候選詞保存在本機 Chrome Storage。只有使用者展開某一候選詞時，該詞會送至 Wikipedia 查詢，完整字幕不會送出。
 
 
-0.5.0 Rule-based Knowledge Terms：以本機語言分詞、專名格式、對數詞頻、跨段落分布與標題命中產生候選並排序；預設顯示前 10 個，可每次再顯示 10 個。使用者按下分析後，只把前 25 個候選詞送至對應語言 Wikipedia，以搜尋、摘要與消歧分數補強；完整字幕不會送出。每個詞保留分數、排名訊號、Wikipedia 資料、原字幕證據及可跳轉時間戳。
+0.6.0 Lazy Term Details + Caption Payload Merge：取得完整逐字稿後，自動以本機規則列出全部候選專有名詞，不再需要按分析按鈕。點選單一詞後才依序查詢影片語言 Wikipedia、英文 Wikipedia；都沒有可信結果時顯示 Google 搜尋連結。字幕攔截新增翻譯目標語言（tlang）辨識、同軌多 payload 合併、等待 UI 期間重新判定，以及不含字幕本文的 payload 段數／時間範圍診斷。
+
+
+0.5.0 Rule-based Knowledge Terms：以本機語言分詞、專名格式、對數詞頻、跨段落分布與標題命中產生候選並排序。每個詞保留分數、排名訊號、原字幕證據及可跳轉時間戳。
 
 0.4.0 Transcript Foundation：儲存可追溯的原始字幕 cues、分析用合併段落、純文字、字幕軌清單、語言、人工／ASR 類型、來源格式、覆蓋率、統計與 SHA-256。成功擷取會寫入 transcript_capture_success 診斷，避免 latest 仍停留在舊失敗。資料 schemaVersion 升為 4，供非 AI 專有名詞與 Ticker 關鍵字演算法使用。
 

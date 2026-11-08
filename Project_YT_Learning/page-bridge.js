@@ -14,10 +14,14 @@
     try {
       const url = new URL(typeof value === "string" ? value : value?.url || "", location.href);
       if (url.protocol !== "https:" || !(url.hostname === "youtube.com" || url.hostname.endsWith(".youtube.com")) || url.pathname !== "/api/timedtext") return null;
+      const partialKeys = ["range", "sq", "rn", "start", "end", "begin"];
       return {
         videoId: url.searchParams.get("v") || "",
         languageCode: url.searchParams.get("lang") || "",
-        format: url.searchParams.get("fmt") || "unknown"
+        translationLanguageCode: url.searchParams.get("tlang") || "",
+        format: url.searchParams.get("fmt") || "unknown",
+        requestScope: partialKeys.some(key => url.searchParams.has(key)) ? "partial" : "whole_track",
+        queryKeys: [...new Set([...url.searchParams.keys()])].filter(key => !/sig|key|token|pot|expire/i.test(key)).slice(0, 40)
       };
     } catch (_) {
       return null;
@@ -26,18 +30,21 @@
 
   function rememberPayload(info, body, source) {
     if (!info || typeof body !== "string" || !body.trim() || body.length > MAX_BODY_LENGTH) return;
-    const signature = `${info.videoId}|${info.languageCode}|${info.format}|${body.length}|${body.slice(0, 32)}|${body.slice(-32)}`;
+    const signature = `${info.videoId}|${info.languageCode}|${info.translationLanguageCode}|${info.format}|${body.length}|${body.slice(0, 32)}|${body.slice(-32)}`;
     if (capturedPayloads.some(item => item.signature === signature)) return;
     capturedPayloads.push({
       signature,
       videoId: info.videoId,
       languageCode: info.languageCode,
+      translationLanguageCode: info.translationLanguageCode,
       format: info.format,
+      requestScope: info.requestScope,
+      queryKeys: info.queryKeys,
       body,
       source,
       capturedAt: new Date().toISOString()
     });
-    while (capturedPayloads.length > 6) capturedPayloads.shift();
+    while (capturedPayloads.length > 12) capturedPayloads.shift();
     reply();
   }
 
