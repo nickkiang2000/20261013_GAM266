@@ -140,6 +140,21 @@ async function searchWikipediaTerm(term, language) {
   } catch (_) { return null; }
 }
 
+async function exactWikipediaTerm(term, language) {
+  const params = new URLSearchParams({
+    action:"query", prop:"extracts|info", inprop:"url", exintro:"1", explaintext:"1", exchars:"360",
+    titles:term, redirects:"1", converttitles:"1", format:"json", formatversion:"2", origin:"*"
+  });
+  try {
+    const response=await fetch(`https://${language}.wikipedia.org/w/api.php?${params}`,{credentials:"omit"});
+    if(!response.ok)return null;
+    const page=(await response.json())?.query?.pages?.[0];
+    if(!page||page.missing)return null;
+    return {status:"matched",language,title:page.title,pageId:page.pageid,url:page.fullurl,
+      matchConfidence:1,explanation:clean(page.extract||"")};
+  }catch(_){return null}
+}
+
 async function fetchWikipediaExtracts(matches, language) {
   const byId = new Map();
   for (let i=0; i<matches.length; i+=20) {
@@ -191,7 +206,10 @@ async function enrichTermsWithWikipedia(terms, language) {
 async function resolveTermReference(term, primaryLanguage) {
   const languages = primaryLanguage === "en" ? ["en"] : [primaryLanguage, "en"];
   for (const language of languages) {
-    const match = await searchWikipediaTerm(term.term, language);
+    const lookupTerms=[...new Set([term.term,...(term.lookupTerms||[])])];
+    for(const lookupTerm of lookupTerms){const exact=await exactWikipediaTerm(lookupTerm,language);if(exact)return exact}
+    let match=null;
+    for(const lookupTerm of lookupTerms){match=await searchWikipediaTerm(lookupTerm,language);if(match)break}
     if (!match) continue;
     const pages = await fetchWikipediaExtracts([match], language);
     const page = pages.get(match.pageId);
@@ -213,19 +231,19 @@ async function resolveTermReference(term, primaryLanguage) {
 async function ensureLocalKnowledgeTerms() {
   const transcript = activeData?.transcript;
   if (!activeVideoId || !transcript?.segments?.length) return;
-  if (activeData.knowledgeTerms?.method === "rule_based_v2_lazy_lookup" &&
+  if (activeData.knowledgeTerms?.method === "rule_based_v3_high_precision" &&
       activeData.knowledgeTerms.sourceTranscriptSha256 === (transcript.contentSha256 || null)) return;
   const utils = globalThis.YTKITranscriptUtils, extractor = globalThis.YTKITermExtractor;
   const analysisSegments = transcript.analysisSegments?.length
     ? transcript.analysisSegments : utils.buildAnalysisSegments(transcript.segments);
   const language = transcript.language || "en";
   const terms = extractor.extractTerms({
-    analysisSegments, title: activeData.video?.title || "", language, limit: 200
+    analysisSegments, title: activeData.video?.title || "", language, limit: 120
   }).map(term => ({ ...term, wikipedia: { status: "not_queried", language: wikipediaLanguage(language) } }));
   const key = PREFIX + activeVideoId;
   const current = (await chrome.storage.local.get(key))[key] || activeData;
   current.knowledgeTerms = {
-    version: 2, method: "rule_based_v2_lazy_lookup", generatedAt: new Date().toISOString(),
+    version: 3, method: "rule_based_v3_high_precision", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length, terms
   };
@@ -241,31 +259,33 @@ function renderKnowledgeTerms() {
     return;
   }
   target.className="terms";
-  const frag=document.createDocumentFragment();
+  const cloud=document.createElement("div");cloud.className="termCloud";
   result.terms.forEach((term,index)=>{
-    const card=document.createElement("article"); card.className="termCard";
-    const head=document.createElement("button"); head.className="termHead termToggle"; head.dataset.termIndex=String(index);
-    const rank=document.createElement("span"); rank.className="termRank"; rank.textContent=`#${index+1}`;
-    const name=document.createElement("span"); name.className="termName"; name.textContent=term.term;
-    const score=document.createElement("span"); score.className="termScore"; score.textContent=`${Math.round(term.score)} 分`;
-    head.append(rank,name,score);
-    const meta=document.createElement("div"); meta.className="termMeta";
-    meta.textContent=`${term.type}・出現 ${term.frequency} 次・跨 ${term.segmentCount} 段`;
-    card.append(head,meta);
-    if (expandedTerms.has(`${activeVideoId}:${index}`)) {
-      const explanation=document.createElement("div"); explanation.className="termExplanation";
-      const wiki=term.wikipedia || {status:"not_queried"};
-      explanation.textContent=wiki.status==="not_queried" ? "正在查詢 Wikipedia…" : (wiki.explanation||"此詞條沒有可用的簡介。");
-      const links=document.createElement("div"); links.className="termLinks";
-      if(wiki.url){const a=document.createElement("a");a.className="wikiLink";a.href=wiki.url;a.target="_blank";a.rel="noopener";a.textContent=wiki.status==="google_fallback"?"Google 搜尋":`${wiki.language}.wikipedia`;links.append(a)}
-      for(const occurrence of (term.occurrences||[])){
-        const button=document.createElement("button");button.className="termTime";button.textContent=fmtTime(occurrence.start);button.dataset.seconds=occurrence.start;links.append(button)
-      }
-      card.append(explanation,links);
-    }
-    frag.append(card);
+    const tag=document.createElement("button");tag.className="termTag";tag.dataset.termIndex=String(index);
+    const weight=Math.max(0,Math.min(1,(Number(term.score)||70)/100));
+    tag.style.fontSize=`${(12+weight*6).toFixed(1)}px`;
+    tag.textContent=term.term;tag.title=`${term.type}・出現 ${term.frequency} 次`;
+    if(expandedTerms.has(`${activeVideoId}:${index}`))tag.classList.add("selected");
+    cloud.append(tag);
   });
-  target.append(frag);
+  target.append(cloud);
+  const selectedIndex=result.terms.findIndex((_,index)=>expandedTerms.has(`${activeVideoId}:${index}`));
+  if(selectedIndex>=0){
+    const term=result.terms[selectedIndex],detail=document.createElement("article");detail.className="termCard termDetail";
+    const head=document.createElement("div");head.className="termHead";
+    const name=document.createElement("span");name.className="termName";name.textContent=term.term;
+    const score=document.createElement("span");score.className="termScore";score.textContent=`${Math.round(term.score)} 分`;
+    head.append(name,score);
+    const meta=document.createElement("div");meta.className="termMeta";
+    meta.textContent=`${term.type}・出現 ${term.frequency} 次・跨 ${term.segmentCount} 段`;
+    const explanation=document.createElement("div");explanation.className="termExplanation";
+    const wiki=term.wikipedia||{status:"not_queried"};
+    explanation.textContent=wiki.status==="not_queried"?"正在查詢 Wikipedia…":(wiki.explanation||"此詞條沒有可用的簡介。");
+    const links=document.createElement("div");links.className="termLinks";
+    if(wiki.url){const a=document.createElement("a");a.className="wikiLink";a.href=wiki.url;a.target="_blank";a.rel="noopener";a.textContent=wiki.status==="google_fallback"?"Google 搜尋":`${wiki.language}.wikipedia`;links.append(a)}
+    for(const occurrence of (term.occurrences||[])){const button=document.createElement("button");button.className="termTime";button.textContent=fmtTime(occurrence.start);button.dataset.seconds=occurrence.start;links.append(button)}
+    detail.append(head,meta,explanation,links);target.append(detail);
+  }
   const resolved=result.terms.filter(term=>term.wikipedia?.status && term.wikipedia.status!=="not_queried").length;
   $("termStatus").textContent=`已在本機找出 ${result.terms.length} 個候選；已展開查詢 ${resolved} 個`;
 }
@@ -334,7 +354,7 @@ $("termList").addEventListener("click",async event=>{
   if(!toggle||!activeData?.knowledgeTerms?.terms)return;
   const index=Number(toggle.dataset.termIndex), keyId=`${activeVideoId}:${index}`;
   if(expandedTerms.has(keyId)){expandedTerms.delete(keyId);renderKnowledgeTerms();return}
-  expandedTerms.add(keyId);renderKnowledgeTerms();
+  expandedTerms.clear();expandedTerms.add(keyId);renderKnowledgeTerms();
   const term=activeData.knowledgeTerms.terms[index];
   if(!term||term.wikipedia?.status!=="not_queried")return;
   try{

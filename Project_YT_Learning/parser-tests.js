@@ -44,14 +44,16 @@ const termContext = {};
 vm.createContext(termContext);
 vm.runInContext(termSource,termContext);
 const terms = termContext.YTKITermExtractor.extractTerms({
-  language:'ja',title:'東京とOpenAI',analysisSegments:[
-    {start:0,end:10,text:'東京でOpenAIとGPTについて話します。ソウルにも行きます。',sourceSegmentIds:['tr-1']},
-    {start:12,end:20,text:'東京ではGPTを使いました。',sourceSegmentIds:['tr-2']}
+  language:'zh',title:'缺少土豪的世界',analysisSegments:[
+    {start:0,end:30,text:'贾雷德·戴蒙德写了《枪炮、病菌与钢铁》，讨论地理决定论。文明、馴化、事情和方法都只是一般用字。',sourceSegmentIds:['tr-1']},
+    {start:31,end:60,text:'马克思、奥卡姆剃刀、达尔文演化论、燃素说、爱因斯坦、量子力学与牛顿力学。',sourceSegmentIds:['tr-2']},
+    {start:61,end:90,text:'爱丁顿 Arthur Eddington 的日食实验；三峡、长江、太平洋、洞庭湖、黄河、渤海和印度。',sourceSegmentIds:['tr-3']},
+    {start:91,end:120,text:'格陵兰岛的维京人来自挪威，另有雅利安、欧亚大草原、吉尔吉斯人与东方学家。',sourceSegmentIds:['tr-4']}
   ]
 });
-for (const expected of ['東京','OpenAI','GPT','ソウル']) {
-  if (!terms.some(term => term.term === expected)) throw new Error('Term extraction missing: '+expected);
-}
-const tokyo = terms.find(term => term.term === '東京');
-if (tokyo.frequency < 2 || tokyo.occurrences.length !== 2) throw new Error('Term occurrence mapping failed');
+const expectedTerms=['贾雷德·戴蒙德','枪炮、病菌与钢铁','地理决定论','马克思','奥卡姆剃刀','达尔文演化论','燃素说','爱因斯坦','量子力学','牛顿力学','爱丁顿 (Arthur Eddington)','日食实验','三峡','长江','太平洋','洞庭湖','黄河','渤海','印度','格陵兰岛','维京人','挪威','雅利安','欧亚大草原','吉尔吉斯人','东方学家'];
+for (const expected of expectedTerms) if (!terms.some(term => term.term === expected)) throw new Error('High-precision term extraction missing: '+expected);
+for (const rejected of ['文明','馴化','事情','方法','力学']) if (terms.some(term => term.term === rejected)) throw new Error('Generic term was not rejected: '+rejected);
+const diamond=terms.find(term=>term.term==='贾雷德·戴蒙德');
+if (!diamond.occurrences.length || diamond.occurrences[0].start !== 0) throw new Error('Term occurrence mapping failed');
 console.log("Parser tests passed.");

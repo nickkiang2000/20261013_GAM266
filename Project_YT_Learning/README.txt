@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.6.0
+YouTube Knowledge & Investment Immersion — Extension 0.7.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.6.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有 AI API、沒有後端；字幕與候選詞保存在本機 Chrome Storage。只有使用者展開某一候選詞時，該詞會送至 Wikipedia 查詢，完整字幕不會送出。
 
+
+0.7.0 High-precision Terms + Tag Cloud：取消「中文詞重複兩次即可入選」的低精度規則，改用書名符號、人名格式、學術詞後綴與可維護的多語實體詞庫；通用詞不再因高頻入選。所有結果以連續標籤文字雲顯示，點選後才展開摘要、連結及時間戳。Wikipedia 先以精確標題與重新導向查詢，修正「愛因斯坦」被模糊搜尋配到衛星詞條的問題。
 
 0.6.0 Lazy Term Details + Caption Payload Merge：取得完整逐字稿後，自動以本機規則列出全部候選專有名詞，不再需要按分析按鈕。點選單一詞後才依序查詢影片語言 Wikipedia、英文 Wikipedia；都沒有可信結果時顯示 Google 搜尋連結。字幕攔截新增翻譯目標語言（tlang）辨識、同軌多 payload 合併、等待 UI 期間重新判定，以及不含字幕本文的 payload 段數／時間範圍診斷。
 
