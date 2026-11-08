@@ -31,7 +31,15 @@
   function rememberPayload(info, body, source) {
     if (!info || typeof body !== "string" || !body.trim() || body.length > MAX_BODY_LENGTH) return;
     const signature = `${info.videoId}|${info.languageCode}|${info.translationLanguageCode}|${info.format}|${body.length}|${body.slice(0, 32)}|${body.slice(-32)}`;
-    if (capturedPayloads.some(item => item.signature === signature)) return;
+    const duplicateIndex=capturedPayloads.findIndex(item=>item.signature===signature);
+    if(duplicateIndex>=0){
+      const existing=capturedPayloads.splice(duplicateIndex,1)[0];
+      existing.capturedAt=new Date().toISOString();
+      existing.source=source;
+      capturedPayloads.push(existing);
+      reply();
+      return;
+    }
     capturedPayloads.push({
       signature,
       videoId: info.videoId,

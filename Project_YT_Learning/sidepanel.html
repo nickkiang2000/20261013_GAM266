@@ -13,45 +13,28 @@
     <div id="status" class="status">等待影片資訊</div>
   </header>
   <main>
-    <section class="toolbar">
-      <button id="refreshBtn">重新檢查逐字稿</button>
-      <button id="exportBtn" class="secondary">匯出 JSON</button>
-    </section>
-    <section class="summary">
-      <div><strong id="transcriptCount">0</strong><span>完整逐字稿段落</span></div>
-      <div><strong id="analysisCount">0</strong><span>分析用合併段落</span></div>
-      <div><strong id="observationCount">0</strong><span>即時觀察紀錄</span></div>
-    </section>
     <div id="transcriptSourceLabel" class="transcriptSource">目前分析字幕：等待擷取</div>
-    <details class="transcriptDetails">
-      <summary>完整逐字稿（預設隱藏）</summary>
-      <p class="hint">開啟 YouTube 影片後會自動嘗試擷取。若 YouTube 未提供逐字稿，或頁面結構改變，這裡會顯示狀態。</p>
-      <div id="transcriptList" class="segments empty">尚未取得逐字稿</div>
-    </details>
-    <section>
-      <h2>知識專有名詞</h2>
-      <p class="hint">取得逐字稿後會以高精度規則與本機實體詞庫產生標籤文字雲，並在背景預載各詞的原語言／英文 Wikipedia 資料；兩者都沒有時提供 Google 搜尋。非母語字幕預設顯示較多詞語。</p>
+    <section class="knowledgeSection">
+      <div class="knowledgeHeading"><h2>知識專有名詞</h2><span class="liveLegend"><i></i>影片目前提及</span></div>
       <div id="termStatus" class="hint">等待逐字稿</div>
       <div id="termList" class="terms empty">尚無專有名詞</div>
       <button id="moreTermsBtn" class="secondary moreTerms" hidden>想了解更多</button>
     </section>
     <details>
-      <summary>手動貼上逐字稿（備援）</summary>
+      <summary>工具與除錯</summary>
+      <div class="toolbar bottomTools">
+        <button id="refreshBtn">重新檢查逐字稿</button>
+        <button id="exportBtn" class="secondary">匯出 JSON</button>
+      </div>
+      <h3>手動貼上逐字稿（備援）</h3>
       <p class="hint">支援 YouTube 複製格式（例如「3:103 分 10 秒字幕文字」）、SRT、VTT，以及一般純文字。匯入後會取代本影片的主要逐字稿，但不會刪除即時觀察紀錄。</p>
       <textarea id="pasteArea" rows="7" placeholder="在此貼上 YouTube 逐字稿…"></textarea>
       <button id="importBtn">解析並匯入</button>
       <div id="importStatus" class="hint"></div>
-    </details>
-    <details>
-      <summary>即時字幕觀察（備援／除錯）</summary>
-      <div id="observationList" class="segments empty">尚無觀察紀錄</div>
-    </details>
-    <details>
-      <summary>字幕擷取系統變數（除錯）</summary>
-      <p class="hint">失敗時會記錄安全診斷資料；不包含字幕本文、Cookie 或字幕簽名網址。匯出 JSON 時會一併包含完整紀錄。</p>
+      <h3>字幕擷取系統變數</h3>
       <pre id="diagnostics" class="diagnostics">尚無診斷資料</pre>
     </details>
-    <footer>字幕與候選詞儲存在本機 Chrome Storage；候選詞會傳送至 Wikipedia 預載詞條資料，但完整字幕不會送出。目前母語偏好預設為中文。</footer>
+    <footer>母語偏好：中文</footer>
   </main>
   <script src="transcript-utils.js"></script>
   <script src="term-extractor.js"></script>

@@ -23,7 +23,7 @@
     ["吉尔吉斯人", "people", "吉爾吉斯人", "Kyrgyz people"], ["东方学家", "occupation", "東方學家", "Orientalist"],
     ["Congo", "place", "剛果", "刚果"], ["Mozambique", "place", "莫三比克", "莫桑比克"],
     ["Nigeria", "place", "奈及利亞", "尼日利亚"], ["Somalia", "place", "索馬利亞", "索马里"],
-    ["Sahel", "place", "薩赫勒", "萨赫勒"], ["Africa", "place", "非洲"],
+    ["Sahel", "place", "薩赫勒", "萨赫勒"], ["Sudan", "place", "蘇丹", "苏丹"], ["Africa", "place", "非洲"],
     ["Greenland", "place", "格陵蘭島", "格陵兰岛"], ["Denmark", "place", "丹麥", "丹麦"],
     ["GRML", "organization"], ["China", "place", "中國", "中国"], ["Russia", "place", "俄羅斯", "俄罗斯"],
     ["South Africa", "place", "南非"], ["BRICS", "organization", "金磚國家", "金砖国家"],
@@ -146,7 +146,10 @@
         extractionSignals: [...item.signals], occurrences: item.occurrences,
         rankingSignals: { frequencyScore, dispersionScore, titleMatch: item.titleMatch, patternConfidence: item.patternConfidence }
       };
-    }).sort((a, b) => b.score - a.score || b.segmentCount - a.segmentCount || a.term.localeCompare(b.term)).slice(0, limit);
+    }).sort((a, b) => {
+      const aStart=a.occurrences[0]?.start??Infinity,bStart=b.occurrences[0]?.start??Infinity;
+      return aStart-bStart||b.score-a.score||a.term.localeCompare(b.term);
+    }).slice(0, limit);
   }
 
   globalThis.YTKITermExtractor = { extractTerms, languageFamily };

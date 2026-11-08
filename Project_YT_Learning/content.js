@@ -18,7 +18,7 @@
   let captionTrackWaiters = [];
   let storageWriteChain = Promise.resolve();
   const DIAGNOSTIC_VERSION = 1;
-  const EXTENSION_VERSION = "0.8.0";
+  const EXTENSION_VERSION = "0.9.0";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
@@ -40,8 +40,7 @@
     interceptedRetryTimer = setTimeout(async () => {
       const id = videoIdFromUrl();
       if (!id || captureRunning) return;
-      const data = await readStored(id);
-      if (!(data.transcript?.segments?.length > 0)) autoCaptureTranscript(id);
+      autoCaptureTranscript(id);
     }, 500);
   }
 
@@ -261,9 +260,10 @@
       if (!segments.length) continue;
       const effectiveLanguage = payload.translationLanguageCode || payload.languageCode || "unknown";
       const key = `${payload.languageCode || "unknown"}->${effectiveLanguage}`;
-      if (!groups.has(key)) groups.set(key, { segments: new Map(), hasWholeTrackResponse: false });
+      if (!groups.has(key)) groups.set(key, { segments: new Map(), hasWholeTrackResponse: false, latestAt: "" });
       const group = groups.get(key);
       if (payload.requestScope === "whole_track") group.hasWholeTrackResponse = true;
+      if ((payload.capturedAt || "") > group.latestAt) group.latestAt = payload.capturedAt || "";
       for (const segment of segments) group.segments.set(`${segment.start}|${segment.text}`, segment);
     }
     const duration = Number(videoEl()?.duration) || latestPlayerDuration || null;
@@ -285,13 +285,15 @@
         trackType: inferTrackType(language, "player_observed"),
         sourceMethod: "player_observed_merged_timedtext_responses",
         interceptedFormat: "json3",
+        latestAt: group.latestAt,
         trackCount: latestCaptionTracks.length
       };
     });
-    return candidates.sort((a, b) =>
-      Number(b.coverage.reachesEnd) - Number(a.coverage.reachesEnd) ||
-      b.coverage.lastStart - a.coverage.lastStart || b.segments.length - a.segments.length
-    )[0] || null;
+    const newest=latestCaptionPayloads[latestCaptionPayloads.length-1];
+    const newestLanguage=newest?(newest.translationLanguageCode||newest.languageCode||"unknown"):"";
+    const newestOriginal=newest?.languageCode||"unknown";
+    return candidates.find(candidate=>(candidate.language||"unknown")===newestLanguage&&(candidate.originalLanguage||"unknown")===newestOriginal)
+      || candidates.sort((a,b)=>String(b.latestAt).localeCompare(String(a.latestAt)))[0] || null;
   }
 
   function captionPayloadDiagnostics() {

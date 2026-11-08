@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.8.0
+YouTube Knowledge & Investment Immersion — Extension 0.9.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.8.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有 AI API、沒有後端；字幕與候選詞保存在本機 Chrome Storage。只有使用者展開某一候選詞時，該詞會送至 Wikipedia 查詢，完整字幕不會送出。
 
+
+0.9.0 Live Track + Cue Highlight：播放器收到不同原文／翻譯字幕 payload 時，立即以最新請求取代現有逐字稿並重建詞雲，不再要求重新整理頁面；修正手動重新檢查的訊息名稱。專有名詞改以原始字幕 cue 記錄每一次出現時間，同時出現的多個詞可一起高亮，詳細卡片選擇最接近目前播放時間者。詞雲依首次出現時間排列，新增 Sudan／蘇丹。主畫面移除三組技術計數、完整逐字稿與即時觀察，重新檢查、JSON、匯入和診斷集中到頁尾工具區。
 
 0.8.0 Multilingual Learning View：修正中文正則吞入整句、英文專名前置詞與跨語言固定中文標籤；擴充非洲／格陵蘭影片的中英實體回歸詞庫。Wikipedia 摘要與連結改為背景預載。播放到詞語出現時間時，文字雲會高亮並自動展開。母語預設中文，中文字幕先顯示 18 個、非中文字幕先顯示 60 個，其餘可按「想了解更多」。完整逐字稿預設收合，側欄另顯示原始字幕語言、人工／ASR 及 YouTube 翻譯目標。
 

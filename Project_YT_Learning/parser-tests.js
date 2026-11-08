@@ -60,11 +60,11 @@ const diamond=terms.find(term=>term.term==='贾雷德·戴蒙德');
 if (!diamond.occurrences.length || diamond.occurrences[0].start !== 0) throw new Error('Term occurrence mapping failed');
 
 const englishTerms=termContext.YTKITermExtractor.extractTerms({language:'en',title:'Africa and Greenland',analysisSegments:[
-  {start:0,end:30,text:'Congo Mozambique Nigeria Somalia and the Sahel are in Africa. Greenland is part of Denmark and GRML explores there.',sourceSegmentIds:['en-1']},
+  {start:0,end:30,text:'Sudan Congo Mozambique Nigeria Somalia and the Sahel are in Africa. Greenland is part of Denmark and GRML explores there.',sourceSegmentIds:['en-1']},
   {start:31,end:60,text:'China Russia South Africa and BRICS discuss Skaergaard platinum palladium and Sarfartoq in Europe.',sourceSegmentIds:['en-2']},
   {start:61,end:90,text:'Political scientists Robert Jackson and Carl Rosberg later wrote about post-colonial Africa, Khartoum and Darfur.',sourceSegmentIds:['en-3']},
   {start:91,end:130,text:'In Nigeria, Katanga, the United Nations, Belgium, America, The United States, Soviet Union, Cuba, France and Angola were discussed.',sourceSegmentIds:['en-4']}
 ]});
-for(const expected of ['Congo','Mozambique','Nigeria','Somalia','Sahel','Africa','Greenland','Denmark','GRML','China','Russia','South Africa','BRICS','Skaergaard','platinum','palladium','Sarfartoq','Europe','Robert Jackson','Carl Rosberg','post-colonial Africa','Khartoum','Darfur','Katanga','United Nations','Belgium','America','The United States','Soviet Union','Cuba','France','Angola']) if(!englishTerms.some(term=>term.term===expected))throw new Error('English entity extraction missing: '+expected);
+for(const expected of ['Sudan','Congo','Mozambique','Nigeria','Somalia','Sahel','Africa','Greenland','Denmark','GRML','China','Russia','South Africa','BRICS','Skaergaard','platinum','palladium','Sarfartoq','Europe','Robert Jackson','Carl Rosberg','post-colonial Africa','Khartoum','Darfur','Katanga','United Nations','Belgium','America','The United States','Soviet Union','Cuba','France','Angola']) if(!englishTerms.some(term=>term.term===expected))throw new Error('English entity extraction missing: '+expected);
 if(englishTerms.some(term=>term.term==='In Nigeria'))throw new Error('English preposition was included in entity');
 console.log("Parser tests passed.");

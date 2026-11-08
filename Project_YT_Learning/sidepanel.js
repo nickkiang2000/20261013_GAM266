@@ -4,7 +4,7 @@ let activeData = null;
 let lastTermVideoId = "";
 const expandedTerms = new Set();
 let showAllTerms = false;
-let playingTermIndex = -1;
+let playingTermIndexes = new Set();
 let preloadKey = "";
 
 const $ = id => document.getElementById(id);
@@ -244,11 +244,14 @@ async function resolveTermReference(term, primaryLanguage) {
 async function ensureLocalKnowledgeTerms() {
   const transcript = activeData?.transcript;
   if (!activeVideoId || !transcript?.segments?.length) return;
-  if (activeData.knowledgeTerms?.method === "rule_based_v4_multilingual" &&
+  if (activeData.knowledgeTerms?.method === "rule_based_v5_cue_timestamps" &&
       activeData.knowledgeTerms.sourceTranscriptSha256 === (transcript.contentSha256 || null)) return;
   const utils = globalThis.YTKITranscriptUtils, extractor = globalThis.YTKITermExtractor;
-  const analysisSegments = transcript.analysisSegments?.length
-    ? transcript.analysisSegments : utils.buildAnalysisSegments(transcript.segments);
+  // Use original caption cues here. Grouped 30-second analysis segments make
+  // unrelated terms share one broad timestamp and break playback highlighting.
+  const analysisSegments = transcript.segments.map(segment=>({
+    ...segment,sourceSegmentIds:segment.sourceSegmentIds||[segment.id]
+  }));
   const language = transcript.language || "en";
   const terms = extractor.extractTerms({
     analysisSegments, title: activeData.video?.title || "", language, limit: 120
@@ -256,7 +259,7 @@ async function ensureLocalKnowledgeTerms() {
   const key = PREFIX + activeVideoId;
   const current = (await chrome.storage.local.get(key))[key] || activeData;
   current.knowledgeTerms = {
-    version: 4, method: "rule_based_v4_multilingual", generatedAt: new Date().toISOString(),
+    version: 5, method: "rule_based_v5_cue_timestamps", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, nativeLanguage:"zh", wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length,
     defaultDisplayCount:/^zh/i.test(language)?18:60, terms
@@ -267,7 +270,7 @@ async function ensureLocalKnowledgeTerms() {
 async function preloadKnowledgeDetails() {
   const result=activeData?.knowledgeTerms;
   if(!activeVideoId||!result?.terms?.length)return;
-  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v4`;
+  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v5`;
   if(preloadKey===keyId)return;
   const pending=result.terms.map((term,index)=>({term,index})).filter(item=>item.term.wikipedia?.status==="not_queried");
   if(!pending.length){preloadKey=keyId;return}
@@ -308,7 +311,7 @@ function renderKnowledgeTerms() {
     tag.style.fontSize=`${(12+weight*6).toFixed(1)}px`;
     tag.textContent=term.term;tag.title=`${term.type}・出現 ${term.frequency} 次`;
     if(expandedTerms.has(`${activeVideoId}:${index}`))tag.classList.add("selected");
-    if(playingTermIndex===index)tag.classList.add("playing");
+    if(playingTermIndexes.has(index))tag.classList.add("playing");
     cloud.append(tag);
   });
   target.append(cloud);
@@ -351,7 +354,7 @@ async function loadData() {
     return;
   }
   activeVideoId = info.videoId;
-  if (lastTermVideoId !== activeVideoId) { expandedTerms.clear(); showAllTerms=false; playingTermIndex=-1; preloadKey=""; lastTermVideoId=activeVideoId; }
+  if (lastTermVideoId !== activeVideoId) { expandedTerms.clear(); showAllTerms=false; playingTermIndexes.clear(); preloadKey=""; lastTermVideoId=activeVideoId; }
   $("videoTitle").textContent = info.title || info.videoId;
   const key = PREFIX + activeVideoId;
   const stored = await chrome.storage.local.get(key);
@@ -359,23 +362,18 @@ async function loadData() {
     schemaVersion:4, video:{videoId:activeVideoId,title:info.title,url:info.url},
     transcript:{sourceType:"none",completeness:"not_captured",segments:[]}, liveObservations:[]
   };
-  $("transcriptCount").textContent = activeData.transcript?.segments?.length || 0;
-  $("analysisCount").textContent = activeData.transcript?.analysisSegments?.length || 0;
-  $("observationCount").textContent = activeData.liveObservations?.length || 0;
   const transcript=activeData.transcript||{};
   const effective=transcript.language||"未知語言", original=transcript.originalLanguage||effective;
   const typeLabel=transcript.trackType==="ASR"?"（自動生成）":transcript.trackType==="manual"?"（創作者字幕）":"";
   $("transcriptSourceLabel").textContent=transcript.translationLanguage&&transcript.translationLanguage!==original
     ? `目前處理逐字稿：${languageLabel(original)}${typeLabel} → ${languageLabel(transcript.translationLanguage)}（YouTube 翻譯）`
     : `目前處理逐字稿：${languageLabel(effective)}${typeLabel}`;
-  renderSegments($("transcriptList"),activeData.transcript?.segments || []);
-  renderSegments($("observationList"),activeData.liveObservations || [],true);
   $("diagnostics").textContent = activeData.captureDiagnostics?.latest
     ? JSON.stringify(activeData.captureDiagnostics.latest, null, 2)
     : "尚無診斷資料";
   renderKnowledgeTerms();
   ensureLocalKnowledgeTerms().catch(error => { $("termStatus").textContent=`本機分析失敗：${String(error?.message||error)}`; });
-  if(activeData.knowledgeTerms?.method==="rule_based_v4_multilingual")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
+  if(activeData.knowledgeTerms?.method==="rule_based_v5_cue_timestamps")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
@@ -431,7 +429,7 @@ $("refreshBtn").addEventListener("click", async () => {
   if (!info?.videoId) return;
   $("status").textContent = "正在重新檢查…";
   chrome.tabs.query({active:true,currentWindow:true}, tabs => {
-    if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id,{type:"YT_RECAPTURE",videoId:info.videoId},()=>setTimeout(loadData,1200));
+    if (tabs[0]?.id) chrome.tabs.sendMessage(tabs[0].id,{type:"YTKI_RECAPTURE",videoId:info.videoId},()=>setTimeout(loadData,1200));
   });
 });
 
@@ -494,12 +492,16 @@ async function syncPlaybackTerm(){
   const state=await new Promise(resolve=>chrome.tabs.sendMessage(tab.id,{type:"YTKI_GET_PLAYBACK_TIME"},res=>resolve(chrome.runtime.lastError?null:res)));
   if(!state||state.videoId!==activeVideoId||state.paused||!Number.isFinite(state.currentTime))return;
   const now=state.currentTime;
-  const index=activeData.knowledgeTerms.terms.findIndex(term=>(term.occurrences||[]).some(occ=>{
-    const start=Number(occ.start),end=Number(occ.end);return Number.isFinite(start)&&now>=start&&now<=(Number.isFinite(end)&&end>start?end:start+12);
+  const active=[];
+  activeData.knowledgeTerms.terms.forEach((term,index)=>(term.occurrences||[]).forEach(occ=>{
+    const start=Number(occ.start),end=Number(occ.end),effectiveEnd=Number.isFinite(end)&&end>start?end:start+6;
+    if(Number.isFinite(start)&&now>=start&&now<=effectiveEnd)active.push({index,start});
   }));
-  if(index===playingTermIndex)return;
-  playingTermIndex=index;
-  if(index>=0){
+  const nextSet=new Set(active.map(item=>item.index));
+  if(nextSet.size===playingTermIndexes.size&&[...nextSet].every(index=>playingTermIndexes.has(index)))return;
+  playingTermIndexes=nextSet;
+  if(active.length){
+    const index=active.sort((a,b)=>Math.abs(now-a.start)-Math.abs(now-b.start))[0].index;
     if(index>=(activeData.knowledgeTerms.defaultDisplayCount||30))showAllTerms=true;
     expandedTerms.clear();expandedTerms.add(`${activeVideoId}:${index}`)
   }
