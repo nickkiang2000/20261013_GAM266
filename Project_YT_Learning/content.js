@@ -10,10 +10,15 @@
   let panelOpenedByUs = false;
   let captureRunning = false;
   let latestCaptionTracks = [];
+  let latestCaptionPayloads = [];
+  let latestPlayerDuration = null;
+  let lastCaptionPayloadSignature = "";
+  let interceptedRetryTimer = null;
+  let retryAfterCurrentCapture = false;
   let captionTrackWaiters = [];
   let storageWriteChain = Promise.resolve();
   const DIAGNOSTIC_VERSION = 1;
-  const EXTENSION_VERSION = "0.3.4";
+  const EXTENSION_VERSION = "0.3.5";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
@@ -26,6 +31,20 @@
     return run;
   }
 
+  function scheduleInterceptedCaptionRetry() {
+    if (captureRunning) {
+      retryAfterCurrentCapture = true;
+      return;
+    }
+    clearTimeout(interceptedRetryTimer);
+    interceptedRetryTimer = setTimeout(async () => {
+      const id = videoIdFromUrl();
+      if (!id || captureRunning) return;
+      const data = await readStored(id);
+      if (!(data.transcript?.segments?.length > 0)) autoCaptureTranscript(id);
+    }, 500);
+  }
+
   // MAIN-world page scripts can see YouTube's player state while an ordinary
   // content script cannot. Treat its messages as untrusted page input and
   // validate every URL again before fetching it.
@@ -33,6 +52,21 @@
     if (event.source !== window || event.origin !== location.origin || event.data?.type !== "ytki03:caption-tracks") return;
     const tracks = Array.isArray(event.data.tracks) ? event.data.tracks : [];
     latestCaptionTracks = tracks.filter(track => track && typeof track.baseUrl === "string").slice(0, 80);
+    const duration = Number(event.data.playerDurationSeconds);
+    if (Number.isFinite(duration) && duration > 0) latestPlayerDuration = duration;
+    const payloads = Array.isArray(event.data.payloads) ? event.data.payloads : [];
+    latestCaptionPayloads = payloads.filter(payload =>
+      payload && typeof payload.body === "string" && payload.body.length <= 8 * 1024 * 1024 &&
+      (!payload.videoId || payload.videoId === videoIdFromUrl())
+    ).slice(-6);
+    const newestPayload = latestCaptionPayloads[latestCaptionPayloads.length - 1];
+    if (newestPayload) {
+      const signature = `${newestPayload.videoId}|${newestPayload.languageCode}|${newestPayload.format}|${newestPayload.body.length}|${newestPayload.capturedAt}`;
+      if (signature !== lastCaptionPayloadSignature) {
+        lastCaptionPayloadSignature = signature;
+        scheduleInterceptedCaptionRetry();
+      }
+    }
     const waiters = captionTrackWaiters;
     captionTrackWaiters = [];
     waiters.forEach(resolve => resolve(latestCaptionTracks));
@@ -102,8 +136,74 @@
     return [...unique.values()].sort((a, b) => a.start - b.start);
   }
 
+  function segmentsFromCaptionBody(body) {
+    const source = String(body || "").trim();
+    if (!source) return [];
+    try {
+      const json = JSON.parse(source);
+      const segments = segmentsFromJson3(json);
+      if (segments.length) return segments;
+    } catch (_) {}
+
+    if (source.startsWith("<") || /<(?:transcript|timedtext|p|text)\b/i.test(source)) {
+      try {
+        const doc = new DOMParser().parseFromString(source, "text/xml");
+        const result = [];
+        for (const node of doc.querySelectorAll("text")) {
+          const start = Number(node.getAttribute("start"));
+          const duration = Number(node.getAttribute("dur"));
+          const text = normalizeText(node.textContent || "");
+          if (text && Number.isFinite(start)) result.push({ start, end: Number.isFinite(duration) ? start + duration : null, duration: Number.isFinite(duration) ? duration : null, text });
+        }
+        for (const node of doc.querySelectorAll("p[t]")) {
+          const start = Number(node.getAttribute("t")) / 1000;
+          const duration = Number(node.getAttribute("d")) / 1000;
+          const text = normalizeText(node.textContent || "");
+          if (text && Number.isFinite(start)) result.push({ start, end: Number.isFinite(duration) ? start + duration : null, duration: Number.isFinite(duration) ? duration : null, text });
+        }
+        if (result.length) return result.sort((a, b) => a.start - b.start);
+      } catch (_) {}
+    }
+
+    if (/^WEBVTT/m.test(source)) {
+      const result = [];
+      for (const block of source.split(/\r?\n\r?\n+/)) {
+        const lines = block.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+        const timeIndex = lines.findIndex(line => line.includes("-->"));
+        if (timeIndex < 0) continue;
+        const [startRaw, endRaw] = lines[timeIndex].split("-->").map(value => value.trim().split(/\s+/)[0]);
+        const start = parseClock(startRaw), end = parseClock(endRaw);
+        const text = normalizeText(lines.slice(timeIndex + 1).join(" ").replace(/<[^>]+>/g, ""));
+        if (start !== null && text) result.push({ start, end, duration: end !== null ? end - start : null, text });
+      }
+      if (result.length) return result;
+    }
+    return [];
+  }
+
+  function interceptedCaptionResult() {
+    for (const payload of [...latestCaptionPayloads].reverse()) {
+      const segments = segmentsFromCaptionBody(payload.body);
+      if (!segments.length) continue;
+      const duration = Number(videoEl()?.duration) || latestPlayerDuration || null;
+      return {
+        ok: true,
+        segments,
+        coverage: transcriptCoverage(segments, duration),
+        language: payload.languageCode || null,
+        trackType: "player_observed",
+        sourceMethod: `player_observed_${payload.source || "timedtext"}`,
+        interceptedFormat: payload.format || "unknown",
+        trackCount: latestCaptionTracks.length
+      };
+    }
+    return null;
+  }
+
   async function tryDirectCaptionTrack() {
     const tracks = await requestCaptionTracks();
+    const intercepted = interceptedCaptionResult();
+    if (intercepted) return intercepted;
     const track = chooseCaptionTrack(tracks);
     if (!track) return { ok: false, reason: "no_safe_caption_track", trackCount: tracks.length };
     const url = new URL(track.baseUrl);
@@ -117,8 +217,8 @@
       if (!body.trim()) return { ok: false, reason: "timedtext_empty_body", httpStatus: response.status, trackCount: tracks.length };
       const segments = segmentsFromJson3(JSON.parse(body));
       if (!segments.length) return { ok: false, reason: "json3_has_no_segments", httpStatus: response.status, trackCount: tracks.length };
-      const coverage = transcriptCoverage(segments, Number(videoEl()?.duration) || null);
-      return { ok: true, segments, coverage, language: track.languageCode || null, trackType: track.kind === "asr" ? "ASR" : "manual", trackCount: tracks.length };
+      const coverage = transcriptCoverage(segments, Number(videoEl()?.duration) || latestPlayerDuration || null);
+      return { ok: true, segments, coverage, language: track.languageCode || null, trackType: track.kind === "asr" ? "ASR" : "manual", sourceMethod: "player_caption_track_json3", trackCount: tracks.length };
     } catch (error) {
       return { ok: false, reason: "timedtext_fetch_or_parse_error", error: String(error?.message || error).slice(0, 240), trackCount: tracks.length };
     }
@@ -241,6 +341,7 @@
         present: !!v,
         readyState: v?.readyState ?? null,
         duration: Number.isFinite(v?.duration) ? v.duration : null,
+        playerReportedDuration: latestPlayerDuration,
         currentTime: Number.isFinite(v?.currentTime) ? v.currentTime : null,
         paused: v?.paused ?? null
       },
@@ -252,6 +353,8 @@
       playerCaptionTracks: {
         received: latestCaptionTracks.length,
         safeTimedText: safeTracks.length,
+        observedPayloads: latestCaptionPayloads.length,
+        observedFormats: [...new Set(latestCaptionPayloads.map(payload => payload.format || "unknown"))].slice(0, 10),
         languages: [...new Set(latestCaptionTracks.map(track => String(track.languageCode || "")).filter(Boolean))].slice(0, 20),
         kinds: [...new Set(latestCaptionTracks.map(track => track.kind || "manual"))].slice(0, 10)
       },
@@ -275,7 +378,7 @@
     const tracks = snapshot?.playerCaptionTracks;
     const ui = snapshot?.transcriptUi;
     const video = snapshot?.video;
-    return `diag tracks=${tracks?.received || 0}/${tracks?.safeTimedText || 0}, buttons=${ui?.renderedButtonCount || 0}/${ui?.matchingButtonCount || 0}, panels=${ui?.renderedPanelCount || 0}/${ui?.matchingPanelCount || 0}, rows=${ui?.renderedRowCount || 0}, videoReady=${video?.readyState ?? "n/a"}`;
+    return `diag tracks=${tracks?.received || 0}/${tracks?.safeTimedText || 0}, payloads=${tracks?.observedPayloads || 0}, buttons=${ui?.renderedButtonCount || 0}/${ui?.matchingButtonCount || 0}, panels=${ui?.renderedPanelCount || 0}/${ui?.matchingPanelCount || 0}, rows=${ui?.renderedRowCount || 0}, videoReady=${video?.readyState ?? "n/a"}`;
   }
 
   async function setStatus(status, detail = "", diagnostics = null) {
@@ -540,9 +643,10 @@
         data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
         data.transcript = {
           sourceType: "youtube_caption_track",
-          sourceMethod: "player_caption_track_json3",
+          sourceMethod: direct.sourceMethod || "player_caption_track_json3",
           language: direct.language,
           trackType: direct.trackType,
+          interceptedFormat: direct.interceptedFormat || null,
           completeness: "caption_track_reaches_video_end",
           capturedAt: new Date().toISOString(),
           coverage: direct.coverage,
@@ -627,6 +731,10 @@
       await setStatus("capture_error", `${String(err?.message || err)}；${diagnosticSummary(diagnostics)}`, diagnostics);
     } finally {
       captureRunning = false;
+      if (retryAfterCurrentCapture) {
+        retryAfterCurrentCapture = false;
+        scheduleInterceptedCaptionRetry();
+      }
     }
   }
 
@@ -677,6 +785,10 @@
     const id = videoIdFromUrl();
     if (!id || id === currentVideoId) return;
     currentVideoId = id;
+    latestCaptionTracks = [];
+    latestCaptionPayloads = [];
+    latestPlayerDuration = null;
+    lastCaptionPayloadSignature = "";
     lastCaptionText = "";
     lastCaptionTime = 0;
     panelOpenedByUs = false;

@@ -7,6 +7,70 @@
 
   const EVENT_REQUEST = "ytki03:request-caption-tracks";
   const EVENT_RESPONSE = "ytki03:caption-tracks";
+  const MAX_BODY_LENGTH = 8 * 1024 * 1024;
+  const capturedPayloads = [];
+
+  function timedTextInfo(value) {
+    try {
+      const url = new URL(typeof value === "string" ? value : value?.url || "", location.href);
+      if (url.protocol !== "https:" || !(url.hostname === "youtube.com" || url.hostname.endsWith(".youtube.com")) || url.pathname !== "/api/timedtext") return null;
+      return {
+        videoId: url.searchParams.get("v") || "",
+        languageCode: url.searchParams.get("lang") || "",
+        format: url.searchParams.get("fmt") || "unknown"
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function rememberPayload(info, body, source) {
+    if (!info || typeof body !== "string" || !body.trim() || body.length > MAX_BODY_LENGTH) return;
+    const signature = `${info.videoId}|${info.languageCode}|${info.format}|${body.length}|${body.slice(0, 32)}|${body.slice(-32)}`;
+    if (capturedPayloads.some(item => item.signature === signature)) return;
+    capturedPayloads.push({
+      signature,
+      videoId: info.videoId,
+      languageCode: info.languageCode,
+      format: info.format,
+      body,
+      source,
+      capturedAt: new Date().toISOString()
+    });
+    while (capturedPayloads.length > 6) capturedPayloads.shift();
+    reply();
+  }
+
+  // Observe the caption response YouTube's own player already requested. The
+  // original Request/Response objects are returned untouched; parsing happens
+  // only on a clone or after XHR load.
+  const nativeFetch = window.fetch;
+  if (typeof nativeFetch === "function") {
+    window.fetch = async function(...args) {
+      const info = timedTextInfo(args[0]);
+      const response = await nativeFetch.apply(this, args);
+      if (info) response.clone().text().then(body => rememberPayload(info, body, "player_fetch_clone")).catch(() => {});
+      return response;
+    };
+  }
+
+  const xhrUrl = Symbol("ytki03TimedTextUrl");
+  const nativeOpen = XMLHttpRequest.prototype.open;
+  const nativeSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this[xhrUrl] = timedTextInfo(url);
+    return nativeOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this[xhrUrl]) {
+      this.addEventListener("load", () => {
+        try {
+          if (!this.responseType || this.responseType === "text") rememberPayload(this[xhrUrl], this.responseText, "player_xhr_response");
+        } catch (_) {}
+      }, { once: true });
+    }
+    return nativeSend.apply(this, args);
+  };
 
   function playerResponses() {
     const player = document.getElementById("movie_player") || document.querySelector("#movie_player");
@@ -43,8 +107,21 @@
     return [];
   }
 
+  function durationFromPlayer() {
+    for (const response of playerResponses()) {
+      const value = Number(response?.videoDetails?.lengthSeconds);
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return null;
+  }
+
   function reply() {
-    window.postMessage({ type: EVENT_RESPONSE, tracks: tracksFromPlayer() }, location.origin);
+    window.postMessage({
+      type: EVENT_RESPONSE,
+      tracks: tracksFromPlayer(),
+      playerDurationSeconds: durationFromPlayer(),
+      payloads: capturedPayloads.map(({ signature, ...payload }) => payload)
+    }, location.origin);
   }
 
   window.addEventListener("message", event => {
