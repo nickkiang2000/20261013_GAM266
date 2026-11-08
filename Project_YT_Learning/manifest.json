@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Knowledge & Investment Immersion - Phase 0.1",
+  "version": "0.1.0",
+  "description": "Phase 0.1 prototype: capture captions currently rendered on a YouTube video page.",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Open YouTube caption tester"
+  }
+}

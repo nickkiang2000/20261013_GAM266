@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YouTube Caption Tester 0.1</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>YouTube 字幕測試器</h1>
+    <p class="version">Phase 0.1 · 可見字幕觀察</p>
+  </header>
+
+  <section class="status-card">
+    <div class="status-line">
+      <span id="statusDot" class="dot"></span>
+      <strong id="statusText">等待 YouTube 影片…</strong>
+    </div>
+    <div class="meta"><span>Video ID</span><code id="videoId">—</code></div>
+    <div class="meta"><span>已觀察片段</span><strong id="count">0</strong></div>
+  </section>
+
+  <section class="notice">
+    <strong>測試範圍提醒</strong>
+    <p>本版本只記錄播放器畫面上「當下呈現」的字幕。它不是完整逐字稿擷取器；若字幕沒有開啟、影片沒有字幕，或字幕尚未出現在畫面上，就不會取得文字。</p>
+  </section>
+
+  <section class="controls">
+    <button id="refreshBtn" type="button">重新讀取狀態</button>
+    <button id="clearBtn" type="button" class="secondary">清除本次紀錄</button>
+  </section>
+
+  <section>
+    <div class="section-heading">
+      <h2>觀察到的字幕</h2>
+      <span id="shownCount">0 筆</span>
+    </div>
+    <div id="emptyState" class="empty">尚未觀察到字幕。請回到 YouTube，開啟播放器的 CC 字幕，並播放影片。</div>
+    <ol id="captionList" class="caption-list"></ol>
+  </section>
+
+  <footer>
+    <p>資料僅存在目前頁面的記憶體中；關閉或重新載入影片後可能清空。此原型不會下載字幕檔，也不會呼叫 AI 或外部 API。</p>
+  </footer>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
