@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.3.0
+YouTube Knowledge & Investment Immersion — Extension 0.3.1.0
 
 本版重點
 1. 開啟 YouTube 影片後，自動偵測影片 ID，嘗試開啟原生「顯示轉錄稿」面板並讀取字幕行。
@@ -28,3 +28,6 @@ YouTube Knowledge & Investment Immersion — Extension 0.3.0
 - 若影片沒有可用字幕，原生逐字稿不存在，這版不會自行執行 ASR。
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有外部網路請求、沒有 AI API、沒有後端；字幕資料保存在本機 Chrome Storage。
+
+
+0.3.1 修正：擴大逐字稿 DOM 定位範圍與字幕列解析方式；擷取失敗原因會保存在側邊欄狀態欄，方便診斷。此版仍需在實際 YouTube 頁面驗證，不保證所有介面版本均可擷取。

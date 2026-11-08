@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Knowledge & Investment Immersion",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Automatically captures YouTube transcript panel text and observes visible captions locally.",
   "permissions": [
     "storage",

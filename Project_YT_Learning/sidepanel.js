@@ -130,9 +130,13 @@ async function loadData() {
   renderSegments($("transcriptList"),activeData.transcript?.segments || []);
   renderSegments($("observationList"),activeData.liveObservations || [],true);
   const status = activeData.transcript?.completeness || "等待自動擷取";
-  $("status").textContent = status === "captured_from_rendered_panel_not_independently_verified"
-    ? `已擷取 ${activeData.transcript.segments.length} 段（待測試完整性）`
-    : status;
+  if (activeData.lastCapture?.detail) {
+    $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
+  } else {
+    $("status").textContent = status === "captured_from_rendered_panel_not_independently_verified"
+      ? `已擷取 ${activeData.transcript.segments.length} 段（待測試完整性）`
+      : status;
+  }
 }
 
 $("refreshBtn").addEventListener("click", async () => {

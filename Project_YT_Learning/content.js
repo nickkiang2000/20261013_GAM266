@@ -89,7 +89,21 @@
 
   function setStatus(status, detail = "") {
     document.documentElement.dataset.ytki03Status = status;
-    chrome.runtime.sendMessage({ type: "YT_AUTO_CAPTURE_STATUS", videoId: videoIdFromUrl(),
+    const id = videoIdFromUrl();
+    if (id) {
+      const key = STORE_PREFIX + id;
+      chrome.storage.local.get(key).then(result => {
+        const data = result[key] || {
+          schemaVersion: 3,
+          video: { videoId: id, title: getTitle(), url: location.href.split("&")[0] },
+          transcript: { sourceType: "none", language: null, completeness: "not_captured", segments: [] },
+          liveObservations: []
+        };
+        data.lastCapture = { status, detail, at: new Date().toISOString() };
+        return chrome.storage.local.set({ [key]: data });
+      }).catch(() => {});
+    }
+    chrome.runtime.sendMessage({ type: "YT_AUTO_CAPTURE_STATUS", videoId: id,
       title: getTitle(), status, detail }).catch(() => {});
   }
 
@@ -112,58 +126,103 @@
   }
 
   function transcriptPanel() {
+    // YouTube has moved the transcript UI between engagement-panel containers
+    // over time. Prefer known renderers, but fall back to the segment list.
     return document.querySelector("ytd-transcript-renderer") ||
+      document.querySelector("ytd-transcript-segment-list-renderer") ||
       document.querySelector("ytd-engagement-panel-section-list-renderer[target-id*='transcript']") ||
-      document.querySelector("ytd-engagement-panel-section-list-renderer ytd-transcript-renderer");
+      document.querySelector("ytd-engagement-panel-section-list-renderer[visibility='ENGAGEMENT_PANEL_VISIBILITY_EXPANDED']") ||
+      null;
+  }
+
+  function transcriptRows() {
+    const panel = transcriptPanel();
+    const roots = panel ? [panel] : [];
+    // Some YouTube layouts render transcript rows outside the expected renderer.
+    roots.push(document);
+    const found = new Set();
+    for (const root of roots) {
+      for (const row of root.querySelectorAll("ytd-transcript-segment-renderer, .segment, [class*='transcript-segment']")) {
+        if (row !== document && row.getClientRects().length === 0) continue;
+        found.add(row);
+      }
+    }
+    return [...found];
   }
 
   function extractRows() {
-    const panel = transcriptPanel();
-    if (!panel) return [];
-    const rows = [...panel.querySelectorAll("ytd-transcript-segment-renderer, .segment")];
     const result = [];
-    for (const row of rows) {
-      const timeEl = row.querySelector(".segment-timestamp, [class*='timestamp'], #timestamp");
-      const textEl = row.querySelector(".segment-text, [class*='segment-text'], #segment-text");
-      const timeText = normalizeText(timeEl?.innerText || timeEl?.textContent || "");
-      const text = normalizeText(textEl?.innerText || textEl?.textContent || "");
+    for (const row of transcriptRows()) {
+      const timeSelectors = [
+        ".segment-timestamp", "#segment-timestamp", "[id='timestamp']",
+        "[class*='timestamp']", "yt-formatted-string[aria-label*=':']"
+      ];
+      const textSelectors = [
+        ".segment-text", "#segment-text", "[id='segment-text']",
+        "[class*='segment-text']"
+      ];
+      let timeEl = null, textEl = null;
+      for (const sel of timeSelectors) { timeEl = row.querySelector(sel); if (timeEl) break; }
+      for (const sel of textSelectors) { textEl = row.querySelector(sel); if (textEl) break; }
+
+      let timeText = normalizeText(
+        timeEl?.innerText || timeEl?.textContent || timeEl?.getAttribute("aria-label") || ""
+      );
+      let text = normalizeText(textEl?.innerText || textEl?.textContent || "");
+
+      // Fallback for markup variants: transcript row usually renders timestamp
+      // and caption as separate text lines.
+      if (!timeText || !text) {
+        const lines = String(row.innerText || row.textContent || "")
+          .split(/\n+/).map(normalizeText).filter(Boolean);
+        if (!timeText && lines.length) timeText = lines.find(x => parseClock(x) !== null) || "";
+        if (!text && lines.length) {
+          const timeIndex = lines.findIndex(x => parseClock(x) !== null);
+          text = lines.filter((x, i) => i !== timeIndex).join(" ");
+        }
+      }
+
       const start = parseClock(timeText);
       if (start !== null && text) result.push({ start, end: null, duration: null, text });
     }
-    return result;
+    const unique = new Map();
+    for (const seg of result) unique.set(`${seg.start}|${seg.text}`, seg);
+    return [...unique.values()];
   }
 
   async function scrollTranscriptToLoadAll() {
     const panel = transcriptPanel();
-    if (!panel) return [];
-    const scroller = panel.querySelector("#segments-container, .segments-container, ytd-transcript-segment-list-renderer") || panel;
+    const scroller = (panel && (
+      panel.querySelector("#segments-container, .segments-container, ytd-transcript-segment-list-renderer") ||
+      panel
+    )) || document.querySelector("#segments-container, .segments-container, ytd-transcript-segment-list-renderer");
     const collected = new Map();
     let stableRounds = 0;
     let previousCount = -1;
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 100; i++) {
       for (const seg of extractRows()) collected.set(`${seg.start}|${seg.text}`, seg);
       const count = collected.size;
       stableRounds = count === previousCount ? stableRounds + 1 : 0;
-      if (stableRounds >= 3) break;
+      if (stableRounds >= 4) break;
       previousCount = count;
+      if (!scroller) break;
       const before = scroller.scrollTop;
       scroller.scrollTop = Math.min(scroller.scrollTop + Math.max(300, scroller.clientHeight * 0.8), scroller.scrollHeight);
       scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
-      await sleep(180);
-      if (scroller.scrollTop === before && i > 4) break;
+      await sleep(250);
+      if (scroller.scrollTop === before && i > 5) break;
     }
     for (const seg of extractRows()) collected.set(`${seg.start}|${seg.text}`, seg);
     return [...collected.values()].sort((a,b) => a.start - b.start);
   }
 
-  async function waitForPanel(timeout = 9000) {
+  async function waitForPanel(timeout = 12000) {
     const start = Date.now();
     while (Date.now() - start < timeout) {
-      const p = transcriptPanel();
-      if (p && extractRows().length) return true;
-      await sleep(250);
+      if (extractRows().length) return true;
+      await sleep(300);
     }
-    return !!transcriptPanel();
+    return false;
   }
 
   async function autoCaptureTranscript(videoId) {
