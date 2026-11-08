@@ -122,10 +122,11 @@ async function loadData() {
   const key = PREFIX + activeVideoId;
   const stored = await chrome.storage.local.get(key);
   activeData = stored[key] || {
-    schemaVersion:3, video:{videoId:activeVideoId,title:info.title,url:info.url},
+    schemaVersion:4, video:{videoId:activeVideoId,title:info.title,url:info.url},
     transcript:{sourceType:"none",completeness:"not_captured",segments:[]}, liveObservations:[]
   };
   $("transcriptCount").textContent = activeData.transcript?.segments?.length || 0;
+  $("analysisCount").textContent = activeData.transcript?.analysisSegments?.length || 0;
   $("observationCount").textContent = activeData.liveObservations?.length || 0;
   renderSegments($("transcriptList"),activeData.transcript?.segments || []);
   renderSegments($("observationList"),activeData.liveObservations || [],true);
@@ -164,14 +165,26 @@ $("importBtn").addEventListener("click", async () => {
   if (!activeVideoId || !parsed.length) { $("importStatus").textContent = "沒有可匯入的內容。"; return; }
   const key = PREFIX + activeVideoId;
   const stored = await chrome.storage.local.get(key);
-  const data = stored[key] || activeData || {schemaVersion:3,video:{videoId:activeVideoId,title:$("videoTitle").textContent},liveObservations:[]};
+  const data = stored[key] || activeData || {schemaVersion:4,video:{videoId:activeVideoId,title:$("videoTitle").textContent},liveObservations:[]};
+  const utils = globalThis.YTKITranscriptUtils;
+  const analysisSegments = utils?.buildAnalysisSegments(parsed) || [];
+  const plainText = utils?.buildPlainText(parsed) || parsed.map(segment => segment.text).join("\n");
+  data.schemaVersion = 4;
   data.transcript = {
+    dataVersion:1,
     sourceType:"user_pasted_transcript",
     sourceMethod:"user_paste",
     language:null,
     completeness:"user_provided_not_verified",
     capturedAt:new Date().toISOString(),
-    segments:parsed
+    sourceResponse:{format:"user_import",interceptedFromPlayer:false},
+    availableTracks:[],
+    segmentRole:"raw_caption_cues",
+    segments:parsed,
+    analysisSegments,
+    plainText,
+    stats:utils?.transcriptStats(parsed,analysisSegments,plainText) || {rawSegmentCount:parsed.length,analysisSegmentCount:analysisSegments.length,characterCount:[...plainText].length},
+    contentSha256:null
   };
   await chrome.storage.local.set({[key]:data});
   $("importStatus").textContent = `成功解析 ${parsed.length} 段；即時觀察紀錄未刪除。`;

@@ -22,4 +22,20 @@ for (const [input, seconds, text] of cases) {
 }
 const srt = "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:02,000 --> 00:00:03,000\nWorld";
 if (context.__parseTranscript(srt).length !== 2) throw new Error("SRT test failed");
+
+const utilsSource = fs.readFileSync(__dirname + '/transcript-utils.js','utf8');
+const utilsContext = {};
+vm.createContext(utilsContext);
+vm.runInContext(utilsSource, utilsContext);
+const rawSegments = [
+  {id:'tr-1',start:0,end:2,duration:2,text:'Alpha'},
+  {id:'tr-2',start:2.5,end:5,duration:2.5,text:'Beta'},
+  {id:'tr-3',start:40,end:null,duration:null,text:'Gamma'}
+];
+const analysis = utilsContext.YTKITranscriptUtils.buildAnalysisSegments(rawSegments);
+if (analysis.length !== 2 || analysis[0].text !== 'Alpha Beta' || analysis[1].start !== 40) throw new Error('Analysis segment grouping failed');
+if (analysis[1].end !== 40 || analysis[1].duration !== 0) throw new Error('Null timing normalization failed');
+const plainText = utilsContext.YTKITranscriptUtils.buildPlainText(rawSegments);
+const stats = utilsContext.YTKITranscriptUtils.transcriptStats(rawSegments, analysis, plainText);
+if (plainText !== 'Alpha\nBeta\nGamma' || stats.rawSegmentCount !== 3 || stats.analysisSegmentCount !== 2) throw new Error('Transcript derived data failed');
 console.log("Parser tests passed.");

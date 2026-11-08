@@ -18,7 +18,7 @@
   let captionTrackWaiters = [];
   let storageWriteChain = Promise.resolve();
   const DIAGNOSTIC_VERSION = 1;
-  const EXTENSION_VERSION = "0.3.5";
+  const EXTENSION_VERSION = "0.4.0";
 
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const videoIdFromUrl = () => new URL(location.href).searchParams.get("v") || "";
@@ -84,6 +84,77 @@
 
   function normalizeText(s) {
     return String(s || "").replace(/\s+/g, " ").trim().normalize("NFKC");
+  }
+
+  async function sha256Hex(value) {
+    try {
+      const bytes = new TextEncoder().encode(String(value || ""));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function safeTrackInventory() {
+    return latestCaptionTracks.map(track => ({
+      languageCode: track.languageCode || null,
+      name: track.name || null,
+      trackType: track.kind === "asr" ? "ASR" : "manual",
+      isTranslatable: !!track.isTranslatable,
+      vssId: track.vssId || null
+    }));
+  }
+
+  function inferTrackType(languageCode, fallback = null) {
+    const track = latestCaptionTracks.find(item => item.languageCode === languageCode);
+    return track ? (track.kind === "asr" ? "ASR" : "manual") : fallback;
+  }
+
+  function detectCaptionBodyFormat(body, declared = "unknown") {
+    const source = String(body || "").trim();
+    if (source.startsWith("{")) return "json3";
+    if (/^WEBVTT/m.test(source)) return "vtt";
+    if (/<p\b[^>]*\bt=/i.test(source)) return "srv3";
+    if (/<text\b[^>]*\bstart=/i.test(source)) return "xml";
+    return declared || "unknown";
+  }
+
+  async function buildTranscriptRecord({ segments, sourceType, sourceMethod, language, trackType, completeness, coverage, rawFormat }) {
+    const rawSegments = segments.map((segment, index) => ({
+      id: segment.id || `tr-${index + 1}`,
+      start: segment.start != null && Number.isFinite(Number(segment.start)) ? Number(segment.start) : null,
+      end: segment.end != null && Number.isFinite(Number(segment.end)) ? Number(segment.end) : null,
+      duration: segment.duration != null && Number.isFinite(Number(segment.duration)) ? Number(segment.duration) : null,
+      text: normalizeText(segment.text),
+      sourceType
+    })).filter(segment => segment.text && segment.start !== null);
+    const utils = globalThis.YTKITranscriptUtils;
+    const analysisSegments = utils?.buildAnalysisSegments(rawSegments) || [];
+    const plainText = utils?.buildPlainText(rawSegments) || rawSegments.map(segment => segment.text).join("\n");
+    const stats = utils?.transcriptStats(rawSegments, analysisSegments, plainText) || {
+      rawSegmentCount: rawSegments.length,
+      analysisSegmentCount: analysisSegments.length,
+      characterCount: [...plainText].length
+    };
+    return {
+      dataVersion: 1,
+      sourceType,
+      sourceMethod,
+      language: language || null,
+      trackType: trackType || null,
+      completeness,
+      capturedAt: new Date().toISOString(),
+      coverage,
+      sourceResponse: { format: rawFormat || "unknown", interceptedFromPlayer: /^player_observed_/.test(sourceMethod) },
+      availableTracks: safeTrackInventory(),
+      segmentRole: "raw_caption_cues",
+      segments: rawSegments,
+      analysisSegments,
+      plainText,
+      stats,
+      contentSha256: await sha256Hex(plainText)
+    };
   }
 
   function isSafeTimedTextUrl(value) {
@@ -191,9 +262,9 @@
         segments,
         coverage: transcriptCoverage(segments, duration),
         language: payload.languageCode || null,
-        trackType: "player_observed",
+        trackType: inferTrackType(payload.languageCode, "player_observed"),
         sourceMethod: `player_observed_${payload.source || "timedtext"}`,
-        interceptedFormat: payload.format || "unknown",
+        interceptedFormat: detectCaptionBodyFormat(payload.body, payload.format),
         trackCount: latestCaptionTracks.length
       };
     }
@@ -251,7 +322,7 @@
         text: seg.text, sourceType: "legacy_user_import"
       }));
       return {
-        schemaVersion: 3,
+        schemaVersion: 4,
         video: legacy.video,
         transcript: {
           sourceType: transcriptSegments.length ? "legacy_user_import" : "none",
@@ -266,7 +337,7 @@
       };
     }
     return {
-      schemaVersion: 3,
+      schemaVersion: 4,
       video: { videoId, title: getTitle(), url: location.href.split("&")[0] },
       transcript: { sourceType: "none", language: null, completeness: "not_captured", segments: [] },
       liveObservations: [],
@@ -390,7 +461,7 @@
         await queueStorageWrite(async () => {
           const result = await chrome.storage.local.get(key);
           const data = result[key] || {
-            schemaVersion: 3,
+            schemaVersion: 4,
             video: { videoId: id, title: getTitle(), url: location.href.split("&")[0] },
             transcript: { sourceType: "none", language: null, completeness: "not_captured", segments: [] },
             liveObservations: []
@@ -641,19 +712,28 @@
       if (direct?.ok && direct.coverage?.reachesEnd) {
         const data = await readStored(videoId);
         data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
-        data.transcript = {
+        data.schemaVersion = 4;
+        data.transcript = await buildTranscriptRecord({
+          segments: direct.segments,
           sourceType: "youtube_caption_track",
           sourceMethod: direct.sourceMethod || "player_caption_track_json3",
           language: direct.language,
           trackType: direct.trackType,
-          interceptedFormat: direct.interceptedFormat || null,
           completeness: "caption_track_reaches_video_end",
-          capturedAt: new Date().toISOString(),
           coverage: direct.coverage,
-          segments: direct.segments.map((s, i) => ({ id: `tr-${i+1}`, ...s, sourceType: "youtube_caption_track" }))
-        };
+          rawFormat: direct.interceptedFormat || "json3"
+        });
         await saveStored(data);
-        await setStatus("transcript_captured_complete", `${direct.segments.length} 段（字幕軌快速取得）`);
+        const successDiagnostics = collectCaptureDiagnostics("transcript_capture_success", {
+          sourceMethod: data.transcript.sourceMethod,
+          format: data.transcript.sourceResponse.format,
+          language: data.transcript.language,
+          trackType: data.transcript.trackType,
+          rawSegmentCount: data.transcript.stats.rawSegmentCount,
+          analysisSegmentCount: data.transcript.stats.analysisSegmentCount,
+          contentSha256: data.transcript.contentSha256
+        });
+        await setStatus("transcript_captured_complete", `${direct.segments.length} 段（字幕軌快速取得）`, successDiagnostics);
         return;
       }
 
@@ -704,22 +784,31 @@
       }
       const data = await readStored(videoId);
       data.video = { videoId, title: getTitle(), url: location.href.split("&")[0] };
-      data.transcript = {
+      data.schemaVersion = 4;
+      data.transcript = await buildTranscriptRecord({
+        segments,
         sourceType: "youtube_transcript_panel_dom",
         sourceMethod: "auto_open_and_read_dom",
         language: null,
+        trackType: null,
         completeness: coverage.reachesEnd
           ? "captured_from_rendered_panel_reaches_video_end"
           : "captured_from_rendered_panel_may_be_partial",
-        capturedAt: new Date().toISOString(),
         coverage,
-        segments: segments.map((s, i) => ({ id: `tr-${i+1}`, ...s, sourceType: "youtube_transcript_panel_dom" }))
-      };
+        rawFormat: "rendered_dom"
+      });
       await saveStored(data);
       const endText = coverage.duration
         ? `；最後時間 ${Math.floor(coverage.lastStart)}s / 影片 ${Math.floor(coverage.duration)}s`
         : "；無法讀取影片總長度，尚未驗證完整性";
-      await setStatus(coverage.reachesEnd ? "transcript_captured_complete" : "transcript_captured_partial", `${segments.length} 段${endText}`);
+      const successDiagnostics = collectCaptureDiagnostics("transcript_capture_success", {
+        sourceMethod: data.transcript.sourceMethod,
+        format: data.transcript.sourceResponse.format,
+        rawSegmentCount: data.transcript.stats.rawSegmentCount,
+        analysisSegmentCount: data.transcript.stats.analysisSegmentCount,
+        contentSha256: data.transcript.contentSha256
+      });
+      await setStatus(coverage.reachesEnd ? "transcript_captured_complete" : "transcript_captured_partial", `${segments.length} 段${endText}`, successDiagnostics);
       if (panelOpenedByUs) {
         await sleep(300);
         const close = document.querySelector("ytd-transcript-renderer #close-button, ytd-transcript-renderer button[aria-label*='Close'], ytd-transcript-renderer button[aria-label*='關閉']");
