@@ -25,6 +25,7 @@
     ["Congo", "place", "剛果", "刚果"], ["Mozambique", "place", "莫三比克", "莫桑比克"],
     ["Nigeria", "place", "奈及利亞", "尼日利亚"], ["Somalia", "place", "索馬利亞", "索马里"],
     ["Sahel", "place", "薩赫勒", "萨赫勒"], ["Sudan", "place", "蘇丹", "苏丹"], ["Africa", "place", "非洲"],
+    ["Western Asia", "place", "西亞", "西亚"],
     ["Greenland", "place", "格陵蘭島", "格陵兰岛"], ["Denmark", "place", "丹麥", "丹麦"],
     ["GRML", "organization"], ["China", "place", "中國", "中国"], ["Russia", "place", "俄羅斯", "俄罗斯"],
     ["South Africa", "place", "南非"], ["BRICS", "organization", "金磚國家", "金砖国家"],
@@ -37,11 +38,15 @@
     ["United Nations", "organization", "聯合國", "联合国"], ["Belgium", "place", "比利時", "比利时"],
     ["America", "place", "美國", "美国"], ["The United States", "place", "United States", "美利堅合眾國", "美利坚合众国"],
     ["Soviet Union", "place", "蘇聯", "苏联"], ["Cuba", "place", "古巴"], ["France", "place", "法國", "法国"],
-    ["Angola", "place", "安哥拉"]
+    ["Angola", "place", "安哥拉"],
+    ["Taiwan Relations Act", "law", "台灣關係法", "台湾关系法"],
+    ["JD Vance", "person", "J. D. Vance", "J.D. Vance", "J·D·范斯", "J·D·万斯"],
+    ["Marco Rubio", "person", "馬可·魯比歐", "马可·鲁比奥"]
   ].map(([label, type, ...aliases]) => ({ label, type, aliases: [label, ...aliases] }));
   const ALIAS_LOOKUP = new Map();
+  const COMPACT_ALIAS_LOOKUP = new Map();
   for (const entity of ENTITY_LEXICON) for (const alias of entity.aliases)
-    ALIAS_LOOKUP.set(normalize(alias).toLocaleLowerCase(), entity);
+    {ALIAS_LOOKUP.set(normalize(alias).toLocaleLowerCase(), entity);COMPACT_ALIAS_LOOKUP.set(compact(alias),entity)}
 
   const GENERIC_TERMS = new Set([
     "文明","馴化","驯化","力学","理論","理论","實驗","实验","學說","学说","主義","主义",
@@ -70,7 +75,7 @@
   function addCandidate(map, rawTerm, segment, title, options = {}) {
     const term = normalize(rawTerm).replace(/^[\s.,!?「」『』【】（）()]+|[\s.,!?「」『』【】（）()]+$/g, "");
     if (term.length < 2 || term.length > 64 || GENERIC_TERMS.has(term) || /^\d+(?:[.,:]\d+)*$/.test(term)) return;
-    const knownEntity = ALIAS_LOOKUP.get(term.toLocaleLowerCase());
+    const knownEntity = ALIAS_LOOKUP.get(term.toLocaleLowerCase()) || COMPACT_ALIAS_LOOKUP.get(compact(term));
     const key = options.canonicalKey || (knownEntity ? `lexicon:${knownEntity.label}` : (/\p{Script=Latin}/u.test(term) ? term.toLocaleLowerCase("en") : term));
     if (knownEntity) options = { displayTerm: knownEntity.label, type: knownEntity.type, confidence: 0.99, signal: options.signal || "curated_entity_alias", ...options };
     let item = map.get(key);

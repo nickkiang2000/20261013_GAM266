@@ -1,4 +1,4 @@
-YouTube Knowledge & Investment Immersion — Extension 0.11.0
+YouTube Knowledge & Investment Immersion — Extension 0.12.0
 
 本版重點
 1. 開啟 YouTube 影片後，先嘗試從播放器已載入的字幕軌取得整份字幕；成功且最後時間戳接近影片結尾時立即完成。
@@ -30,6 +30,8 @@ YouTube Knowledge & Investment Immersion — Extension 0.11.0
 - 這是技術原型，不代表已完成 YouTube 條款、商用權利或隱私法遵審查。
 - 本版沒有 AI API、沒有後端；字幕與候選詞保存在本機 Chrome Storage。只有使用者展開某一候選詞時，該詞會送至 Wikipedia 查詢，完整字幕不會送出。
 
+
+0.12.0 Entity Normalization + Disambiguation：以 compact alias 合併跨 cue／含空格的同一實體，消除書名重複，並支援「台灣關係 法」及黏連的 JD Vance／Marco Rubio；新增西亞。Wikipedia 會辨識 pageprops 與「可以指／may refer to」摘要並跳過消歧義頁，播放中詞條可優先於整批背景預載。播放狀態回報若發現 videoId 與側欄不同，會立即觸發分頁重載流程。
 
 0.11.0 Stable Status + Active-tab Polling + Cross-cue Terms：字幕狀態固定單行高度與省略號；同一活動字幕軌的重複 payload 不再觸發反覆擷取，切回舊語言仍會更新。除分頁事件外，每 500ms 以作用中 tab ID 與 URL videoId 檢查分頁切換。專有名詞以合併段落辨識跨 cue 詞組，再回原始字幕尋找最小連續 cue 範圍，使被換行拆開的書名能在第一次出現時精準高亮。
 

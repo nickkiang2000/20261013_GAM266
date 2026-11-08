@@ -10,6 +10,7 @@ let loadGeneration = 0;
 let tabReloadTimer = null;
 let activeTabId = null;
 let observedTabKey = "";
+const priorityLookups = new Map();
 
 const $ = id => document.getElementById(id);
 const clean = s => String(s || "").replace(/\s+/g, " ").trim();
@@ -148,27 +149,33 @@ async function searchWikipediaTerm(term, language) {
     if (!response.ok) return null;
     const results = (await response.json())?.query?.search || [];
     if (!results.length) return null;
-    const best=results.map((page,index)=>({
+    const candidates=results.map((page,index)=>({
       pageId:page.pageid, title:page.title,
       matchConfidence:wikiMatchConfidence(term,page.title,index),
       searchSnippet:clean(String(page.snippet||"").replace(/<[^>]+>/g,""))
-    })).sort((a,b)=>b.matchConfidence-a.matchConfidence)[0];
+    })).sort((a,b)=>b.matchConfidence-a.matchConfidence);
+    const pages=await fetchWikipediaExtracts(candidates,language);
+    const best=candidates.find(candidate=>{
+      const page=pages.get(candidate.pageId),extract=clean(page?.extract||candidate.searchSnippet||"");
+      return page&&!page.pageprops?.disambiguation&&!/(?:可以指|可能指的是|may refer to|can refer to)/i.test(extract);
+    });
     return best?.matchConfidence>=0.7?best:null;
   } catch (_) { return null; }
 }
 
 async function exactWikipediaTerm(term, language) {
   const params = new URLSearchParams({
-    action:"query", prop:"extracts|info", inprop:"url", exintro:"1", explaintext:"1", exchars:"360",
+    action:"query", prop:"extracts|info|pageprops", inprop:"url", exintro:"1", explaintext:"1", exchars:"360",
     titles:term, redirects:"1", converttitles:"1", format:"json", formatversion:"2", origin:"*"
   });
   try {
     const response=await fetch(`https://${language}.wikipedia.org/w/api.php?${params}`,{credentials:"omit"});
     if(!response.ok)return null;
     const page=(await response.json())?.query?.pages?.[0];
-    if(!page||page.missing)return null;
+    const explanation=clean(page?.extract||"");
+    if(!page||page.missing||page.pageprops?.disambiguation||/(?:可以指|可能指的是|may refer to|can refer to)/i.test(explanation))return null;
     return {status:"matched",language,title:page.title,pageId:page.pageid,url:page.fullurl,
-      matchConfidence:1,explanation:clean(page.extract||"")};
+      matchConfidence:1,explanation};
   }catch(_){return null}
 }
 
@@ -178,7 +185,7 @@ async function fetchWikipediaExtracts(matches, language) {
     const batch = matches.slice(i,i+20).filter(Boolean);
     if (!batch.length) continue;
     const params = new URLSearchParams({
-      action:"query", prop:"extracts|info", inprop:"url", exintro:"1", explaintext:"1",
+      action:"query", prop:"extracts|info|pageprops", inprop:"url", exintro:"1", explaintext:"1",
       exchars:"360", pageids:batch.map(item=>item.pageId).join("|"),
       format:"json", formatversion:"2", origin:"*"
     });
@@ -271,13 +278,13 @@ function refineOccurrencesFromRawCues(terms, rawSegments) {
       i=matchedEnd;
     }
     return occurrences.length?{...term,frequency:occurrences.length,segmentCount:occurrences.length,occurrences}:term;
-  });
+  }).sort((a,b)=>(a.occurrences[0]?.start??Infinity)-(b.occurrences[0]?.start??Infinity)||b.score-a.score);
 }
 
 async function ensureLocalKnowledgeTerms() {
   const transcript = activeData?.transcript;
   if (!activeVideoId || !transcript?.segments?.length) return;
-  if (activeData.knowledgeTerms?.method === "rule_based_v6_cross_cue" &&
+  if (activeData.knowledgeTerms?.method === "rule_based_v7_normalized_entities" &&
       activeData.knowledgeTerms.sourceTranscriptSha256 === (transcript.contentSha256 || null)) return;
   const utils = globalThis.YTKITranscriptUtils, extractor = globalThis.YTKITermExtractor;
   // Grouped text finds entities split across adjacent caption cues. After
@@ -292,7 +299,7 @@ async function ensureLocalKnowledgeTerms() {
   const key = PREFIX + activeVideoId;
   const current = (await chrome.storage.local.get(key))[key] || activeData;
   current.knowledgeTerms = {
-    version: 6, method: "rule_based_v6_cross_cue", generatedAt: new Date().toISOString(),
+    version: 7, method: "rule_based_v7_normalized_entities", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, nativeLanguage:"zh", wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length,
     defaultDisplayCount:60, terms
@@ -303,7 +310,7 @@ async function ensureLocalKnowledgeTerms() {
 async function preloadKnowledgeDetails() {
   const result=activeData?.knowledgeTerms;
   if(!activeVideoId||!result?.terms?.length)return;
-  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v6`;
+  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v7`;
   if(preloadKey===keyId)return;
   const pending=result.terms.map((term,index)=>({term,index})).filter(item=>item.term.wikipedia?.status==="not_queried");
   if(!pending.length){preloadKey=keyId;return}
@@ -325,6 +332,25 @@ async function preloadKnowledgeDetails() {
     for(const term of current.knowledgeTerms.terms||[])if(byKey.has(term.normalizedTerm))term.wikipedia=byKey.get(term.normalizedTerm);
     await chrome.storage.local.set({[storageKey]:current});
   }
+}
+
+async function ensurePriorityTermDetail(index) {
+  const term=activeData?.knowledgeTerms?.terms?.[index];
+  if(!term||term.wikipedia?.status!=="not_queried")return;
+  const videoId=activeVideoId,sourceHash=activeData.knowledgeTerms.sourceTranscriptSha256;
+  const lookupKey=`${videoId}:${term.normalizedTerm}`;
+  if(priorityLookups.has(lookupKey))return priorityLookups.get(lookupKey);
+  const task=(async()=>{
+    const reference=await resolveTermReference(term,activeData.knowledgeTerms.wikipediaLanguage||"en");
+    if(activeVideoId!==videoId||activeData?.knowledgeTerms?.sourceTranscriptSha256!==sourceHash)return;
+    const liveTerm=activeData.knowledgeTerms.terms[index];
+    if(liveTerm?.normalizedTerm!==term.normalizedTerm)return;
+    liveTerm.wikipedia=reference;renderKnowledgeTerms();
+    const storageKey=PREFIX+videoId,current=(await chrome.storage.local.get(storageKey))[storageKey];
+    const storedTerm=current?.knowledgeTerms?.terms?.find(item=>item.normalizedTerm===term.normalizedTerm);
+    if(storedTerm&&current.knowledgeTerms.sourceTranscriptSha256===sourceHash){storedTerm.wikipedia=reference;await chrome.storage.local.set({[storageKey]:current})}
+  })().finally(()=>priorityLookups.delete(lookupKey));
+  priorityLookups.set(lookupKey,task);return task;
 }
 
 function renderKnowledgeTerms() {
@@ -415,7 +441,7 @@ async function loadData() {
     : "尚無診斷資料";
   renderKnowledgeTerms();
   ensureLocalKnowledgeTerms().catch(error => { $("termStatus").textContent=`本機分析失敗：${String(error?.message||error)}`; });
-  if(activeData.knowledgeTerms?.method==="rule_based_v6_cross_cue")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
+  if(activeData.knowledgeTerms?.method==="rule_based_v7_normalized_entities")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
     $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
@@ -448,16 +474,7 @@ $("termList").addEventListener("click",async event=>{
   expandedTerms.clear();expandedTerms.add(keyId);renderKnowledgeTerms();
   const term=activeData.knowledgeTerms.terms[index];
   if(!term||term.wikipedia?.status!=="not_queried")return;
-  try{
-    const reference=await resolveTermReference(term,activeData.knowledgeTerms.wikipediaLanguage||"en");
-    const storageKey=PREFIX+activeVideoId;
-    const current=(await chrome.storage.local.get(storageKey))[storageKey]||activeData;
-    const currentTerm=current.knowledgeTerms?.terms?.[index];
-    if(currentTerm?.normalizedTerm===term.normalizedTerm){
-      currentTerm.wikipedia=reference;
-      await chrome.storage.local.set({[storageKey]:current});
-    }
-  }catch(error){
+  try{await ensurePriorityTermDetail(index)}catch(error){
     term.wikipedia={status:"lookup_error",language:null,explanation:`查詢失敗：${String(error?.message||error)}`,
       url:`https://www.google.com/search?q=${encodeURIComponent(term.term)}`};
     renderKnowledgeTerms();
@@ -554,7 +571,8 @@ async function syncPlaybackTerm(){
   if(!activeVideoId||!activeData?.knowledgeTerms?.terms?.length)return;
   const tabs=await chrome.tabs.query({active:true,currentWindow:true}),tab=tabs[0];if(!tab?.id)return;
   const state=await new Promise(resolve=>chrome.tabs.sendMessage(tab.id,{type:"YTKI_GET_PLAYBACK_TIME"},res=>resolve(chrome.runtime.lastError?null:res)));
-  if(!state||state.videoId!==activeVideoId||state.paused||!Number.isFinite(state.currentTime))return;
+  if(state?.videoId&&state.videoId!==activeVideoId){observedTabKey=`${tab.id}:${state.videoId}`;scheduleTabReload();return}
+  if(!state||state.paused||!Number.isFinite(state.currentTime))return;
   const now=state.currentTime;
   const active=[];
   activeData.knowledgeTerms.terms.forEach((term,index)=>(term.occurrences||[]).forEach(occ=>{
@@ -568,6 +586,7 @@ async function syncPlaybackTerm(){
     const index=active.sort((a,b)=>Math.abs(now-a.start)-Math.abs(now-b.start))[0].index;
     if(index>=60)showAllTerms=true;
     expandedTerms.clear();expandedTerms.add(`${activeVideoId}:${index}`)
+    for(const item of active)ensurePriorityTermDetail(item.index).catch(()=>{});
   }
   renderKnowledgeTerms();
 }

@@ -77,4 +77,9 @@ const splitTerms=termContext.YTKITermExtractor.extractTerms({language:'zh',analy
 const refined=context.__refineOccurrencesFromRawCues(splitTerms,splitCues);
 const splitTitle=refined.find(term=>term.term==='枪炮、病菌与钢铁');
 if(!splitTitle||splitTitle.occurrences[0]?.start!==16||splitTitle.occurrences[0]?.end!==21)throw new Error('Cross-cue entity timing failed');
+if(refined.filter(term=>term.term==='枪炮、病菌与钢铁').length!==1)throw new Error('Canonical and quoted entity were not deduplicated');
+const translatedTerms=termContext.YTKITermExtractor.extractTerms({language:'zh-Hant',analysisSegments:[
+  {start:0,end:20,text:'台灣關係 法由JD Vance和Marco Rubio討論，西亞也是重點。',sourceSegmentIds:['zh-1']}
+]});
+for(const expected of ['台灣關係法','JD Vance','Marco Rubio','西亞'])if(!translatedTerms.some(term=>term.term===expected))throw new Error('Translated entity normalization missing: '+expected);
 console.log("Parser tests passed.");
