@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Nick Kiang | 我的網頁作品集 - 手機優先作品目錄與個人介紹</title>
+  
+  <!-- SEO & Meta -->
+  <meta name="description" content="Nick Kiang 的個人網頁作品集，收錄倒數計時器、每日喝水追蹤、天氣觀測及個人商務官網等前端互動應用。">
+  <meta name="theme-color" content="#0f172a">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Font Awesome Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <!-- Google Fonts: Inter & Noto Sans TC -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['"Inter"', '"Noto Sans TC"', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+              900: '#312e81',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* 針對手機觸控與平滑視覺做最佳化 */
+    * {
+      -webkit-tap-highlight-color: transparent;
+    }
+    body {
+      background-color: #0b0f19;
+      color: #f1f5f9;
+      font-family: 'Inter', 'Noto Sans TC', sans-serif;
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+    .glass-nav {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-card {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .glass-card:hover {
+      border-color: rgba(99, 102, 241, 0.4);
+    }
+    .badge-api {
+      background: rgba(99, 102, 241, 0.15);
+      color: #a5b4fc;
+      border: 1px solid rgba(99, 102, 241, 0.3);
+    }
+    .badge-scene {
+      background: rgba(16, 185, 129, 0.12);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.25);
+    }
+    /* 隱藏原生捲軸但保持滾動 */
+    .no-scrollbar::-webkit-scrollbar {
+      display: none;
+    }
+    .no-scrollbar {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+  </style>
+</head>
+<body id="top" class="min-h-screen text-slate-100 flex flex-col justify-between">
+
+  <!-- 手機與桌面頂部導航列 (Sticky Header) -->
+  <header class="sticky top-0 z-40 glass-nav transition-all duration-300">
+    <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
+      <a href="#top" class="flex items-center space-x-2.5 group">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-sky-500 flex items-center justify-center text-white shadow-lg shadow-indigo-500/30 group-hover:scale-105 transition">
+          <i class="fa-solid fa-code text-sm"></i>
+        </div>
+        <div>
+          <span class="font-bold text-base tracking-tight text-white block leading-tight">Nick Kiang</span>
+          <span class="text-[10px] text-indigo-300 font-medium tracking-wider uppercase block">網頁作品集 · Portfolio</span>
+        </div>
+      </a>
+
+      <!-- 導航連結 (桌面版與平板) -->
+      <nav class="hidden md:flex items-center space-x-1 text-sm font-medium">
+        <a href="#projects" class="px-3.5 py-2 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/60 transition">
+          <i class="fa-solid fa-layer-group mr-1.5 text-indigo-400"></i>作品目錄
+        </a>
+        <a href="#about" class="px-3.5 py-2 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/60 transition">
+          <i class="fa-solid fa-user-tie mr-1.5 text-indigo-400"></i>關於我
+        </a>
+        <a href="#contact" class="px-3.5 py-2 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/60 transition">
+          <i class="fa-solid fa-paper-plane mr-1.5 text-indigo-400"></i>聯絡我
+        </a>
+      </nav>
+
+      <!-- 快捷操作：直接進入作品 -->
+      <div class="flex items-center space-x-2">
+        <a href="#projects" class="text-xs bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-3.5 py-2 rounded-xl shadow-md shadow-indigo-600/30 transition flex items-center space-x-1.5 active:scale-95">
+          <span>探索作品</span>
+          <i class="fa-solid fa-arrow-down text-[10px]"></i>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main class="flex-grow">
+    <!-- 手機優先 Hero 橫幅區塊 -->
+    <section class="relative overflow-hidden pt-8 pb-12 px-4 border-b border-slate-800/80 bg-gradient-to-b from-slate-900/80 via-slate-950 to-slate-900">
+      <!-- 裝飾性漸層光暈 -->
+      <div class="absolute -top-24 left-1/2 -translate-x-1/2 w-80 h-80 bg-indigo-600/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div class="absolute top-1/2 right-0 w-64 h-64 bg-sky-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+      <div class="max-w-5xl mx-auto relative z-10">
+        <!-- 手機大頭貼與身分 -->
+        <div class="flex flex-col sm:flex-row items-center sm:items-start text-center sm:text-left gap-5 mb-6">
+          <div class="relative group">
+            <div class="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl overflow-hidden p-0.5 bg-gradient-to-tr from-indigo-500 via-sky-400 to-indigo-600 shadow-xl shadow-indigo-900/40">
+              <img 
+                src="Creative/ee9b10e8-e6ce-4238-91c7-ee8ab7725329_去背.png" 
+                alt="Nick Kiang" 
+                class="w-full h-full object-cover object-top rounded-[14px] bg-slate-800"
+                onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=Nick+Kiang&background=4f46e5&color=fff&size=200';"
+              />
+            </div>
+            <span class="absolute bottom-1 right-1 w-4 h-4 bg-emerald-500 border-2 border-slate-900 rounded-full" title="在線中"></span>
+          </div>
+
+          <div class="space-y-2">
+            <div class="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 border border-indigo-500/20 text-indigo-300">
+              <i class="fa-solid fa-sparkles text-[10px]"></i>
+              <span>Mobile-First Web Portfolio</span>
+            </div>
+            <h1 class="text-3xl sm:text-4xl font-extrabold tracking-tight text-white">
+              我的網頁作品集
+            </h1>
+            <p class="text-sm sm:text-base text-slate-400 max-w-xl leading-relaxed">
+              融合 10+ 年跨國商務拓展視野與現代前端技術，打造簡約、實用且富含互動感的手機響應式網頁應用。
+            </p>
+          </div>
+        </div>
+
+        <!-- 數據指標小卡 (手機一排或二格) -->
+        <div class="grid grid-cols-3 gap-2.5 sm:gap-4 max-w-lg mx-auto sm:mx-0 pt-2">
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3 text-center">
+            <div class="text-lg sm:text-xl font-bold text-indigo-400">4 款</div>
+            <div class="text-[11px] text-slate-400 mt-0.5 font-medium">實作網頁應用</div>
+          </div>
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3 text-center">
+            <div class="text-lg sm:text-xl font-bold text-sky-400">100%</div>
+            <div class="text-[11px] text-slate-400 mt-0.5 font-medium">手機優先響應</div>
+          </div>
+          <div class="bg-slate-900/90 border border-slate-800/80 rounded-xl p-3 text-center">
+            <div class="text-lg sm:text-xl font-bold text-emerald-400">Web APIs</div>
+            <div class="text-[11px] text-slate-400 mt-0.5 font-medium">多元技術串接</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 作品目錄區塊 (Project Catalog) -->
+    <section id="projects" class="py-10 px-4 max-w-5xl mx-auto">
+      
+      <!-- 目錄標題與篩選控制 -->
+      <div class="mb-6 space-y-4">
+        <div class="flex flex-col sm:flex-row sm:items-end justify-between gap-2">
+          <div>
+            <div class="flex items-center space-x-2 text-indigo-400 text-xs font-bold tracking-wider uppercase">
+              <i class="fa-solid fa-cube"></i>
+              <span>Project Directory</span>
+            </div>
+            <h2 class="text-2xl font-bold text-white tracking-tight mt-1">作品目錄</h2>
+          </div>
+          <p class="text-xs text-slate-400">點擊卡片下方「打開」按鈕即可在新分頁即時操作</p>
+        </div>
+
+        <!-- 分類標籤篩選按鈕列 (支援手指橫向滑動) -->
+        <div class="flex items-center space-x-2 overflow-x-auto no-scrollbar pb-1 pt-1 -mx-4 px-4 sm:mx-0 sm:px-0">
+          <button onclick="filterProjects('all')" class="filter-btn active whitespace-nowrap px-3.5 py-1.5 rounded-full text-xs font-semibold bg-indigo-600 text-white transition shadow-sm" data-filter="all">
+            全部作品 (4)
+          </button>
+          <button onclick="filterProjects('utility')" class="filter-btn whitespace-nowrap px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-filter="utility">
+            <i class="fa-solid fa-stopwatch mr-1 text-slate-400"></i>實用工具
+          </button>
+          <button onclick="filterProjects('health')" class="filter-btn whitespace-nowrap px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-filter="health">
+            <i class="fa-solid fa-heart-pulse mr-1 text-slate-400"></i>生活健康
+          </button>
+          <button onclick="filterProjects('showcase')" class="filter-btn whitespace-nowrap px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-filter="showcase">
+            <i class="fa-solid fa-briefcase mr-1 text-slate-400"></i>形象官網
+          </button>
+          <button onclick="filterProjects('weather')" class="filter-btn whitespace-nowrap px-3.5 py-1.5 rounded-full text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition" data-filter="weather">
+            <i class="fa-solid fa-cloud-sun-rain mr-1 text-slate-400"></i>即時氣象
+          </button>
+        </div>
+      </div>
+
+      <!-- 作品圖卡列表 (Mobile-First 單欄，平板與桌面雙欄) -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        <!-- =================== 作品 1：極簡倒數計時器 =================== -->
+        <article class="project-card glass-card rounded-2xl overflow-hidden flex flex-col justify-between transition-all duration-300 hover:shadow-2xl hover:shadow-indigo-500/10 group" data-category="utility">
+          
+          <!-- 圖卡上方視覺預覽 (Sleek Visual Banner) -->
+          <div class="relative h-44 bg-gradient-to-br from-slate-950 via-zinc-900 to-black p-4 flex flex-col justify-between border-b border-slate-800/80 overflow-hidden">
+            <!-- 背景發光特效 -->
+            <div class="absolute -top-10 -right-10 w-32 h-32 bg-emerald-500/20 rounded-full blur-2xl"></div>
+            
+            <div class="flex items-center justify-between z-10">
+              <span class="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                <i class="fa-solid fa-clock text-[10px]"></i>
+                <span>實用效率工具</span>
+              </span>
+              <span class="text-xs text-slate-400 font-mono">2026.10</span>
+            </div>
+
+            <!-- 計時器 Mockup 視覺展示 -->
+            <div class="my-auto text-center z-10 py-1">
+              <div class="font-mono text-4xl sm:text-5xl font-black tracking-tight text-white drop-shadow-[0_0_15px_rgba(16,185,129,0.3)]">
+                25:00
+              </div>
+              <p class="text-[11px] text-slate-400 font-mono tracking-widest mt-1 uppercase">FOCUS · OBSIDIAN THEME</p>
+            </div>
+
+            <div class="flex items-center justify-between text-xs text-slate-400 z-10 pt-1 border-t border-white/5">
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-palette text-emerald-400"></i><span>3款配色主題</span></span>
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-expand text-slate-300"></i><span>全螢幕沉浸</span></span>
+            </div>
+          </div>
+
+          <!-- 卡片內容本體 -->
+          <div class="p-5 flex-grow flex flex-col justify-between space-y-4">
+            
+            <div>
+              <div class="flex items-start justify-between gap-2">
+                <h3 class="text-lg font-bold text-white group-hover:text-indigo-300 transition">
+                  極簡質感倒數計時器
+                </h3>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">HTML5 / JS</span>
+              </div>
+
+              <!-- 100 字精簡介紹 -->
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed mt-2.5">
+                專為專注工作與高效率會議打造的極簡風格倒數計時器。介面清爽零干擾，支援全螢幕沉浸式模式，並內建黑曜、日光與賽博三種高質感色彩主題，計時結束自動觸發音效提示，助您保持流暢的工作節奏。
+              </p>
+            </div>
+
+            <!-- 使用到的 API -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-plug text-indigo-400 text-[10px]"></i>
+                <span>使用到的 API：</span>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Web Audio API (音效合成)</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Fullscreen API (全螢幕)</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">DOM Timer API</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Keyboard Events API</span>
+              </div>
+            </div>
+
+            <!-- 應用場景 -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-bullseye text-emerald-400 text-[10px]"></i>
+                <span>應用場景：</span>
+              </div>
+              <ul class="text-xs text-slate-300 space-y-1 pl-1">
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>番茄工作法（Pomodoro）個人專注與休息節奏切換</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>敏捷團隊站立會議（Scrum Standup）發言限時控制</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>簡報演練、即席演講限時考核與工作坊衝刺計時</span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- 打開按鈕 (Prominent Action Button) -->
+            <div class="pt-3 border-t border-slate-800">
+              <a 
+                href="20261028_Countdown/code_artifact.html" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                class="w-full h-11 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold text-sm rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/30 transition group-hover:scale-[1.01]"
+              >
+                <span>打開作品</span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+              </a>
+            </div>
+
+          </div>
+        </article>
+
+        <!-- =================== 作品 2：每日喝水健康記錄 =================== -->
+        <article class="project-card glass-card rounded-2xl overflow-hidden flex flex-col justify-between transition-all duration-300 hover:shadow-2xl hover:shadow-sky-500/10 group" data-category="health">
+          
+          <!-- 圖卡上方視覺預覽 (Sleek Visual Banner) -->
+          <div class="relative h-44 bg-gradient-to-br from-sky-950 via-blue-900 to-slate-900 p-4 flex flex-col justify-between border-b border-slate-800/80 overflow-hidden">
+            <!-- 背景光暈 -->
+            <div class="absolute -top-10 -right-10 w-32 h-32 bg-sky-400/20 rounded-full blur-2xl"></div>
+            
+            <div class="flex items-center justify-between z-10">
+              <span class="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30">
+                <i class="fa-solid fa-droplet text-[10px]"></i>
+                <span>生活健康管理</span>
+              </span>
+              <span class="text-xs text-slate-400 font-mono">2026.11</span>
+            </div>
+
+            <!-- 喝水 Mockup 視覺展示 -->
+            <div class="my-auto flex items-center justify-center space-x-4 z-10 py-1">
+              <div class="w-16 h-16 rounded-full border-2 border-sky-400/50 bg-sky-950/60 flex flex-col items-center justify-center shadow-inner">
+                <span class="text-lg font-black text-white">75%</span>
+                <span class="text-[9px] text-sky-300">達成率</span>
+              </div>
+              <div>
+                <div class="text-2xl font-black text-white tracking-tight">1,500 <span class="text-xs font-normal text-slate-300">/ 2,000 ml</span></div>
+                <p class="text-[11px] text-sky-200 mt-0.5">今日飲水進度持續保持！</p>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between text-xs text-slate-400 z-10 pt-1 border-t border-white/5">
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-chart-column text-sky-400"></i><span>近7天數據分析</span></span>
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-database text-slate-300"></i><span>本機儲存不遺失</span></span>
+            </div>
+          </div>
+
+          <!-- 卡片內容本體 -->
+          <div class="p-5 flex-grow flex flex-col justify-between space-y-4">
+            
+            <div>
+              <div class="flex items-start justify-between gap-2">
+                <h3 class="text-lg font-bold text-white group-hover:text-sky-300 transition">
+                  每日喝水健康記錄追蹤器
+                </h3>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">Chart.js</span>
+              </div>
+
+              <!-- 100 字精簡介紹 -->
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed mt-2.5">
+                專為養成日常規律補水習慣設計的健康記錄工具。提供動態水波達成率圓環、快速快捷鍵與自訂飲水量，並整合過去 7 天飲水歷史圖表，資料自動保存於本地瀏覽器，隨時助您精準掌握每日的身體補水狀態。
+              </p>
+            </div>
+
+            <!-- 使用到的 API -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-plug text-sky-400 text-[10px]"></i>
+                <span>使用到的 API：</span>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Web Storage API (LocalStorage)</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">HTML5 Canvas API (Chart.js)</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">DOM Animation & UI API</span>
+              </div>
+            </div>
+
+            <!-- 應用場景 -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-bullseye text-emerald-400 text-[10px]"></i>
+                <span>應用場景：</span>
+              </div>
+              <ul class="text-xs text-slate-300 space-y-1 pl-1">
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>上班族久坐辦公室之定期喝水提醒與每日目標管理</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>運動健身、重訓與戶外慢跑後精確紀錄補水毫升數</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>回顧近 7 日歷史曲線，建立穩定健康的每日飲水作息</span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- 打開按鈕 -->
+            <div class="pt-3 border-t border-slate-800">
+              <a 
+                href="20261101_WaterTracker/daily_water_intake_tracker.html" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                class="w-full h-11 bg-sky-600 hover:bg-sky-500 active:bg-sky-700 text-white font-semibold text-sm rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-sky-600/30 transition group-hover:scale-[1.01]"
+              >
+                <span>打開作品</span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+              </a>
+            </div>
+
+          </div>
+        </article>
+
+        <!-- =================== 作品 3：Nick Kiang 個人品牌官網 =================== -->
+        <article class="project-card glass-card rounded-2xl overflow-hidden flex flex-col justify-between transition-all duration-300 hover:shadow-2xl hover:shadow-purple-500/10 group" data-category="showcase">
+          
+          <!-- 圖卡上方視覺預覽 (Sleek Visual Banner) -->
+          <div class="relative h-44 bg-gradient-to-br from-slate-950 via-indigo-950 to-purple-950 p-4 flex flex-col justify-between border-b border-slate-800/80 overflow-hidden">
+            <!-- 背景光暈 -->
+            <div class="absolute -top-10 -right-10 w-32 h-32 bg-purple-500/20 rounded-full blur-2xl"></div>
+            
+            <div class="flex items-center justify-between z-10">
+              <span class="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                <i class="fa-solid fa-globe text-[10px]"></i>
+                <span>品牌形象官網</span>
+              </span>
+              <span class="text-xs text-slate-400 font-mono">2026.11</span>
+            </div>
+
+            <!-- Showcase Mockup 視覺展示 -->
+            <div class="my-auto z-10 py-1 text-center">
+              <div class="text-xs font-mono tracking-widest text-indigo-300 uppercase">Nick Kiang Professional Showcase</div>
+              <div class="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
+                跨國商務拓展 · 20+ 國全球版圖
+              </div>
+              <p class="text-[11px] text-slate-400 mt-1">HW/SW · B2B/B2C 商業循環建構</p>
+            </div>
+
+            <div class="flex items-center justify-between text-xs text-slate-400 z-10 pt-1 border-t border-white/5">
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-building text-purple-400"></i><span>10+ 年戰略實績</span></span>
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-magnifying-glass text-slate-300"></i><span>SEO / JSON-LD</span></span>
+            </div>
+          </div>
+
+          <!-- 卡片內容本體 -->
+          <div class="p-5 flex-grow flex flex-col justify-between space-y-4">
+            
+            <div>
+              <div class="flex items-start justify-between gap-2">
+                <h3 class="text-lg font-bold text-white group-hover:text-purple-300 transition">
+                  Nick Kiang 個人品牌與商務履歷官網
+                </h3>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">Tailwind / SEO</span>
+              </div>
+
+              <!-- 100 字精簡介紹 -->
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed mt-2.5">
+                匯聚 10+ 年跨國商務拓展與產品策略實績的個人旗艦形象網站。採用響應式現代化排版與語義結構化技術，完整呈現跨足 20+ 國全球市場經驗、軟硬體商業循環建構歷程及地方創生實踐，兼具專業深度與質感。
+              </p>
+            </div>
+
+            <!-- 使用到的 API -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-plug text-purple-400 text-[10px]"></i>
+                <span>使用到的 API：</span>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Schema.org JSON-LD Structured Data</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">HTML5 Audio & Multimedia API</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">CSS Smooth Scroll & Viewport API</span>
+              </div>
+            </div>
+
+            <!-- 應用場景 -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-bullseye text-emerald-400 text-[10px]"></i>
+                <span>應用場景：</span>
+              </div>
+              <ul class="text-xs text-slate-300 space-y-1 pl-1">
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>跨國商務合作、海內外投資機構對接與國際企業代表提案</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>獵才顧問與跨國高管全面評估海外業務戰略與產品管理經歷</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>產官學專題演講邀約、地方創生 NPO 諮詢與青年創業導師連結</span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- 打開按鈕 -->
+            <div class="pt-3 border-t border-slate-800">
+              <a 
+                href="20261103_MySite/index.html" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                class="w-full h-11 bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white font-semibold text-sm rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-indigo-600/30 transition group-hover:scale-[1.01]"
+              >
+                <span>打開作品</span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+              </a>
+            </div>
+
+          </div>
+        </article>
+
+        <!-- =================== 作品 4：台灣即時天氣觀測站 =================== -->
+        <article class="project-card glass-card rounded-2xl overflow-hidden flex flex-col justify-between transition-all duration-300 hover:shadow-2xl hover:shadow-amber-500/10 group" data-category="weather">
+          
+          <!-- 圖卡上方視覺預覽 (Sleek Visual Banner) -->
+          <div class="relative h-44 bg-gradient-to-br from-sky-600 via-indigo-600 to-blue-800 p-4 flex flex-col justify-between border-b border-slate-800/80 overflow-hidden">
+            <!-- 背景光暈 -->
+            <div class="absolute -top-10 -right-10 w-32 h-32 bg-amber-400/30 rounded-full blur-2xl"></div>
+            
+            <div class="flex items-center justify-between z-10">
+              <span class="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-amber-400/20 text-amber-200 border border-amber-400/30">
+                <i class="fa-solid fa-cloud-bolt text-[10px]"></i>
+                <span>即時開放氣象</span>
+              </span>
+              <span class="text-xs text-white/80 font-mono">2026.11</span>
+            </div>
+
+            <!-- 天氣 Mockup 視覺展示 -->
+            <div class="my-auto flex items-center justify-center space-x-5 z-10 py-1 text-white">
+              <div class="text-4xl text-amber-300 drop-shadow-md">
+                <i class="fa-solid fa-cloud-sun"></i>
+              </div>
+              <div>
+                <div class="text-3xl font-black tracking-tight">24°C <span class="text-xs font-normal text-sky-100">臺北市</span></div>
+                <div class="text-[11px] text-sky-100 flex items-center space-x-2 mt-0.5">
+                  <span>多雲時晴</span>
+                  <span>·</span>
+                  <span>降雨機率 15%</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between text-xs text-sky-100 z-10 pt-1 border-t border-white/10">
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-map-location-dot"></i><span>全台 22 縣市切換</span></span>
+              <span class="flex items-center space-x-1.5"><i class="fa-solid fa-calendar-week"></i><span>未來 7 天預報</span></span>
+            </div>
+          </div>
+
+          <!-- 卡片內容本體 -->
+          <div class="p-5 flex-grow flex flex-col justify-between space-y-4">
+            
+            <div>
+              <div class="flex items-start justify-between gap-2">
+                <h3 class="text-lg font-bold text-white group-hover:text-amber-300 transition">
+                  台灣即時天氣觀測站
+                </h3>
+                <span class="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">Open-Meteo</span>
+              </div>
+
+              <!-- 100 字精簡介紹 -->
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed mt-2.5">
+                整合開放氣象資料的即時天氣觀測應用，支援台灣 22 縣市快速切換。即時呈現溫度、體感、降雨機率與風速，並提供未來 7 天一週天氣預報。搭配毛玻璃質感動態氣象卡片，出行前輕鬆掌握全台風雲動態。
+              </p>
+            </div>
+
+            <!-- 使用到的 API -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-plug text-amber-400 text-[10px]"></i>
+                <span>使用到的 API：</span>
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Fetch API (原生非同步 HTTP)</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">Open-Meteo REST API</span>
+                <span class="badge-api text-[11px] px-2.5 py-0.5 rounded-md font-medium">CSS Backdrop-Filter & DOM API</span>
+              </div>
+            </div>
+
+            <!-- 應用場景 -->
+            <div class="space-y-1.5 pt-1">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center space-x-1">
+                <i class="fa-solid fa-bullseye text-emerald-400 text-[10px]"></i>
+                <span>應用場景：</span>
+              </div>
+              <ul class="text-xs text-slate-300 space-y-1 pl-1">
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>每日清晨通勤族評估出門穿搭、防曬需求與隨身雨具攜帶</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>規劃週末跨縣市公路自駕、高山健行或戶外野餐活動天氣評估</span>
+                </li>
+                <li class="flex items-center space-x-2">
+                  <i class="fa-solid fa-check text-[10px] text-emerald-400"></i>
+                  <span>即時掌握全島各地陣風級數、相對濕度與未來一週氣候變化趨勢</span>
+                </li>
+              </ul>
+            </div>
+
+            <!-- 打開按鈕 -->
+            <div class="pt-3 border-t border-slate-800">
+              <a 
+                href="20261105_weather/index.html" 
+                target="_blank" 
+                rel="noopener noreferrer"
+                class="w-full h-11 bg-amber-600 hover:bg-amber-500 active:bg-amber-700 text-white font-semibold text-sm rounded-xl flex items-center justify-center space-x-2 shadow-lg shadow-amber-600/30 transition group-hover:scale-[1.01]"
+              >
+                <span>打開作品</span>
+                <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+              </a>
+            </div>
+
+          </div>
+        </article>
+
+      </div>
+    </section>
+
+    <!-- 關於我區塊 (About Me Section) -->
+    <section id="about" class="py-12 px-4 border-t border-slate-800/80 bg-slate-900/60">
+      <div class="max-w-4xl mx-auto space-y-8">
+        
+        <div class="text-center sm:text-left space-y-2">
+          <div class="inline-flex items-center space-x-1.5 text-xs font-bold text-indigo-400 uppercase tracking-wider">
+            <i class="fa-solid fa-address-card"></i>
+            <span>About The Creator</span>
+          </div>
+          <h2 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">關於我 · Nick Kiang</h2>
+          <p class="text-sm text-slate-400 max-w-2xl leading-relaxed">
+            以敏銳的商業需求洞察為核心，結合前端工程實作能力，致力於打造解決真實問題的流暢體驗。
+          </p>
+        </div>
+
+        <!-- 個人背景核心卡片 -->
+        <div class="glass-card rounded-2xl p-6 sm:p-8 space-y-6">
+          
+          <div class="flex flex-col sm:flex-row items-center sm:items-start gap-6">
+            <!-- 大頭貼 -->
+            <div class="w-24 h-24 sm:w-28 sm:h-28 rounded-2xl overflow-hidden bg-slate-800 border-2 border-indigo-500/40 shadow-xl flex-shrink-0">
+              <img 
+                src="Creative/ee9b10e8-e6ce-4238-91c7-ee8ab7725329_去背.png" 
+                alt="Nick Kiang" 
+                class="w-full h-full object-cover object-top"
+                onerror="this.onerror=null; this.src='https://ui-avatars.com/api/?name=Nick+Kiang&background=4f46e5&color=fff&size=200';"
+              />
+            </div>
+
+            <!-- 自我介紹敘述 -->
+            <div class="space-y-3 text-center sm:text-left">
+              <div class="flex flex-wrap items-center justify-center sm:justify-start gap-2">
+                <span class="text-xl font-bold text-white">Nick Kiang</span>
+                <span class="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">
+                  Global BD & Frontend Explorer
+                </span>
+              </div>
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                擁有超過 10 年跨國商務拓展（Global Business Development）與產品戰略管理實務，足跡遍及全球 20 餘國（含美國、中國 15+ 城市、埃及、阿爾及利亞乃至戰後伊拉克等市場）。深諳市場需求分析、組織流程優化與可持續商業循環的建構。
+              </p>
+              <p class="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                同時積極投入社會實踐與科技創新：創辦台東地方創生「鹿野心種子 Luye Heartseed Homestel」、發起「成大青年校友網路 NCKU Youth Alumni Network」，並透過現代 HTML5、JavaScript (ES6+) 與開放 Web APIs 實踐以人為本的前端互動工具。
+              </p>
+            </div>
+          </div>
+
+          <!-- 核心能力維度 -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 border-t border-slate-800">
+            <div class="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800">
+              <div class="flex items-center space-x-2 text-indigo-400 font-bold text-sm mb-1">
+                <i class="fa-solid fa-code"></i>
+                <span>前端技術實作</span>
+              </div>
+              <p class="text-xs text-slate-400">
+                HTML5 語意化、CSS3/Tailwind 響應排版、現代原生 JavaScript (ES6+)、Chart.js 圖表渲染。
+              </p>
+            </div>
+
+            <div class="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800">
+              <div class="flex items-center space-x-2 text-sky-400 font-bold text-sm mb-1">
+                <i class="fa-solid fa-network-wired"></i>
+                <span>API 串接整合</span>
+              </div>
+              <p class="text-xs text-slate-400">
+                Web Audio、Web Storage (LocalStorage)、REST API 異步非同步 Fetch、Fullscreen 與 Schema 語義資料。
+              </p>
+            </div>
+
+            <div class="p-3.5 bg-slate-900/80 rounded-xl border border-slate-800">
+              <div class="flex items-center space-x-2 text-emerald-400 font-bold text-sm mb-1">
+                <i class="fa-solid fa-chart-line"></i>
+                <span>商業與產品戰略</span>
+              </div>
+              <p class="text-xs text-slate-400">
+                跨國市場開拓、軟硬體 B2B/B2C 商業模式建立、跨文化談判、地方創生與 NPO 組織領導。
+              </p>
+            </div>
+          </div>
+
+          <!-- 聯絡與社群連結 -->
+          <div id="contact" class="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-4">
+            <div class="text-xs text-slate-400">
+              <span class="text-slate-300 font-medium">期待合作與交流？</span> 歡迎透過 LinkedIn 與我聯繫！
+            </div>
+
+            <div class="flex items-center space-x-3">
+              <a 
+                href="https://www.linkedin.com/in/nickkiang/" 
+                target="_blank" 
+                rel="noopener noreferrer" 
+                class="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center space-x-1.5 shadow-md shadow-blue-600/30 transition active:scale-95"
+              >
+                <i class="fa-brands fa-linkedin text-sm"></i>
+                <span>LinkedIn 專頁</span>
+              </a>
+              <a 
+                href="20261103_MySite/index.html" 
+                target="_blank" 
+                class="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center space-x-1.5 border border-slate-700 transition active:scale-95"
+              >
+                <i class="fa-solid fa-user-tie text-xs"></i>
+                <span>完整履歷官網</span>
+              </a>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 頁尾 (Footer) -->
+  <footer class="py-8 px-4 border-t border-slate-800/80 text-center text-xs text-slate-500 space-y-2 mb-16 md:mb-0">
+    <div class="max-w-4xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-3">
+      <p>© 2026 Nick Kiang · 我的網頁作品集. 保留所有權利。</p>
+      <div class="flex items-center space-x-4 text-slate-400">
+        <a href="#top" class="hover:text-indigo-400 transition">回到頂部 ↑</a>
+        <a href="#projects" class="hover:text-indigo-400 transition">作品目錄</a>
+        <a href="#about" class="hover:text-indigo-400 transition">關於我</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- 手機專屬底部快捷懸浮導航列 (Mobile Bottom Floating Navigation) -->
+  <nav class="fixed bottom-0 left-0 right-0 z-50 md:hidden glass-nav border-t border-slate-800/90 py-2 px-6 flex justify-around items-center">
+    <a href="#top" class="flex flex-col items-center text-slate-400 hover:text-indigo-400 transition py-1">
+      <i class="fa-solid fa-house text-sm"></i>
+      <span class="text-[10px] mt-0.5">首頁</span>
+    </a>
+    <a href="#projects" class="flex flex-col items-center text-indigo-400 font-semibold py-1">
+      <i class="fa-solid fa-layer-group text-sm"></i>
+      <span class="text-[10px] mt-0.5">作品目錄</span>
+    </a>
+    <a href="#about" class="flex flex-col items-center text-slate-400 hover:text-indigo-400 transition py-1">
+      <i class="fa-solid fa-user text-sm"></i>
+      <span class="text-[10px] mt-0.5">關於我</span>
+    </a>
+    <a href="#contact" class="flex flex-col items-center text-slate-400 hover:text-indigo-400 transition py-1">
+      <i class="fa-solid fa-paper-plane text-sm"></i>
+      <span class="text-[10px] mt-0.5">聯絡</span>
+    </a>
+  </nav>
+
+  <!-- 前端篩選腳本 (完全原生零依賴) -->
+  <script>
+    function filterProjects(category) {
+      // 切換按鈕樣式
+      document.querySelectorAll('.filter-btn').forEach(btn => {
+        if (btn.dataset.filter === category) {
+          btn.classList.add('bg-indigo-600', 'text-white');
+          btn.classList.remove('bg-slate-800', 'text-slate-300');
+        } else {
+          btn.classList.remove('bg-indigo-600', 'text-white');
+          btn.classList.add('bg-slate-800', 'text-slate-300');
+        }
+      });
+
+      // 篩選卡片顯示
+      const cards = document.querySelectorAll('.project-card');
+      cards.forEach(card => {
+        if (category === 'all' || card.dataset.category === category) {
+          card.style.display = 'flex';
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+  </script>
+</body>
+</html>
