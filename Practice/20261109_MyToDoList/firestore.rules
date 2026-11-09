@@ -2,48 +2,15 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // 檢查使用者是否已登入
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-    
-    // 檢查使用者是否為清單成員
-    function isListMember(listData) {
-      return isAuthenticated() && (
-        request.auth.uid == listData.ownerUid ||
-        request.auth.token.email.lower() in listData.memberEmails
-      );
-    }
-
-    // 協作清單規則
+    // 協作待辦清單：允許所有已登入 (Google Auth) 的使用者讀取與建立/修改清單
     match /lists/{listId} {
-      allow read: if isAuthenticated() && (
-        resource.data.memberEmails.hasAny([request.auth.token.email.lower()]) ||
-        resource.data.ownerUid == request.auth.uid
-      );
+      allow read, write: if request.auth != null;
       
-      // 建立清單：任何人只要登入都可以建立自己的清單
-      allow create: if isAuthenticated() && 
-                    request.resource.data.ownerUid == request.auth.uid;
-      
-      // 更新清單：清單成員或加入協作者時允許更新
-      allow update: if isAuthenticated() && (
-        resource.data.memberEmails.hasAny([request.auth.token.email.lower()]) ||
-        // 允許透過邀請連結自行加入 memberEmails
-        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberEmails', 'members', 'updatedAt'])
-      );
-      
-      // 刪除清單：僅擁有者可以刪除
-      allow delete: if isAuthenticated() && resource.data.ownerUid == request.auth.uid;
-
-      // 待辦事項子集合規則
+      // 待辦事項子集合：允許已登入的使用者讀取與操作
       match /todos/{todoId} {
-        // 只要是母清單的成員，就可以讀取與操作待辦事項
-        allow read, write: if isAuthenticated() && (
-          get(/databases/$(database)/documents/lists/$(listId)).data.memberEmails.hasAny([request.auth.token.email.lower()]) ||
-          get(/databases/$(database)/documents/lists/$(listId)).data.ownerUid == request.auth.uid
-        );
+        allow read, write: if request.auth != null;
       }
     }
+    
   }
 }

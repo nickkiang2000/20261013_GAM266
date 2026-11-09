@@ -1,12 +1,5 @@
 // Main Application Entry & Controller
 import {
-  activeConfig,
-  isConfigComplete,
-  saveConfig,
-  resetConfig
-} from "./firebase-config.js";
-
-import {
   loginWithGoogle,
   logoutUser,
   subscribeAuth,
@@ -108,22 +101,8 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   setupEventListeners();
-  checkFirebaseStatus();
   initAuthListener();
 });
-
-function checkFirebaseStatus() {
-  const dot = document.getElementById("firebase-status-dot");
-  const banner = document.getElementById("config-warning-banner");
-
-  if (isConfigComplete()) {
-    if (dot) dot.className = "w-2 h-2 rounded-full bg-emerald-500 ml-1";
-    if (banner) banner.classList.add("hidden");
-  } else {
-    if (dot) dot.className = "w-2 h-2 rounded-full bg-amber-500 ml-1 animate-pulse";
-    if (banner) banner.classList.remove("hidden");
-  }
-}
 
 // ==========================================
 // Authentication Handling
@@ -202,9 +181,6 @@ async function handleGoogleLogin() {
     showToast(`歡迎回來，${user.displayName}！`, "success");
   } catch (err) {
     showToast(err.message || "登入失敗", "error");
-    if (!isConfigComplete()) {
-      openModal("modal-firebase-settings");
-    }
   }
 }
 
@@ -684,65 +660,12 @@ function setupEventListeners() {
     });
   }
 
-  // Firebase Settings Modal triggers
-  const btnOpenSettings = document.getElementById("btn-open-firebase-settings");
-  const heroSettings = document.getElementById("hero-btn-settings");
-  const bannerSettings = document.getElementById("banner-open-settings");
-
-  [btnOpenSettings, heroSettings, bannerSettings].forEach((el) => {
-    if (el) el.addEventListener("click", () => openModal("modal-firebase-settings"));
-  });
-
   // Modal Close buttons
   document.querySelectorAll(".modal-close, .modal-backdrop").forEach((el) => {
     el.addEventListener("click", () => {
       closeAllModals();
     });
   });
-
-  // Parse Firebase Config
-  const btnParse = document.getElementById("btn-parse-config");
-  if (btnParse) {
-    btnParse.addEventListener("click", parsePastedConfig);
-  }
-
-  // Save Firebase Config
-  const btnSaveConfig = document.getElementById("btn-save-firebase-config");
-  if (btnSaveConfig) {
-    btnSaveConfig.addEventListener("click", () => {
-      const apiKey = document.getElementById("cfg-api-key").value.trim();
-      const authDomain = document.getElementById("cfg-auth-domain").value.trim();
-      const projectId = document.getElementById("cfg-project-id").value.trim();
-      const appId = document.getElementById("cfg-app-id").value.trim();
-
-      if (!apiKey) {
-        alert("請至少填寫 API Key");
-        return;
-      }
-
-      saveConfig({
-        apiKey,
-        authDomain,
-        projectId,
-        appId,
-        storageBucket: `${projectId}.firebasestorage.app`
-      });
-
-      alert("Firebase 設定已儲存！頁面將自動重新載入套用。");
-      window.location.reload();
-    });
-  }
-
-  // Reset Config
-  const btnResetConfig = document.getElementById("btn-reset-config");
-  if (btnResetConfig) {
-    btnResetConfig.addEventListener("click", () => {
-      if (confirm("確定要重設為預設設定嗎？")) {
-        resetConfig();
-        window.location.reload();
-      }
-    });
-  }
 
   // Create List trigger
   const btnCreateList = document.getElementById("btn-create-list-trigger");
@@ -1183,38 +1106,5 @@ async function handleEditTaskSubmit(e) {
     closeAllModals();
   } catch (err) {
     showToast("更新事項失敗：" + err.message, "error");
-  }
-}
-
-// ==========================================
-// Config Parser Helper
-// ==========================================
-function parsePastedConfig() {
-  const text = document.getElementById("firebase-quick-paste").value;
-  if (!text.trim()) return;
-
-  try {
-    const apiKeyMatch = text.match(/apiKey:\s*["']([^"']+)["']/i);
-    const authDomainMatch = text.match(/authDomain:\s*["']([^"']+)["']/i);
-    const projectIdMatch = text.match(/projectId:\s*["']([^"']+)["']/i);
-    const appIdMatch = text.match(/appId:\s*["']([^"']+)["']/i);
-
-    if (apiKeyMatch) document.getElementById("cfg-api-key").value = apiKeyMatch[1];
-    if (authDomainMatch) document.getElementById("cfg-auth-domain").value = authDomainMatch[1];
-    if (projectIdMatch) document.getElementById("cfg-project-id").value = projectIdMatch[1];
-    if (appIdMatch) document.getElementById("cfg-app-id").value = appIdMatch[1];
-
-    if (!apiKeyMatch) {
-      // Try JSON parse
-      const obj = JSON.parse(text);
-      if (obj.apiKey) document.getElementById("cfg-api-key").value = obj.apiKey;
-      if (obj.authDomain) document.getElementById("cfg-auth-domain").value = obj.authDomain;
-      if (obj.projectId) document.getElementById("cfg-project-id").value = obj.projectId;
-      if (obj.appId) document.getElementById("cfg-app-id").value = obj.appId;
-    }
-
-    showToast("已成功解析 Firebase 設定！請點擊下方儲存。", "success");
-  } catch (err) {
-    showToast("解析失敗，請確認格式或直接填入下方各欄位", "error");
   }
 }

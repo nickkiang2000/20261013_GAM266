@@ -57,13 +57,8 @@ python server.py
 
 此專案已預先設定好 Project ID 為 `my-to-do-list-ac553`。若為首次使用，請在 Firebase 控制台完成以下三項快速設定：
 
-### 1. 取得 Web App 金鑰 (API Key)
-1. 前往 [Firebase 控制台 - 專案設定](https://console.firebase.google.com/project/my-to-do-list-ac553/settings/general)。
-2. 在「您的應用程式」區塊中，點擊 **Web (</>)** 新增或選擇已有的應用程式。
-3. 複製 `const firebaseConfig = { ... }` 內容。
-4. 打開網頁應用程式，點擊右上角的 **「Firebase 設定」**（或黃色警告橫幅），將代碼貼入**「快速解析框」**並點擊「儲存並重新載入」即可！
-
-> 💡 *你也可以直接編輯專案內的 `js/firebase-config.js`，將 `apiKey` 等資訊直接填入 `DEFAULT_CONFIG` 中。*
+### 1. Firebase Web App 設定
+本專案已將專案 `my-to-do-list-ac553` 的 Web App 金鑰預先內建於 `js/firebase-config.js`，任何訪客打開網頁即可直接使用，無需額外輸入設定。
 
 ### 2. 啟用 Google 登入提供者
 1. 前往 Firebase 控制台 > **Build** > **Authentication** > **Sign-in method**。

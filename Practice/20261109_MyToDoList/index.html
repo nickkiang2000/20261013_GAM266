@@ -57,13 +57,6 @@
 
       <!-- Right Header Actions -->
       <div class="flex items-center space-x-3">
-        <!-- Firebase Setup Status / Trigger -->
-        <button id="btn-open-firebase-settings" class="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors border-slate-200 text-slate-600 hover:bg-slate-50">
-          <i data-lucide="flame" class="w-4 h-4 text-amber-500"></i>
-          <span>Firebase 設定</span>
-          <span id="firebase-status-dot" class="w-2 h-2 rounded-full bg-emerald-500 ml-1"></span>
-        </button>
-
         <!-- User Profile / Auth Button Container -->
         <div id="auth-container">
           <!-- Populated by JS: either Google login button or user avatar dropdown -->
@@ -72,19 +65,6 @@
       </div>
     </div>
   </header>
-
-  <!-- Missing Firebase Config Alert Banner (shown only when apiKey is missing) -->
-  <div id="config-warning-banner" class="hidden bg-gradient-to-r from-amber-500 to-orange-500 text-white px-4 py-2.5 shadow-sm text-sm">
-    <div class="max-w-7xl mx-auto flex items-center justify-between">
-      <div class="flex items-center space-x-2">
-        <i data-lucide="alert-triangle" class="w-5 h-5 flex-shrink-0"></i>
-        <span><strong>尚未設定 Firebase API Key：</strong>請點擊右側按鈕填入專案資訊以啟用 Google 登入與即時同步功能。</span>
-      </div>
-      <button id="banner-open-settings" class="ml-4 bg-white text-amber-800 px-3 py-1 rounded text-xs font-semibold hover:bg-amber-50 transition-colors shadow-xs">
-        立即設定
-      </button>
-    </div>
-  </div>
 
   <!-- Main View Container -->
   <main class="flex-1 flex overflow-hidden">
@@ -106,8 +86,8 @@
           </p>
 
           <!-- Google Login CTA Button -->
-          <div class="mt-8 flex flex-col sm:flex-row items-center justify-center gap-4">
-            <button id="hero-btn-google-login" class="w-full sm:w-auto inline-flex items-center justify-center space-x-3 px-6 py-3.5 rounded-xl text-base font-semibold text-slate-700 bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all shadow-md hover:shadow-lg">
+          <div class="mt-8 flex items-center justify-center">
+            <button id="hero-btn-google-login" class="inline-flex items-center justify-center space-x-3 px-8 py-4 rounded-xl text-base font-semibold text-slate-700 bg-white border border-slate-200 hover:border-slate-300 hover:bg-slate-50 transition-all shadow-md hover:shadow-lg">
               <svg class="w-5 h-5" viewBox="0 0 24 24">
                 <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
                 <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
@@ -115,10 +95,6 @@
                 <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
               </svg>
               <span>使用 Google 帳號登入</span>
-            </button>
-            <button id="hero-btn-settings" class="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-5 py-3.5 rounded-xl text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors">
-              <i data-lucide="settings" class="w-4 h-4"></i>
-              <span>設定 Firebase 憑證</span>
             </button>
           </div>
         </div>
@@ -400,93 +376,6 @@
     </div>
 
   </main>
-
-  <!-- ======================================================== -->
-  <!-- MODAL: Firebase Settings                                 -->
-  <!-- ======================================================== -->
-  <div id="modal-firebase-settings" class="fixed inset-0 z-50 hidden overflow-y-auto">
-    <div class="min-h-screen px-4 text-center flex items-center justify-center">
-      <div class="fixed inset-0 bg-slate-900/50 backdrop-blur-xs transition-opacity modal-backdrop"></div>
-      
-      <div class="relative bg-white rounded-2xl max-w-lg w-full p-6 text-left shadow-2xl border border-slate-100 my-8">
-        <div class="flex items-center justify-between pb-3 border-b border-slate-100">
-          <div class="flex items-center space-x-2">
-            <div class="w-8 h-8 rounded-lg bg-amber-50 text-amber-500 flex items-center justify-center">
-              <i data-lucide="flame" class="w-5 h-5"></i>
-            </div>
-            <h3 class="text-lg font-bold text-slate-900">Firebase 專案連線設定</h3>
-          </div>
-          <button class="modal-close p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100">
-            <i data-lucide="x" class="w-5 h-5"></i>
-          </button>
-        </div>
-
-        <div class="mt-4 space-y-4 text-xs text-slate-600">
-          <p>
-            已指定 Firebase 專案：<code class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-800 font-mono font-semibold">my-to-do-list-ac553</code>。
-            請填入該專案的 Web App 憑證以啟用 Google 登入與 Cloud Firestore 資料庫：
-          </p>
-
-          <!-- Quick Paste Area -->
-          <div class="p-3 bg-slate-50 rounded-xl border border-slate-200">
-            <label class="block font-semibold text-slate-700 mb-1">
-              ✨ 快速貼上 Firebase SDK 代碼（自動解析）:
-            </label>
-            <textarea id="firebase-quick-paste" rows="3" placeholder="貼上 Firebase 控制台產生的 const firebaseConfig = { ... } 或 JSON 代碼..." class="w-full p-2 border border-slate-200 rounded-lg font-mono text-[11px] bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/20"></textarea>
-            <div class="mt-2 flex justify-end">
-              <button type="button" id="btn-parse-config" class="px-3 py-1 rounded bg-slate-800 text-white font-medium hover:bg-slate-900 transition-colors">
-                解析並填入下方
-              </button>
-            </div>
-          </div>
-
-          <!-- Individual fields -->
-          <div class="space-y-2.5">
-            <div>
-              <label class="block font-medium text-slate-700 mb-1">API Key <span class="text-rose-500">*</span></label>
-              <input type="text" id="cfg-api-key" placeholder="AIzaSy..." class="w-full px-3 py-1.5 border border-slate-200 rounded-lg font-mono text-xs focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500">
-            </div>
-            <div>
-              <label class="block font-medium text-slate-700 mb-1">Auth Domain</label>
-              <input type="text" id="cfg-auth-domain" value="my-to-do-list-ac553.firebaseapp.com" class="w-full px-3 py-1.5 border border-slate-200 rounded-lg font-mono text-xs focus:ring-2 focus:ring-brand-500/20">
-            </div>
-            <div>
-              <label class="block font-medium text-slate-700 mb-1">Project ID</label>
-              <input type="text" id="cfg-project-id" value="my-to-do-list-ac553" class="w-full px-3 py-1.5 border border-slate-200 rounded-lg font-mono text-xs bg-slate-50" readonly>
-            </div>
-            <div>
-              <label class="block font-medium text-slate-700 mb-1">App ID</label>
-              <input type="text" id="cfg-app-id" placeholder="1:123456789:web:abcdef..." class="w-full px-3 py-1.5 border border-slate-200 rounded-lg font-mono text-xs focus:ring-2 focus:ring-brand-500/20">
-            </div>
-          </div>
-
-          <!-- Helpful Instructions -->
-          <div class="bg-indigo-50/60 p-3 rounded-xl border border-indigo-100 text-[11px] text-slate-600 space-y-1">
-            <p class="font-semibold text-brand-700 flex items-center gap-1">
-              <i data-lucide="info" class="w-3.5 h-3.5"></i>
-              如何在 Firebase 控制台取得金鑰？
-            </p>
-            <ol class="list-decimal list-inside space-y-0.5 text-slate-600">
-              <li>進入 <a href="https://console.firebase.google.com/project/my-to-do-list-ac553/settings/general" target="_blank" class="text-brand-600 underline font-semibold">Firebase 專案設定</a></li>
-              <li>在「您的應用程式」中選擇或建立 Web 應用程式 (&lt;/&gt;)</li>
-              <li>複製 <code class="font-mono bg-white px-1 rounded">firebaseConfig</code> 並貼至上方快速解析框</li>
-              <li>至 <strong>Authentication > Sign-in method</strong> 啟用 <strong>Google</strong> 登入</li>
-              <li>至 <strong>Firestore Database</strong> 建立資料庫並套用規則</li>
-            </ol>
-          </div>
-        </div>
-
-        <div class="mt-6 flex items-center justify-end space-x-3">
-          <button type="button" id="btn-reset-config" class="px-3 py-2 text-xs text-rose-600 hover:bg-rose-50 rounded-lg transition-colors">
-            重設回預設
-          </button>
-          <button type="button" id="btn-save-firebase-config" class="px-5 py-2 text-xs font-semibold bg-brand-600 hover:bg-brand-700 text-white rounded-lg transition-colors shadow-xs">
-            儲存並重新載入
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
 
   <!-- ======================================================== -->
   <!-- MODAL: Create / Edit List                                -->

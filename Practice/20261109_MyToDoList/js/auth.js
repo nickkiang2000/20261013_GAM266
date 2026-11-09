@@ -10,8 +10,8 @@ import { auth, googleProvider, isConfigComplete } from "./firebase-config.js";
  * Perform Google Sign-in with popup
  */
 export async function loginWithGoogle() {
-  if (!isConfigComplete() || !auth || !googleProvider) {
-    throw new Error("請先在右上角設定 Firebase API Key 才能啟用 Google 登入功能。");
+  if (!auth || !googleProvider) {
+    throw new Error("Firebase 驗證服務尚未就緒，請重新整理頁面。");
   }
 
   try {
@@ -29,7 +29,8 @@ export async function loginWithGoogle() {
     if (error.code === "auth/popup-closed-by-user") {
       friendlyMessage = "登入視窗已被關閉。";
     } else if (error.code === "auth/unauthorized-domain") {
-      friendlyMessage = "此網域尚未加入 Firebase Authentication 的已授權網域 (Authorized Domains)。請至 Firebase 控制台 > Authentication > Settings 加入 localhost。";
+      const currentDomain = window.location.hostname || "目前網域";
+      friendlyMessage = `目前網域「${currentDomain}」尚未加入 Firebase Authentication 的已授權網域 (Authorized Domains)。請至 Firebase 控制台 > Authentication > Settings 加入「${currentDomain}」。`;
     } else if (error.code === "auth/operation-not-allowed") {
       friendlyMessage = "Firebase 專案尚未啟用 Google 登入提供者。請至 Firebase 控制台 > Authentication > Sign-in method 啟用 Google。";
     } else if (error.code === "auth/api-key-not-valid.invalid-api-key" || error.code === "auth/invalid-api-key") {
