@@ -5,16 +5,19 @@
 <label>站台 <select name="site"><option value="PTT2">PTT2 批踢踢兔</option><option value="PTT">PTT 批踢踢實業坊</option></select></label>
 <label>帳號<input name="user" required autocomplete="off"></label>
 <label>密碼（只供這次登入）<input name="password" type="password" required autocomplete="new-password"></label>
-<label>英文板名<input name="board" required pattern="[A-Za-z0-9_-]{1,30}"></label>
+<label>英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
+<label>只下載指定文章（選填 AID）<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
+<p>填入 AID 時只讀取該篇並擷取配色。PTT 色碼教學可填板名 NctuNthuTYSH、AID 1AdzogFB。</p>
 <label>起始編號（0＝從最新幾篇開始）<input name="start" type="number" min="0" value="0" required></label>
 <label>本次掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
+<label><input name="ansi" type="checkbox" style="display:inline;width:auto"> 批次下載時也擷取 ANSI 配色（測試功能）</label>
 <label>備份資料夾完整路徑（請自行選擇是否放在 OneDrive）<input name="folder" required placeholder="例如 C:\Users\NICK\Documents\PTT2-Backup"></label>
 <button id="start">登入並開始</button><button type="button" id="stop">停止</button>
 <button type="button" id="export">匯出既有備份</button>
 </form>
 <section><h2>下載狀態</h2><p id="status" role="status">尚未開始</p>
 <p>文章會逐篇寫入資料庫。任務結束後，從備份資料夾開啟 index.html。匯出既有備份只需填資料夾，可把舊資料庫轉成單篇 HTML。</p>
-<p>本版透過 WSS 讀取一般文章。置底文盤點、精華區、ANSI 配色、SSH 和二階段驗證接續待實作。</p></section>
+<p>本版透過 WSS 讀取一般文章。ANSI 以能和正文核對的行為準。置底文盤點、精華區、SSH 和二階段驗證接續待實作。</p></section>
 <script>
 const form = document.getElementById('form');
 const status = document.getElementById('status');
@@ -53,6 +56,11 @@ stop.onclick = () => send('/stop', {});
 async function refresh() {
     const state = await (await fetch('/status')).json();
     const lines = [state.message, `新增 ${state.saved} 篇 · 已存 ${state.skipped} 篇 · 待核對 ${state.unresolved ?? 0} 筆`];
+    if (state.ansi_samples) {
+        const coverage = state.ansi_coverage;
+        lines.push(`ANSI：${state.ansi_colored}／${state.ansi_samples} 篇擷取到配色。`);
+        if (coverage.total) lines.push(`最後一篇：${coverage.matched}／${coverage.total} 行對上終端畫面，${coverage.colored} 行有配色。`);
+    }
     if (state.elapsed) lines.push(`已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒`);
     if (state.seconds_per_article) {
         const minutes = Math.ceil(state.seconds_per_article * 2218 / 60);

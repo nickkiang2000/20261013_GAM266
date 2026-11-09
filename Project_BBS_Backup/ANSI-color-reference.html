@@ -1,0 +1,200 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>[閒聊] 色碼教學</title><style>
+html { color-scheme: dark; background: #000; }
+body { margin: 0; color: #999; }
+main { max-width: 960px; margin: auto; }
+.masthead { background: #0c0a66; color: #fff; box-sizing: border-box;
+            min-height: 38px; display: flex; align-items: baseline; gap: 1em; }
+.masthead a { color: inherit; text-decoration: none; }
+.masthead .brand { color: #ff6; }
+.masthead .source { margin-left: auto; padding-right: .5em; color: #aaa; }
+.masthead, .article-meta, .color-reference {
+    font: 20px/19px "MingLiU", "PMingLiU", "細明體", monospace;
+    font-variant-ligatures: none;
+}
+.masthead { padding-top: 5px; }
+.article-meta { background: #008; margin: 0; display: grid; }
+.article-meta > div { display: flex; min-width: 0; }
+.article-meta dt { background: #999; color: #008; padding-right: .35em; }
+.article-meta dd { margin: 0 0 0 .35em; white-space: pre-wrap; }
+.article-meta .board { margin-left: auto; }
+.color-reference { margin: 0; padding: .03em 0 1em; color: #999; background: #000;
+                   line-height: .96; white-space: pre; overflow-x: auto; tab-size: 8; }
+.ansi-run { display: inline-block; vertical-align: top; height: .95em; line-height: .95; }
+.block-cell { display: inline-block; position: relative; vertical-align: top;
+              width: 1em; height: .95em; overflow: hidden; text-indent: -100em; }
+.block-cell::after { content: ''; position: absolute; inset: 0;
+    background: linear-gradient(to right, transparent 0 1px, currentColor 1px calc(100% - 1px),
+                                transparent calc(100% - 1px)); }
+.f0 .block-cell::after { background: currentColor; }
+.f0{color:#000000}.b0{background-color:#000000}.f1{color:#990000}.b1{background-color:#bb0000}.f2{color:#009900}.b2{background-color:#00bb00}.f3{color:#999900}.b3{background-color:#bbbb00}.f4{color:#000099}.b4{background-color:#0000bb}.f5{color:#990099}.b5{background-color:#bb00bb}.f6{color:#009999}.b6{background-color:#00bbbb}.f7{color:#999999}.b7{background-color:#bbbbbb}.f0.hl{color:#666666}.f1.hl{color:#ff6666}.f2.hl{color:#66ff66}.f3.hl{color:#ffff66}.f4.hl{color:#6666ff}.f5.hl{color:#ff66ff}.f6.hl{color:#66ffff}.f7.hl{color:#ffffff}</style></head>
+<body><main><header class="masthead"><span class="brand">批踢踢實業坊</span><span>› 看板 NctuNthuTYSH</span>
+<a class="source" href="https://www.ptt.cc/bbs/NctuNthuTYSH/M.1251990698.A.3CB.html">來源文章</a></header>
+<dl class="article-meta"><div><dt>作者</dt><dd>MaxBigRice (米蟲的榮耀)</dd><dt class="board">看板</dt><dd>NctuNthuTYSH</dd></div><div><dt>標題</dt><dd>[閒聊] 色碼教學</dd></div><div><dt>時間</dt><dd>Thu Sep  3 23:11:37 2009</dd></div></dl><pre class="color-reference">
+
+             <span class="ansi-run f0 b6"><span class="block-cell">█</span></span><span class="ansi-run b6 hl">                      </span><span class="ansi-run f6"><span class="block-cell">█</span></span>
+             <span class="ansi-run f0 b6"><span class="block-cell">█</span></span><span class="ansi-run b6 hl">   </span><span class="ansi-run f4 b6"><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span>   </span><span class="ansi-run f6"><span class="block-cell">█</span></span>
+             <span class="ansi-run f0 b6"><span class="block-cell">█</span></span><span class="ansi-run b6 hl">   </span><span class="ansi-run f3 b4 hl">～上色基本教學～</span><span class="ansi-run f3 b6 hl">   </span><span class="ansi-run f6"><span class="block-cell">█</span></span>
+             <span class="ansi-run f0 b6"><span class="block-cell">█</span></span><span class="ansi-run b6 hl">   </span><span class="ansi-run f6 b4"><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span><span class="block-cell">█</span></span><span class="ansi-run b6">   </span><span class="ansi-run f6"><span class="block-cell">█</span></span>
+             <span class="ansi-run f0 b6"><span class="block-cell">█</span></span><span class="ansi-run b6 hl">                      </span><span class="ansi-run f6"><span class="block-cell">█</span></span>
+
+<span class="ansi-run f3 hl">【前言】</span>
+  想要為你的文章內容上些漂亮的顏色嗎?
+  想要畫些漂亮的圖形嗎?這些功能用到的就是ansi的控制碼,
+  讓我們慢慢來看如何使用吧....:)
+
+<span class="ansi-run f3 hl">【上色基本控制碼】</span>
+  要為文章內容,圖形上色,要下一個指令,這個指令就是長這樣子<span class="ansi-run f3 hl">*[m</span>
+  其中這個指令中,<span class="ansi-run f3 hl">*</span>並不是鍵盤上那個<span class="ansi-run f3 hl">*</span>號,這個<span class="ansi-run f3 hl">*</span>並不是鍵盤上面那個
+  直接按出來的,而是有另外的按法,在PTT這邊那個<span class="ansi-run f3 hl">*</span>的按法是按
+  <span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> u </span>,<span class="ansi-run f0 b7"> ctrl </span>就是鍵盤左下角那顆按鈕,按住<span class="ansi-run f0 b7"> ctrl </span>再按<span class="ansi-run f0 b7"> u </span>就會跑出一個<span class="ansi-run f3 hl">*</span>
+  ,只要按一個出來就夠了喔,按太多可是沒用的,然後接下來的<span class="ansi-run f3 hl">[</span>和<span class="ansi-run f3 hl">m</span>就
+  簡單啦,那個就只是鍵盤上的<span class="ansi-run f3 hl">[</span>和<span class="ansi-run f3 hl">m</span>直接按出來就好,全部的步驟如下:
+  1.按<span class="ansi-run f0 b7"> ctrl </span>和<span class="ansi-run f0 b7"> u </span>出現*
+
+  2.接在剛剛按出的*之後按[和m
+
+  3.你就得到一個*[m啦....恭喜你已經完成第一步啦..
+
+  看到這邊大概你也累了吧,嘻,其實有一個更快的方法,剛剛那些東西只要你
+  在編輯文章或是寫信時按<span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> c </span>就會直接出現<span class="ansi-run f3 hl">*[m</span>囉....
+  如何阿..方便多吧..上面寫那麼多其實主要只是要讓你知道那個<span class="ansi-run f3 hl">*</span>並不是鍵盤
+  直接按出來的啦...有的人知道指令長這樣,試了半天卻試不出來,後來才知道那個
+  <span class="ansi-run f3 hl">*</span>原來不是直接按出來的..現在你知道了吧...:)
+
+<span class="ansi-run f3 hl">【上色篇】</span>
+  看到這邊,應該知道上色的那個控制碼是怎麼弄出來的了吧,
+  接下來就要開始上色囉.
+  說到上顏色,那就更簡單囉,上顏色不過是將顏色的代碼填入剛剛的
+  控制碼而已,顏色的代碼有兩種,分為前景色和背景色,前景色就是你寫的字阿,
+  畫的圖阿,等等你打出來的東西,背景色就是底色囉...
+  前景色的代碼從30一直到37,背景色的代碼則是從40到47,亮色是1,
+  使用的方式如下:
+  範例: <span class="ansi-run f3 b1 hl">這是測試</span>
+  上面這四個字是怎麼打出來的呢?步驟如下:
+
+  按<span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> c </span>
+      │
+      ↓出現
+     *[m
+  然後把顏色的控制碼加進去,顏色代碼是紅底(41),黃字(33),亮色(1),
+  每種代碼間要用&quot;<span class="ansi-run f3 hl">;</span>&quot;隔開,如下,直接填進去就好:
+     *[m
+      │
+      ↓填上顏色代碼,之間以分號隔開
+     *[1;33;41m
+  然後接下來就在後面打上你想打的字或圖囉,我這邊用&quot;這是測試&quot;這四個字:
+     *[1;33;41m
+      │
+      ↓接著打上想打的字或內容
+     *[1;33;41m這是測試*[m
+      │               ↑結尾請再打一次<span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> c </span>,稍後說明原因..
+      ↓結果
+     <span class="ansi-run f3 b1 hl">這是測試</span>
+
+  上面是範例,看的懂嗎?
+  幾個小地方說明,結尾的地方為什麼還要打一次<span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> c </span>去多加一個<span class="ansi-run f3 hl">*[m</span>呢?
+  因為這個控制碼不光是對你想上色的這行字或圖會產生影響,而是對後面
+  所有內文等等都會一起產生影響,在結尾多加一個<span class="ansi-run f3 hl">*[m</span>不加任何顏色代碼
+  是為了將剛剛你用的控制碼做一個終止,這樣的話就不會對後面的字或是圖
+  造成影響,一方面是美觀,另一方面也是不會造成其他人閱讀不便,所以囉,
+  上完色之後最後記得將它做個終止唷.....
+  另外,在你編輯文章或是寫信時,在編輯完發表出去前,你想看看你上色的成果
+  隨時可以按<span class="ansi-run f0 b7"> ctrl </span>+<span class="ansi-run f0 b7"> v </span>看看你上色的結果,這樣你就可以邊看邊改囉,隨時修正囉.
+
+<span class="ansi-run f3 hl">【色彩代碼篇】</span>
+  看完前幾段,現在你應該會上顏色了吧,接下來我就說明一下各種顏色的代碼囉:
+  <span class="ansi-run f6 hl">背景顏色:</span>
+  40→黑色─→<span class="ansi-run f3 hl">黑</span>
+  41→紅色─→<span class="ansi-run f3 b1 hl">紅  </span>
+  42→綠色─→<span class="ansi-run f3 b2 hl">綠  </span>
+  43→黃色─→<span class="ansi-run f3 b3 hl">黃  </span>
+  44→藍色─→<span class="ansi-run f3 b4 hl">藍  </span>
+  45→紫色─→<span class="ansi-run f3 b5 hl">紫  </span>
+  46→靛色─→<span class="ansi-run f3 b6 hl">靛  </span>
+  47→白色─→<span class="ansi-run f3 b7 hl">白  </span>
+  <span class="ansi-run f6 hl">前景顏色:</span>
+  30→黑色─→<span class="ansi-run f0 b7 hl">黑  </span>
+  31→紅色─→<span class="ansi-run f1 b7 hl">紅  </span>
+  32→綠色─→<span class="ansi-run f2 b7 hl">綠  </span>
+  33→黃色─→<span class="ansi-run f3 b7 hl">黃  </span>
+  34→藍色─→<span class="ansi-run f4 b7 hl">藍  </span>
+  35→紫色─→<span class="ansi-run f5 b7 hl">紫  </span>
+  36→靛色─→<span class="ansi-run f6 b7 hl">靛  </span>
+  37→白色─→<span class="ansi-run b7 hl">白  </span>
+  另外就是亮色和暗色,亮色是<span class="ansi-run f3 hl">1</span>,暗色是<span class="ansi-run f3 hl">0</span>,同樣是紅色亮色和暗色有什麼差呢:
+  <span class="ansi-run f1 hl">亮紅</span>  <span class="ansi-run f1">暗紅</span>
+  看出來有差別了吧..
+  其他還有閃爍,控制碼是<span class="ansi-run f3 hl">5</span>,底線模式是<span class="ansi-run f3 hl">4</span>,反白模式是<span class="ansi-run f3 hl">7</span>,
+  其中底線模式大部分系統都不支援,閃爍也是有部分軟體不支援,
+  像netterm使用閃爍字,字會變成橘色的....
+
+  以上這些控制碼的用法都一樣,把想要用的控制碼填進去就可以了,
+  不同代碼間用<span class="ansi-run f3 hl">;</span>隔開....
+
+  範例&lt;1&gt;:
+  <span class="ansi-run f1 hl">S</span><span class="ansi-run f2 hl">k</span><span class="ansi-run f3 hl">y</span><span class="ansi-run f4 hl">l</span><span class="ansi-run f5 hl">i</span><span class="ansi-run f6 hl">n</span><span class="ansi-run hl">e</span><span class="ansi-run f6 hl">是</span><span class="ansi-run f3 hl">大帥哥!</span>
+
+  上面這句話的控制碼是:
+  *[1;31;40mS*[32mk*[33my*[34ml*[35mi*[36mn*[37me*[36m是*[33m大帥哥!*[m
+
+  最後面結尾的<span class="ansi-run f3 hl">*[m</span>是作為終止用的,終止控制碼的作用,其他第一次打的
+
+  <span class="ansi-run f3 hl">*[1;33;40m</span>,只要沒有終止,這個控制碼會對後面所輸入的字都有用,
+
+  像1(亮色)和40(底色黑色)對後面整句話都有用,除非是有輸入其他
+
+  的控制碼(如亮色改成暗色,或底色黑色改成其他底色,或是打上終
+
+  止的控制碼),而中間其他字因為只有前景色改變,其他被景色和亮暗色都不變,
+
+  所以只要加上改變的那部分的控制碼就行,亮色<span class="ansi-run f3 hl">1</span>和背景黑色<span class="ansi-run f3 hl">40</span>只要一開始打過
+
+  了就好,只要沒有改變,那部分可以不用每次都打..
+
+  範例&lt;2&gt;:
+  <span class="ansi-run b1 hl">閃爍</span>
+
+  上面這個的原始控制碼如下:
+  *[1;37;41;5m閃爍*[m
+
+<span class="ansi-run f3 hl">【雙色字使用】</span>
+  關於雙色字,很多軟體都不支援,顯示不出來,甚至會出現亂碼,
+  所以並不建議使用,雙色字用法其實和上色一樣,中文字佔兩格,
+  你只要打上字後,移到那個字中間填上控制碼,那個字就會有兩種顏色
+  範例如下,有很多軟體無法顯示出來:
+  <span class="ansi-run f2 hl">我</span><span class="ansi-run f6 hl">好</span><span class="ansi-run f5 hl">帥</span><span class="ansi-run f1 hl">.....:)</span>
+
+<span class="ansi-run f3 hl">【閃爍應用】</span>
+  運用閃爍,配合顏色的變化,就可做出霓虹燈的效果:
+  範例&lt;1&gt;:
+  <span class="ansi-run f3 b2"><span class="block-cell">█</span></span><span class="ansi-run f2 b3"><span class="block-cell">█</span></span><span class="ansi-run f3 b2"><span class="block-cell">█</span></span><span class="ansi-run f2 b3"><span class="block-cell">█</span></span>
+
+  原始控制碼如下:
+  *[0;33;42;5m█*[32;43m█*[33;42m█*[32;43m█*[m
+
+  範例&lt;2&gt;:
+  <span class="ansi-run f6"><span class="block-cell">█</span>               </span><span class="ansi-run f0 b6"><span class="block-cell">█</span></span>
+
+  原始控制碼如下:
+  *[0;36;40;5m█               *[30;46m█*[m
+
+<span class="ansi-run f3 hl">【結語】</span>
+  看了這麼多,辛苦了吧,學會怎麼上顏色了嗎?
+  運用顏色和閃爍等各種控制碼,可以做出許多種漂亮的效果喔,
+  可以做出哪些效果就看自己怎麼去運用囉....
+  如果有哪邊有問題再post出來或是mail給我大家討論看看吧...:)
+
+--
+<span class="ansi-run f2">※ 發信站: 批踢踢實業坊(ptt.cc) </span>
+◆ From: 140.113.90.32
+<span class="ansi-run f1 hl">→ </span><span class="ansi-run f3 hl">MaxBigRice</span><span class="ansi-run f3">:真麻煩....</span> 09/03 23:13
+<span class="ansi-run hl">推 </span><span class="ansi-run f3 hl">WanChinChien</span><span class="ansi-run f3">:你不是只有複製再貼上嗎？！　XD</span> 09/04 00:00
+<span class="ansi-run hl">推 </span><span class="ansi-run f3 hl">Amitosis</span><span class="ansi-run f3">:END</span> 09/04 00:53
+<span class="ansi-run hl">推 </span><span class="ansi-run f3 hl">otingin605</span><span class="ansi-run f3">:END</span> 09/04 00:55
+<span class="ansi-run hl">推 </span><span class="ansi-run f3 hl">Rm52</span><span class="ansi-run f3">:明明就轉來的 還不附來源＝ ＝+</span> 09/04 02:47
+<span class="ansi-run f1 hl">→ </span><span class="ansi-run f3 hl">MaxBigRice</span><span class="ansi-run f3">:阿就TEST版~青菜啦....誰叫二樓那麼麻煩....</span> 09/05 03:04
+<span class="ansi-run hl">推 </span><span class="ansi-run f3 hl">WanChinChien</span><span class="ansi-run f3">:樓上米蟲學長好小氣~　= 3 =　</span> 09/10 20:22
+</pre>
+</main></body></html>

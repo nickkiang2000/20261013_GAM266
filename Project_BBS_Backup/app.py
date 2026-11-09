@@ -56,7 +56,10 @@ def save_article(db, board, post, *, site='PTT2', source_index=None):
     body = post.get('full_content')
     if not aid or not body or not post.get('pass_format_check'):
         raise ValueError('文章缺少 AID、全文或格式檢查未通過')
-    db.execute('INSERT OR REPLACE INTO articles VALUES(?,?,?,?,?,?,?,?)',
+    db.execute('''INSERT INTO articles VALUES(?,?,?,?,?,?,?,?)
+                  ON CONFLICT(site, board, aid) DO UPDATE SET
+                  title=excluded.title, body=excluded.body, data=excluded.data,
+                  fetched=excluded.fetched, source_index=coalesce(excluded.source_index, articles.source_index)''',
                (site, board, aid, post.get('title',''), body,
                 json.dumps(post,ensure_ascii=False), time.time(), source_index))
     db.commit()
@@ -85,6 +88,23 @@ def export_existing(folder):
         STATE['running'] = False
 
 
+def download_article(api, db, site, board, aid, *, ansi, source_index=None):
+    if ansi:
+        from ansi_capture import read_colored_post
+        post = read_colored_post(api, board, aid)
+    else:
+        post = api.get_post(board, aid=aid)
+    if post.get('aid') != aid:
+        raise ValueError('AID 不一致，停止避免存錯文章')
+    save_article(db, board, post, site=site, source_index=source_index)
+    STATE['saved'] += 1
+    if ansi:
+        coverage = post.get('ansi_coverage', {})
+        STATE['ansi_samples'] = STATE.get('ansi_samples', 0) + 1
+        STATE['ansi_colored'] = STATE.get('ansi_colored', 0) + bool(post.get('ansi_lines'))
+        STATE['ansi_coverage'] = coverage
+
+
 def work(config):
     api = None
     db = None
@@ -102,6 +122,11 @@ def work(config):
         api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
                         check_update=False, verify_ssl=True)
         api.login(config.pop('user'), config.pop('password'), kick_other_session=False)
+        if config.get('aid'):
+            STATE['message'] = f'正在讀取 {board} #{config["aid"]}…'
+            download_article(api, db, site, board, config['aid'], ansi=True)
+            STATE['message'] = '指定文章已下載。請核對匯出的色碼與原文。'
+            return
         newest = api.get_newest_index(PyPtt.NewIndex.BOARD, board=board)
         start = config['start'] or max(1, newest-config['count']+1)
         end = min(newest, start+config['count']-1)
@@ -130,11 +155,7 @@ def work(config):
                 if STOP.wait(2):
                     STATE['message'] = '已停止；已完成的文章已保存。'
                     break
-                post = api.get_post(board, aid=aid)
-                if post.get('aid') != aid:
-                    raise ValueError('AID 不一致，停止避免存錯文章')
-                save_article(db, board, post, site=site, source_index=idx)
-                STATE['saved'] += 1
+                download_article(api, db, site, board, aid, ansi=config.get('ansi', False), source_index=idx)
                 added = True
             interrupted = STOP.wait(3)
             if added and not interrupted:
@@ -213,6 +234,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/start':
                 if data['site'] not in SITES or not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', data['board']):
                     raise ValueError()
+                aid = data.get('aid', '')
+                if not isinstance(aid, str):
+                    raise ValueError()
+                aid = aid.strip().removeprefix('#')
+                if aid and not re.fullmatch(r'[A-Za-z0-9_-]{8}', aid):
+                    raise ValueError()
+                data['aid'] = aid
+                data['ansi'] = data.get('ansi') == 'on'
                 data['count'] = int(data['count'])
                 data['start'] = int(data['start'])
                 if not 1 <= data['count'] <= 10000 or data['start'] < 0:
@@ -225,7 +254,8 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if STATE['running']: return self.reply(409,'{}')
                 STATE.update(running=True, message='正在啟動…', saved=0, skipped=0,
-                             unresolved=0, timed_samples=0, seconds_per_article=None, elapsed=0)
+                             unresolved=0, timed_samples=0, seconds_per_article=None, elapsed=0,
+                             ansi_samples=0, ansi_colored=0, ansi_coverage={})
                 STOP.clear()
                 threading.Thread(target=target,args=args,daemon=True).start()
             self.reply(200,'{}')

@@ -5,6 +5,8 @@ from html import escape
 from itertools import groupby
 import json
 
+from ansi_style import ANSI_STYLE, METADATA_STYLE, render_metadata, render_run
+
 
 STYLE = '''
 body { color-scheme: dark; max-width: 960px; margin: 2rem auto; padding: 0 1rem;
@@ -130,17 +132,58 @@ document.addEventListener('keydown', event => {
 '''
 
 
-def page(title, body, script):
+def page(title, body, script, *, ansi=False):
+    body_class = ' class="ansi-article"' if ansi else ''
     return f'''<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title><style>{STYLE}</style></head>
-<body>{body}<script>{script}</script></body></html>'''
+<body{body_class}>{body}<script>{script}</script></body></html>'''
 
 
 def write_page(path, content):
     temp = path.with_suffix('.html.tmp')
     temp.write_text(content, encoding='utf-8')
     temp.replace(path)
+
+
+def article_body(body, color_lines, *, start_line=0):
+    if not color_lines:
+        return f'<pre>{escape(body)}</pre>'
+    rendered = []
+    for index, line in enumerate(body.split('\n')):
+        if index < start_line:
+            continue
+        runs = color_lines.get(str(index), [])
+        if runs and ''.join(text for text, _ in runs) == line:
+            rendered.append(''.join(render_run(text, classes) for text, classes in runs))
+        else:
+            rendered.append(escape(line))
+    return f'<style>{ANSI_STYLE}</style><pre class="color-reference">\n' + '\n'.join(rendered) + '</pre>'
+
+
+COLOR_ARTICLE_STYLE = '''
+html:has(.ansi-article) { background: #000; }
+body.ansi-article { background: #000; margin: 0 auto; padding: 0; }
+.ansi-article .article-top { background: #0c0a66; color: #fff; min-height: 38px;
+    display: flex; align-items: baseline; flex-wrap: wrap; gap: .75em; padding: 4px .5em 0;
+    box-sizing: border-box; font: 20px/19px "MingLiU", "PMingLiU", "細明體", monospace; }
+.article-top .brand { color: #ff6; }
+.article-top nav { margin-left: auto; gap: .75em; font-size: 14px; }
+'''
+
+
+def color_article(site, board, title, post, body, nav):
+    lines = body.split('\n', 4)
+    # The terminal repeats the header in its captured screen. Render it in
+    # the web-style metadata bar and keep the original text in the database.
+    has_terminal_header = (len(lines) == 5 and all(
+        line.lstrip().startswith(label) for line, label in zip(lines, ('作者', '標題', '時間'))
+    ) and lines[3].strip() and set(lines[3].strip()) <= set('─━═-'))
+    header = (f'<header class="article-top"><span class="brand">{escape(site)}</span>'
+              f'<span>› 看板 {escape(board)}</span>{nav}</header>')
+    metadata = render_metadata(post.get('author'), title, post.get('date'), board) if has_terminal_header else ''
+    return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
+            + article_body(body, post['ansi_lines'], start_line=4 if has_terminal_header else 0))
 
 
 def export_html(db, folder):
@@ -159,7 +202,8 @@ def export_html(db, folder):
             key = keys[i]
             title = title or '(無標題)'
             label = f'{source_index} · ' if source_index is not None else ''
-            author = json.loads(data).get('author') or ''
+            post = json.loads(data)
+            author = post.get('author') or ''
             label += f'{author} · ' if author else ''
             entries.append(f'<li><a id="a-{key}" href="articles/{key}.html">'
                            f'<span class="meta">{escape(label)}</span>{escape(title)}</a></li>')
@@ -169,10 +213,13 @@ def export_html(db, folder):
             if i + 1 < len(keys):
                 links.append(f'<a id="next" href="{keys[i+1]}.html">下一篇 ↓</a>')
             nav = '<nav>' + ''.join(links) + '</nav>'
-            article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
-                       f'{escape(site)} / {escape(board)} · {escape(aid)}</p>'
-                       f'<pre>{escape(body)}</pre>')
-            write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS))
+            colored = bool(post.get('ansi_lines'))
+            if colored:
+                article = color_article(site, board, title, post, body, nav)
+            else:
+                article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
+                           f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
+            write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored))
         count += len(items)
         # Anchor pages at the newest end so the first view shows the latest 20.
         first_size = len(entries) % PAGE_SIZE or PAGE_SIZE
@@ -189,6 +236,6 @@ def export_html(db, folder):
                         + pagination + ''.join(pages) + '</section>')
     index = (f'<h1>BBS 離線文章</h1><p>共 {count} 篇。↑／↓ 選取，Enter／→ 開啟，'
              'Page Up／Page Down 切換較舊／較新的文章。'
-             '閱讀時按 ← 或 Esc 返回。內文以等寬純文字顯示。</p>' + ''.join(sections))
+             '閱讀時按 ← 或 Esc 返回。已擷取的 ANSI 配色會隨文章顯示。</p>' + ''.join(sections))
     write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS))
     return count

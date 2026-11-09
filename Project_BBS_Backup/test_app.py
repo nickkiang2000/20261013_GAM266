@@ -7,6 +7,73 @@ from pathlib import Path
 import app
 
 class StorageTests(unittest.TestCase):
+    def test_ansi_cursor_gaps_stay_black_but_authored_spaces_keep_color(self):
+        from ansi_capture import ColorScreen
+
+        raw = ('\x1b[1;33;41m\x1b[1;6H這是測試\x1b[m\n'
+               '\x1b[37;41m  有底色的空白\x1b[m\n'
+               '\x1b[30;46m\x1b[3;14H█').encode()
+        lines = ColorScreen(3).replay(raw, 'utf-8')
+        self.assertEqual(lines[0].runs(), [('     ', ()), ('這是測試', ('f3', 'b1', 'hl'))])
+        self.assertEqual(lines[1].runs(), [('  有底色的空白', ('f7', 'b1'))])
+        self.assertEqual(lines[2].runs(), [('             ', ()), ('█', ('f0', 'b6'))])
+
+    def test_ansi_capture_and_archive_preserve_two_pages(self):
+        from types import SimpleNamespace
+        from PyPtt import screens
+        from PyPtt.connect_core import TargetUnit
+        from ansi_capture import read_colored_post
+
+        class FakeCore:
+            config = SimpleNamespace(screen_height=4)
+            current_encoding = 'utf-8'
+            pages = iter([
+                '\x1b[H\x1b[2J標題\n\x1b[1;33;41m彩色\x1b[m\n重疊列\n狀態',
+                '\x1b[H\x1b[2J重疊列\n\x1b[36;44m████\x1b[m\n末段\n狀態',
+            ])
+
+            def send(self, message, targets):
+                self._stream_parsers = {}
+                data = next(self.pages).encode('utf-8')
+                self._stream_screen('utf-8', data[:13])
+                self._screen = self._stream_screen('utf-8', data[13:])
+                return 0
+
+            def _stream_screen(self, encoding, data):
+                if encoding not in self._stream_parsers:
+                    self._stream_parsers[encoding] = screens.IncrementalScreen(encoding, 4)
+                parser = self._stream_parsers[encoding]
+                parser.feed(data)
+                return parser.screen
+
+            def get_screen_queue(self):
+                return [self._screen]
+
+        core = FakeCore()
+
+        def get_post(board, aid):
+            core.send('', [TargetUnit(screens.Target.InPost)])
+            core.send('', [TargetUnit(screens.Target.PostEnd)])
+            return {'aid': aid, 'title': '標題', 'full_content': '標題\n彩色\n重疊列\n████\n末段',
+                    'pass_format_check': True}
+
+        api = SimpleNamespace(connect_core=core, get_post=get_post)
+        post = read_colored_post(api, 'Test', '1AdzogFB')
+        self.assertEqual(post['ansi_coverage'], {'matched': 5, 'total': 5, 'colored': 2})
+        self.assertEqual(post['ansi_lines']['1'], [('彩色', ('f3', 'b1', 'hl'))])
+        self.assertEqual(post['ansi_lines']['3'], [('████', ('f6', 'b4'))])
+        self.assertEqual(core.send.__func__, FakeCore.send)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            db = app.database(folder)
+            app.save_article(db, 'Test', post)
+            app.export_html(db, folder)
+            db.close()
+            result = next((folder / 'articles').glob('*.html')).read_text(encoding='utf-8')
+        self.assertIn('<span class="ansi-run f3 b1 hl">彩色</span>', result)
+        self.assertEqual(result.count('<span class="block-cell">█</span>'), 4)
+        self.assertEqual(result.count('重疊列'), 1)
+
     def test_archive_pages_are_counted_back_from_latest_article(self):
         with tempfile.TemporaryDirectory() as d:
             folder = Path(d)
