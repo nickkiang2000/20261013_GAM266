@@ -1,7 +1,8 @@
-<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>PTT2 文章備份</title>
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>PTT／PTT2 文章備份</title>
 <style>body{font:17px system-ui;background:#f1f4f7;color:#172b3d;max-width:760px;margin:40px auto;padding:20px}form,section{background:white;padding:24px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input{display:block;width:95%;padding:10px;font:inherit;border:1px solid #abc;border-radius:5px}button{padding:12px 20px;margin-right:12px;cursor:pointer}p{line-height:1.7}#status{white-space:pre-wrap}</style>
-<h1>PTT2 文章備份 · 測試版</h1><p>先用公開板下載 5 篇，確認內容後再擴大。僅支援 WSS 一般文章；精華區、SSH、二階段驗證接續與置底文另行盤點尚未實作。</p>
+<h1>PTT／PTT2 文章備份</h1><p>先用公開板下載 5 篇。請核對內文及推文，再擴大試跑。</p>
 <form id="form" method="post" autocomplete="off">
+<label>站台 <select name="site"><option value="PTT2">PTT2 批踢踢兔</option><option value="PTT">PTT 批踢踢實業坊</option></select></label>
 <label>帳號<input name="user" required autocomplete="off"></label>
 <label>密碼（只供這次登入）<input name="password" type="password" required autocomplete="new-password"></label>
 <label>英文板名<input name="board" required pattern="[A-Za-z0-9_-]{1,30}"></label>
@@ -9,5 +10,58 @@
 <label>本次掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
 <label>備份資料夾完整路徑（請自行選擇是否放在 OneDrive）<input name="folder" required placeholder="例如 C:\Users\NICK\Documents\PTT2-Backup"></label>
 <button id="start">登入並開始</button><button type="button" id="stop">停止</button>
-</form><section><h2>下載狀態</h2><p id="status">尚未開始</p><p>已保存的文章會立即寫入資料庫。結束或發生錯誤時產生 index.html，可離線開啟。重跑會依 AID 略過已下載文章；如板上有刪文造成編號移動，請重新掃描完整範圍。</p></section>
-<script>const token='__TOKEN__';async function send(path,data){let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Token':token},body:JSON.stringify(data)});if(!r.ok)throw Error('請求失敗 '+r.status)}document.querySelector('#form').onsubmit=async e=>{e.preventDefault();let d=Object.fromEntries(new FormData(e.target));try{await send('/start',d);e.target.password.value=''}catch(x){alert(x.message)}};document.querySelector('#stop').onclick=()=>send('/stop',{});setInterval(async()=>{try{let s=await(await fetch('/status')).json();document.querySelector('#status').textContent=s.message+'\n本次新增：'+s.saved+'　略過／待核對：'+s.skipped;document.querySelector('#start').disabled=s.running}catch{}},1000);</script></html>
+<button type="button" id="export">匯出既有備份</button>
+</form>
+<section><h2>下載狀態</h2><p id="status" role="status">尚未開始</p>
+<p>文章會逐篇寫入資料庫。任務結束後，從備份資料夾開啟 index.html。匯出既有備份只需填資料夾，可把舊資料庫轉成單篇 HTML。</p>
+<p>本版透過 WSS 讀取一般文章。置底文盤點、精華區、ANSI 配色、SSH 和二階段驗證接續待實作。</p></section>
+<script>
+const form = document.getElementById('form');
+const status = document.getElementById('status');
+const start = document.getElementById('start');
+const exportButton = document.getElementById('export');
+const stop = document.getElementById('stop');
+
+async function send(path, data) {
+    try {
+        const response = await fetch(path, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'},
+            body: JSON.stringify(data)
+        });
+        if (!response.ok) {
+            alert(response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
+        }
+        await refresh();
+    } catch {
+        status.textContent = '無法連線到本機程式。請確認啟動視窗仍開著。';
+    }
+}
+
+form.addEventListener('submit', event => {
+    event.preventDefault();
+    const data = Object.fromEntries(new FormData(form));
+    form.elements.password.value = '';
+    send('/start', data);
+});
+exportButton.onclick = () => {
+    const folder = form.elements.folder;
+    if (folder.reportValidity()) send('/export', {folder: folder.value});
+};
+stop.onclick = () => send('/stop', {});
+
+async function refresh() {
+    const state = await (await fetch('/status')).json();
+    const lines = [state.message, `新增 ${state.saved} 篇 · 已存 ${state.skipped} 篇 · 待核對 ${state.unresolved ?? 0} 筆`];
+    if (state.elapsed) lines.push(`已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒`);
+    if (state.seconds_per_article) {
+        const minutes = Math.ceil(state.seconds_per_article * 2218 / 60);
+        lines.push(`本次新增樣本 ${state.timed_samples} 篇，平均 ${state.seconds_per_article} 秒／篇。`);
+        lines.push(`依此速度估算 2,218 篇約 ${Math.floor(minutes / 60)} 小時 ${minutes % 60} 分，不含中斷與匯出。`);
+    }
+    status.textContent = lines.join('\n');
+    start.disabled = exportButton.disabled = state.running;
+    stop.disabled = !state.running;
+}
+setInterval(() => refresh().catch(() => {}), 1000);
+</script></html>
