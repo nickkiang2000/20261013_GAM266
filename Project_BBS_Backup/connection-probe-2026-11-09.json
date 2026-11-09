@@ -1,0 +1,12 @@
+{
+  "tested_at": "2026-11-09T21:48:52+08:00",
+  "scope": "One unauthenticated probe per endpoint. No BBS credentials or account login. WSS validates TLS and Sec-WebSocket-Accept; SSH reads banner only.",
+  "results": [
+    {"transport":"WSS","host":"ws.ptt2.cc","path":"/bbs","origin":"https://term.ptt2.cc","status":"HTTP/1.1 101 Switching Protocols","valid_accept":true,"initial_frame_bytes":928,"initial_frame_opcode":2},
+    {"transport":"WSS","host":"ws.ptt.cc","path":"/bbs","origin":"https://term.ptt.cc","status":"HTTP/1.1 101 Switching Protocols","valid_accept":true,"initial_frame_bytes":1069,"initial_frame_opcode":2},
+    {"transport":"WSS","host":"ws.ccns.cc","path":"/bbs","origin":"https://term.ccns.cc","status":"HTTP/1.1 101 Switching Protocols","valid_accept":true,"initial_frame_bytes":1028,"initial_frame_opcode":2},
+    {"transport":"SSH banner only","host":"ptt2.cc","port":22,"banner":"SSH-2.0-bbs-sshd"},
+    {"transport":"SSH banner only","host":"ptt.cc","port":22,"banner":"SSH-2.0-bbs-sshd"},
+    {"transport":"SSH banner only","host":"ccns.cc","port":22222,"banner":"SSH-2.0-bbs-sshd"}
+  ]
+}
