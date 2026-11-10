@@ -228,7 +228,7 @@ def color_article(site, board, title, post, body, nav):
     lines = body.split('\n', 4)
     # The terminal repeats the header in its captured screen. Render it in
     # the web-style metadata bar and keep the original text in the database.
-    has_terminal_header = (len(lines) == 5 and all(
+    has_terminal_header = (not post.get('terminal_verified') and len(lines) == 5 and all(
         line.lstrip().startswith(label) for line, label in zip(lines, ('作者', '標題', '時間'))
     ) and lines[3].strip() and set(lines[3].strip()) <= set('─━═-'))
     header = (f'<header class="article-top"><span class="brand">{escape(site)}</span>'
@@ -241,9 +241,14 @@ def color_article(site, board, title, post, body, nav):
 def export_html(db, folder, progress=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
-    rows = db.execute('''SELECT site, board, aid, title, body, data, source_index FROM articles
-                        ORDER BY site, board COLLATE NOCASE, board,
-                        source_index IS NOT NULL, source_index ASC, fetched ASC, aid''')
+    rows = db.execute('''SELECT * FROM (
+                            SELECT site,board,aid,title,body,data,source_index,fetched FROM articles
+                            UNION ALL
+                            SELECT site,board,'!' || idx,
+                                   CASE status WHEN 'deleted' THEN '（被刪除）' ELSE '（已鎖定）' END,
+                                   coalesce(aid,''),NULL,idx,0 FROM unavailable_articles
+                        ) ORDER BY site, board COLLATE NOCASE, board,
+                                   source_index IS NOT NULL, source_index ASC, fetched ASC, aid''')
     total = db.execute('SELECT count(*) FROM articles').fetchone()[0]
     count = 0
     if progress:
@@ -253,11 +258,11 @@ def export_html(db, folder, progress=None):
         items = list(group)
         keys = [sha256(json.dumps(row[:3]).encode()).hexdigest() for row in items]
         entries = []
-        for i, (_, _, aid, title, body, data, source_index) in enumerate(items):
+        for i, (_, _, aid, title, body, data, source_index, _) in enumerate(items):
             key = keys[i]
             title = title or '(無標題)'
             label = f'{source_index} · ' if source_index is not None else ''
-            post = json.loads(data)
+            post = json.loads(data) if data is not None else {}
             author = post.get('author') or ''
             label += f'{author} · ' if author else ''
             entries.append(f'<li><a id="a-{key}" href="articles/{key}.html">'
@@ -270,15 +275,18 @@ def export_html(db, folder, progress=None):
             links.append(f'<button id="frame-view" type="button" aria-pressed="false">{FRAME_ROWS} 行視窗</button>')
             nav = '<nav>' + ''.join(links) + '</nav>'
             colored = bool(post.get('ansi_lines') or post.get('headerless'))
-            if colored:
+            if data is None:
+                article = f'{nav}<h1>{escape(title)}</h1>' + article_body(body or title, None)
+            elif colored:
                 article = color_article(site, board, title, post, body, nav)
             else:
                 article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
                            f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
             write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored))
-            count += 1
-            if progress:
-                progress(count, total)
+            if data is not None:
+                count += 1
+                if progress:
+                    progress(count, total)
         # Anchor pages at the newest end so the first view shows the latest 20.
         first_size = len(entries) % PAGE_SIZE or PAGE_SIZE
         batches = [entries[:first_size]] + [entries[start:start + PAGE_SIZE]
@@ -294,14 +302,17 @@ def export_html(db, folder, progress=None):
                       '<button class="latest" type="button" disabled>最新</button>'
                       f'<span class="page-label meta" aria-live="polite">第 {len(batches)}／{len(batches)} 頁</span></nav>')
         board_name = escape(f'{site} / {board}', quote=True)
+        article_count = sum(item[5] is not None for item in items)
+        skipped_count = len(items) - article_count
+        board_count = f'{article_count} 篇' + (f' · {skipped_count} 筆站上狀態' if skipped_count else '')
         sections.append(f'<section class="board" data-board="{board_name}">'
                         '<div class="board-tools"><strong class="board-tab">看板</strong>'
-                        f'<span class="meta">{board_name} · {len(items)} 篇</span>'
+                        f'<span class="meta">{board_name} · {board_count}</span>'
                         + pagination + '</div>' + ''.join(pages) + '</section>')
     index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
              '<h1>BBS 離線文章</h1><span>› <span id="active-board"></span></span>'
              '<a href="help.html">操作與色彩說明</a></header>'
-             + (''.join(sections) if count else '<p>尚無文章</p>'))
+             + (''.join(sections) if sections else '<p>尚無文章</p>'))
     write_page(folder / 'help.html', HELP.read_text(encoding='utf-8'))
     write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS))
     return count

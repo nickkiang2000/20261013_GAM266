@@ -23,6 +23,7 @@ button { padding: 5px 9px; font: inherit; color: inherit; background: #202441;
 button:disabled { cursor: default; }
 #run { color: #ffffa0; background: #141488; border-color: #5353bc; }
 #run:disabled { opacity: .5; }
+#stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .hint { margin: 0; color: #aab0c4; font-size: .84rem; }
 .status-header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
@@ -81,18 +82,18 @@ html[data-theme="light"] .issues { color: #805100; }
 <label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
 <p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
 <div class="actions wide">
-    <button id="run">登入並下載／續傳</button>
+    <button id="run">登入並重定義下載</button>
+    <button type="button" id="resume" disabled>登入續傳</button>
     <button type="button" id="export">離線內容重整</button>
 </div>
-<p class="hint wide">同站台、看板和目錄有未完成批次時，重新登入會接續。新批次會重新比對站上版本。</p>
+<div class="hint wide destination"><div id="new-summary"></div><div id="resume-summary">選擇看板與備份目錄後查詢續傳。</div></div>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
     <div class="advanced-fields">
-        <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
         <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
+        <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
         <label>掃描方向<select name="direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
-        <label class="wide"><input name="new_batch" type="checkbox"> 放棄上次的掃描範圍，改開新批次</label>
     </div>
-    <p class="hint">起始編號 0 選最新幾篇。填 AID 時只處理該篇。</p>
+    <p class="hint">起始編號寫0 則最新一篇為起始編號。</p>
 </details>
 </form>
 <section><div class="status-header"><h2>下載狀態</h2><button type="button" id="stop" disabled>停止</button></div>
@@ -104,7 +105,7 @@ html[data-theme="light"] .issues { color: #805100; }
     <li>網站掃描<strong id="scan-count">—</strong></li>
     <li>無更新<strong id="unchanged-count">0</strong></li>
     <li>已更新<strong id="updated-count">0</strong></li>
-    <li>已存檔<strong id="saved-count">0</strong></li>
+    <li>待核色<strong id="color-count">0</strong></li>
 </ol>
 <p id="range-count"></p>
 <details id="issue-details" hidden><summary id="review-count">處理明細</summary><ul id="issues" class="issues" hidden></ul></details></div>
@@ -114,45 +115,93 @@ html[data-theme="light"] .issues { color: #805100; }
 <p class="destination"><a id="index-link" target="_blank" rel="noopener" hidden></a></p></div>
 <p id="timing" class="hint"></p><p id="log-path" class="hint destination"></p></section>
 </main>
-<dialog id="range-dialog" aria-labelledby="range-title">
-<h2 id="range-title">發現未完成的批次</h2>
-<p id="range-message"></p>
-<div class="actions"><button value="resume">接續原批次</button>
-<button value="new">改抓這次的範圍</button><button value="cancel">取消</button></div>
-</dialog>
 <script>
 const form = document.getElementById('form');
 const status = document.getElementById('status');
 const start = document.getElementById('run');
+const resume = document.getElementById('resume');
 const progress = document.getElementById('progress');
 const exportProgress = document.getElementById('export-progress');
 const exportButton = document.getElementById('export');
 const stop = document.getElementById('stop');
 const destination = document.getElementById('destination');
 const indexLink = document.getElementById('index-link');
-const rangeDialog = document.getElementById('range-dialog');
-const preferenceFields = ['site', 'user', 'board', 'aid', 'start', 'count', 'folder', 'theme', 'direction'];
+const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
 const themeToggle = document.getElementById('theme-toggle');
 const advanced = document.getElementById('advanced');
 let previousSuffix = '';
 let preferenceTimer;
 let preferenceWrites = Promise.resolve();
 let formEdited = false;
+let running = false;
+let pending = null;
+let pendingTimer;
+let pendingRequest = 0;
+let issueSignature = '';
 
-function showAdvancedNote() {
-    const {aid, start, direction, new_batch} = form.elements;
-    const settings = [];
-    if (aid.value) settings.push(`單篇 #${aid.value.replace(/^#/, '')}`);
-    else {
-        if (Number(start.value) > 0) settings.push(`起始 ${start.value}`);
-        if (direction.value === 'oldest') settings.push('舊到新');
-        if (new_batch.checked) settings.push('另開新批次');
-    }
-    document.getElementById('advanced-note').textContent = settings.length ? ' · ' + settings.join(' · ') : '';
+function setText(element, value) {
+    const target = typeof element === 'string' ? document.getElementById(element) : element;
+    const text = String(value);
+    if (target.textContent !== text) target.textContent = text;
 }
 
-advanced.addEventListener('input', showAdvancedNote);
+function showAdvancedNote() {
+    const {aid, start, direction, site, board, count, folder} = form.elements;
+    const first = Number(start.value);
+    const oldestFirst = direction.value === 'oldest';
+    aid.disabled = first > 0;
+    const single = !aid.disabled && Boolean(aid.value.trim());
+    start.disabled = direction.disabled = single;
+    const settings = [];
+    if (single) settings.push(`單篇 #${aid.value.replace(/^#/, '')}`);
+    else {
+        if (first > 0) settings.push(`起始 ${start.value}`);
+        if (oldestFirst) settings.push('舊到新');
+    }
+    setText('advanced-note', settings.length ? ' · ' + settings.join(' · ') : '');
+    let range;
+    if (single) range = `單篇 #${aid.value.replace(/^#/, '')}`;
+    else if (first === 0 && oldestFirst) range = '從最新一篇起 · 舊到新 · 只掃最新一篇';
+    else range = `從${first > 0 ? ` ${first} ` : '最新一篇'}起 · 最多 ${count.value} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
+    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${range} · ${folder.value || '未填備份目錄'}`);
+}
+
 advanced.addEventListener('invalid', () => { advanced.open = true; }, true);
+
+function checkPending() {
+    clearTimeout(pendingTimer);
+    const request = ++pendingRequest;
+    pending = null;
+    resume.disabled = true;
+    const {site, board, folder} = form.elements;
+    if (!board.value || !board.checkValidity() || !folder.value) {
+        setText('resume-summary', '選擇看板與備份目錄後查詢續傳。');
+        return;
+    }
+    setText('resume-summary', '正在查詢未完成批次…');
+    pendingTimer = setTimeout(async () => {
+        try {
+            const response = await fetch('/pending', {
+                method: 'POST', headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'},
+                body: JSON.stringify({site: site.value, board: board.value, folder: folder.value})
+            });
+            if (!response.ok) throw Error('pending');
+            const result = await response.json();
+            if (request !== pendingRequest) return;
+            pending = result.pending;
+            if (pending) {
+                const {first, last, direction, reusable} = pending;
+                const range = direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
+                setText('resume-summary', `上次未完成：${range} · 已有 ${reusable} 篇可沿用 · ${result.folder}`);
+            } else {
+                setText('resume-summary', '這個看板與目錄沒有未完成批次。');
+            }
+            resume.disabled = running || !pending;
+        } catch {
+            if (request === pendingRequest) setText('resume-summary', '無法查詢續傳，請確認備份目錄。');
+        }
+    }, 180);
+}
 
 function applyTheme(value) {
     const theme = value === 'light' ? 'light' : 'dark';
@@ -192,6 +241,8 @@ function saveForm() {
 }
 
 form.addEventListener('input', event => {
+    showAdvancedNote();
+    if (['site', 'board', 'folder'].includes(event.target.name)) checkPending();
     if (!preferenceFields.includes(event.target.name)) return;
     formEdited = true;
     clearTimeout(preferenceTimer);
@@ -200,6 +251,8 @@ form.addEventListener('input', event => {
 form.addEventListener('change', event => {
     if (['site', 'board', 'folder'].includes(event.target.name)) {
         normalizeDestination();
+        showAdvancedNote();
+        checkPending();
         saveForm();
     }
 });
@@ -212,7 +265,9 @@ fetch('/preferences').then(response => response.json()).then(values => {
     applyTheme(values.theme);
     if (!form.elements.direction.value) form.elements.direction.value = 'newest';
     showAdvancedNote();
+    checkPending();
 }).catch(() => {});
+showAdvancedNote();
 
 async function send(path, data) {
     try {
@@ -222,28 +277,15 @@ async function send(path, data) {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
-            if (path === '/start' && response.status === 409) {
-                const {pending_range} = await response.json();
-                if (pending_range) {
-                    const {first, last, direction} = pending_range;
-                    const originalRange = direction === 'oldest' ? `${first} → ${last}` : `${last} → ${first}`;
-                    document.getElementById('range-message').textContent =
-                        `原批次 ${originalRange}，共 ${last - first + 1} 筆。這次填寫 ${data.count} 篇，起始編號 ${data.start}，${data.direction === 'oldest' ? '舊到新' : '新到舊'}。`;
-                    rangeDialog.returnValue = 'cancel';
-                    const choice = new Promise(resolve => {
-                        rangeDialog.addEventListener('close', () => resolve(rangeDialog.returnValue), {once: true});
-                    });
-                    rangeDialog.showModal();
-                    const action = await choice;
-                    if (action === 'resume') return send(path, {...data, confirm_resume: true});
-                    if (action === 'new') return send(path, {...data, new_batch: 'on'});
-                    return;
-                }
-            }
-            alert(response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
+            const error = await response.json();
+            alert(error.no_pending ? '找不到未完成批次。'
+                : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
+            checkPending();
         } else if (path !== '/stop') {
             const result = await response.json();
             if (result.folder) form.elements.folder.value = result.folder;
+            showAdvancedNote();
+            checkPending();
             saveForm();
         }
         await refresh();
@@ -252,20 +294,24 @@ async function send(path, data) {
     }
 }
 
-rangeDialog.querySelectorAll('button').forEach(button => {
-    button.onclick = () => rangeDialog.close(button.value);
-});
-
 form.addEventListener('submit', event => {
     event.preventDefault();
     normalizeDestination();
     const data = Object.fromEntries(new FormData(form));
     form.elements.password.value = '';
-    form.elements.new_batch.checked = false;
+    form.elements.aid.value = '';
     showAdvancedNote();
     saveForm();
-    send('/start', data);
+    send('/start', {...data, mode: 'new'});
 });
+resume.onclick = () => {
+    const {site, board, folder, user, password} = form.elements;
+    if (![board, folder, user, password].every(field => field.reportValidity())) return;
+    normalizeDestination();
+    send('/start', {mode: 'resume', site: site.value, board: board.value, folder: folder.value,
+        user: user.value, password: password.value});
+    password.value = '';
+};
 exportButton.onclick = () => {
     const {folder, site, board} = form.elements;
     if (folder.reportValidity() && board.reportValidity()) {
@@ -277,7 +323,18 @@ stop.onclick = () => send('/stop', {});
 
 async function refresh() {
     const state = await (await fetch('/status')).json();
-    status.textContent = state.message;
+    const finished = running && !state.running;
+    running = state.running;
+    if (finished) checkPending();
+    start.disabled = exportButton.disabled = running;
+    resume.disabled = running || !pending;
+    stop.disabled = !running || state.phase === 'export';
+    stop.dataset.result = state.result || '';
+    setText(stop, {done: '完成', stopped: '中止', disconnected: '連線中斷',
+        failed: '失敗', pending: '待續傳'}[state.result] || '停止');
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.containsNode(status.closest('section'), true)) return;
+    setText(status, state.message);
     progress.hidden = !state.batch_total;
     let scan = '—';
     let range = '';
@@ -290,49 +347,56 @@ async function refresh() {
             range = `${state.resumed ? '接續' : '本次'}範圍 ${ascending ? state.batch_start : state.batch_end} → ${ascending ? state.batch_end : state.batch_start}`;
         }
     }
-    document.getElementById('scan-count').textContent = scan;
-    document.getElementById('range-count').textContent = range;
-    document.getElementById('local-count').textContent = state.local_count ?? '—';
-    document.getElementById('unchanged-count').textContent = state.skipped ?? 0;
-    document.getElementById('updated-count').textContent = state.updated ?? 0;
-    document.getElementById('saved-count').textContent = state.saved ?? 0;
+    setText('scan-count', scan);
+    setText('range-count', range);
+    setText('local-count', state.local_count ?? '—');
+    setText('unchanged-count', state.skipped ?? 0);
+    setText('updated-count', state.updated ?? 0);
+    setText('color-count', state.ansi_review ?? 0);
     const review = [];
-    if (state.resumed_verified) review.push(`本批先前已核對 ${state.resumed_verified} 篇`);
+    if (state.resumed_verified) review.push(`沿用 ${state.resumed_verified} 篇`);
     if (state.unresolved) review.push(`文章待查 ${state.unresolved} 筆`);
+    if (state.unavailable) review.push(`刪除或鎖定 ${state.unavailable} 筆`);
+    if (state.kept_previous) review.push(`保留舊備份 ${state.kept_previous} 篇`);
     if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
     document.getElementById('issue-details').hidden = !review.length;
-    document.getElementById('review-count').textContent = ['處理明細', ...review].join(' · ');
+    setText('review-count', ['處理明細', ...review].join(' · '));
     const issues = document.getElementById('issues');
-    const rows = (state.issues || []).map(issue => {
-        const row = document.createElement('li');
-        const label = [issue.index, issue.aid].filter(value => value != null).join(' / ');
-        row.textContent = label ? `${label}：${issue.message}` : issue.message;
-        return row;
-    });
-    issues.replaceChildren(...rows);
-    issues.hidden = !rows.length;
+    const issueList = state.issues || [];
+    const signature = JSON.stringify(issueList);
+    if (signature !== issueSignature) {
+        const rows = document.createDocumentFragment();
+        for (const issue of issueList) {
+            const row = document.createElement('li');
+            const label = [issue.index, issue.aid].filter(value => value != null).join(' / ');
+            row.textContent = label ? `${label}：${issue.message}` : issue.message;
+            rows.append(row);
+        }
+        issues.replaceChildren(rows);
+        issues.hidden = !issueList.length;
+        issueSignature = signature;
+    }
     exportProgress.hidden = state.phase !== 'export' || !state.export_total;
     exportProgress.max = state.export_total || 1;
     exportProgress.value = state.exported || 0;
-    document.getElementById('export-count').textContent = state.index_path
+    setText('export-count', state.index_path
         ? `離線頁面已更新，共 ${state.exported} 篇`
         : state.phase === 'export' || state.export_total
             ? `已建立 ${state.exported}／${state.export_total} 篇 HTML`
-            : '等待下載結束';
-    document.getElementById('index-path').textContent = !state.index_url && state.folder ? `實際備份位置：${state.folder}` : '';
+            : '等待下載結束');
+    setText('index-path', !state.index_url && state.folder ? `實際備份位置：${state.folder}` : '');
     indexLink.hidden = !state.index_url;
     if (state.index_url) {
         indexLink.href = state.index_url;
-        indexLink.textContent = state.index_path;
+        setText(indexLink, state.index_path);
     }
     let timing = state.elapsed ? `已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒` : '';
     if (state.seconds_per_article) {
         timing += ` · 本次 ${state.timed_samples} 篇的平均下載時間 ${state.seconds_per_article} 秒／篇`;
     }
-    document.getElementById('timing').textContent = timing;
-    document.getElementById('log-path').textContent = state.log_path ? `診斷紀錄：${state.log_path}` : '';
-    start.disabled = exportButton.disabled = state.running;
-    stop.disabled = !state.running || state.phase === 'export';
+    setText('timing', timing);
+    setText('log-path', state.log_path ? `診斷紀錄：${state.log_path}` : '');
 }
+refresh().catch(() => {});
 setInterval(() => refresh().catch(() => {}), 1000);
 </script></html>

@@ -8,7 +8,7 @@ import secrets
 import traceback
 
 
-PREFERENCE_FIELDS = ('site', 'user', 'board', 'aid', 'start', 'count', 'folder', 'theme', 'direction')
+PREFERENCE_FIELDS = ('site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction')
 LOCAL_DIRECTORY = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'BBS Downloader'
 SETTINGS = LOCAL_DIRECTORY / 'form.json'
 LOG_DIRECTORY = Path(__file__).resolve().parent / 'log'

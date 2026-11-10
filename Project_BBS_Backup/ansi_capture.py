@@ -8,6 +8,7 @@ from PyPtt import command, screens
 
 
 SGR = re.compile(r'\x1b\[([0-9;]*)m')
+LINE_RANGE = re.compile(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行')
 MAX_FRAME_BYTES = 256_000
 MAX_FRAMES = 4096
 
@@ -145,6 +146,83 @@ def match_colors(body, frames):
     return output, len(covered)
 
 
+class NumberedArticle:
+    """Reassemble physical rows only when the terminal numbering proves their positions."""
+
+    def __init__(self):
+        self.rows = {}
+        self.colors = {}
+        self.seen = self.unnumbered = self.width_mismatches = self.conflicts = 0
+        self.first_range = self.last_range = self.end_range = None
+        self.first_conflict = None
+        self.end_usable = False
+        self.width_sample = []
+
+    def observe(self, rows, status, *, at_end, styled):
+        self.seen += 1
+        match = LINE_RANGE.search(status)
+        if not match:
+            self.unnumbered += 1
+            return
+
+        first, last = map(int, match.groups())
+        span = [first, last]
+        if self.first_range is None:
+            self.first_range = span
+        self.last_range = span
+        if at_end:
+            self.end_range = span
+        count = last - first + 1
+        if first < 1 or not 0 < count <= len(rows) or any(rows[count:]):
+            self.width_mismatches += 1
+            if len(self.width_sample) < 12:
+                self.width_sample.append({'screen': self.seen, 'range': span, 'rows': len(rows),
+                                          'blank_rows': sum(not row.strip() for row in rows)})
+            return
+        if at_end:
+            self.end_usable = True
+
+        for offset, row in enumerate(rows[:count]):
+            number = first + offset
+            if self.rows.setdefault(number, row) != row:
+                self.conflicts += 1
+                if self.first_conflict is None:
+                    self.first_conflict = number
+                continue
+            if styled is not None and number not in self.colors:
+                self.colors[number] = styled[offset].color_runs
+
+    def assemble(self):
+        if not self.end_usable or self.conflicts or self.width_mismatches or self.unnumbered or not self.rows:
+            return None
+        end = self.end_range[1]
+        if len(self.rows) != end or min(self.rows) != 1 or max(self.rows) != end:
+            return None
+        return '\n'.join(self.rows[number] for number in range(1, end + 1))
+
+    def diagnostics(self):
+        last = self.end_range[1] if self.end_range else max(self.rows, default=0)
+        gaps = []
+        previous = 0
+        for number in sorted(self.rows):
+            if number > last:
+                break
+            if number > previous + 1:
+                gaps.append([previous + 1, number - 1])
+            previous = number
+        if previous < last:
+            gaps.append([previous + 1, last])
+        return {
+            'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
+            'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
+            'width_mismatches_sample': self.width_sample,
+            'first_conflict_line': self.first_conflict, 'first_range': self.first_range,
+            'last_range': self.last_range, 'end_range': self.end_range, 'end_usable': self.end_usable,
+            'unique_lines': len(self.rows), 'missing_lines': sum(end - start + 1 for start, end in gaps),
+            'missing_ranges_sample': gaps[:12],
+        }
+
+
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
     core = api.connect_core
@@ -153,6 +231,7 @@ def read_colored_post(api, board, aid):
     buffers = {}
     frames = []
     line_cache = {}
+    numbered = NumberedArticle()
     capturing = False
     frame_limit_hit = False
     reached_end = False
@@ -173,7 +252,7 @@ def read_colored_post(api, board, aid):
         return result
 
     def capture_send(message, targets, *args, **kwargs):
-        nonlocal capturing, frame_limit_hit, reached_end
+        nonlocal capturing, frame_limit_hit, reached_end, numbered
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
         article_screen = any(target.get_detect_target() in article_targets for target in targets)
         if article_screen and message == command.enter * 2:
@@ -181,8 +260,9 @@ def read_colored_post(api, board, aid):
             # Keep completion and colors tied to the attempt it actually returns.
             frames.clear()
             line_cache.clear()
+            numbered = NumberedArticle()
             reached_end = frame_limit_hit = False
-        capturing = article_screen and len(frames) < MAX_FRAMES
+        capturing = article_screen and numbered.seen < MAX_FRAMES
         frame_limit_hit |= article_screen and not capturing
         try:
             result = send(message, targets, *args, **kwargs)
@@ -190,8 +270,10 @@ def read_colored_post(api, board, aid):
                 reached_end |= targets[result].get_detect_target() == screens.Target.PostEnd
             if capturing and 0 <= result < len(targets) and targets[result].get_detect_target() in article_targets:
                 _, data = buffers.get(core.current_encoding, (None, None))
+                plain = core.get_screen_queue()[-1]
+                rows = plain.split('\n')
+                packed = None
                 if data:
-                    plain = core.get_screen_queue()[-1]
                     try:
                         frame = ColorScreen(core.config.screen_height).replay(data, core.current_encoding)
                         # Keep SDK navigation and plain text independent. A frame
@@ -207,6 +289,7 @@ def read_colored_post(api, board, aid):
                             frames.append(packed)
                     except (ValueError, IndexError, LookupError):
                         pass
+                numbered.observe(rows[:-1], rows[-1], at_end=reached_end, styled=packed)
             return result
         finally:
             capturing = False
@@ -215,15 +298,37 @@ def read_colored_post(api, board, aid):
     core._stream_screen = capture_stream
     try:
         post = api.get_post(board, aid=aid)
+    except Exception as exc:
+        exc.capture_diagnostics = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
+                                   'reached_end': reached_end, 'numbering': numbered.diagnostics()}
+        raise
     finally:
         core.send = send
         core._stream_screen = stream
+    diagnostics = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
+                   'reached_end': reached_end, 'numbering': numbered.diagnostics()}
+    post['ansi_diagnostics'] = diagnostics
     body = post.get('full_content')
     if body:
-        colors, covered = match_colors(body, frames)
+        sdk_rows = body.split('\n')
+        reconstructed = numbered.assemble()
+        if reconstructed is not None:
+            body = post['full_content'] = reconstructed
+            colors = {str(number - 1): list(runs) for number, runs in numbered.colors.items() if runs}
+            covered = len(numbered.colors)
+        else:
+            colors, covered = match_colors(body, frames)
+        selected_rows = body.split('\n')
         if colors:
             post['ansi_lines'] = colors
-        post['ansi_coverage'] = {'matched': covered, 'total': len(body.split('\n')), 'colored': len(colors)}
-        post['ansi_diagnostics'] = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
-                                    'reached_end': reached_end}
+        post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}
+        diagnostics.update(
+            assembly='numbered' if reconstructed is not None else 'sdk',
+            sdk_lines=len(sdk_rows), selected_lines=len(selected_rows),
+            sdk_blank_lines=sum(not line.strip() for line in sdk_rows),
+            selected_blank_lines=sum(not line.strip() for line in selected_rows),
+            first_changed_line=next(
+                (n for n, (old, new) in enumerate(zip(sdk_rows, selected_rows), 1) if old != new),
+                min(len(sdk_rows), len(selected_rows)) + 1 if len(sdk_rows) != len(selected_rows) else None),
+        )
     return post
