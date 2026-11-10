@@ -4,12 +4,12 @@ from difflib import SequenceMatcher
 from itertools import groupby
 import re
 
-from PyPtt import screens
+from PyPtt import command, screens
 
 
 SGR = re.compile(r'\x1b\[([0-9;]*)m')
 MAX_FRAME_BYTES = 256_000
-MAX_FRAMES = 512
+MAX_FRAMES = 4096
 
 
 class StyledLine(str):
@@ -44,6 +44,13 @@ class StyledLine(str):
             runs.append((str.__getitem__(self, slice(start, end)), style))
             start = end
         return runs
+
+
+class CapturedLine(str):
+    def __new__(cls, text, runs):
+        line = super().__new__(cls, text)
+        line.color_runs = runs
+        return line
 
 
 class ColorScreen(screens._VT100Engine):
@@ -131,8 +138,8 @@ def match_colors(body, frames):
                     continue
                 covered.add(position)
                 line = frame[block.b + index]
-                if any(line.styles):
-                    output[str(position)] = line.runs()
+                if line.color_runs:
+                    output[str(position)] = list(line.color_runs)
             if block.size:
                 cursor = max(cursor, window_start + block.a + block.size)
     return output, len(covered)
@@ -145,7 +152,10 @@ def read_colored_post(api, board, aid):
     stream = core._stream_screen
     buffers = {}
     frames = []
+    line_cache = {}
     capturing = False
+    frame_limit_hit = False
+    reached_end = False
 
     def capture_stream(encoding, chunk):
         result = stream(encoding, chunk)
@@ -163,12 +173,21 @@ def read_colored_post(api, board, aid):
         return result
 
     def capture_send(message, targets, *args, **kwargs):
-        nonlocal capturing
+        nonlocal capturing, frame_limit_hit, reached_end
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
-        capturing = len(frames) < MAX_FRAMES and any(
-            target.get_detect_target() in article_targets for target in targets)
+        article_screen = any(target.get_detect_target() in article_targets for target in targets)
+        if article_screen and message == command.enter * 2:
+            # PyPtt can retry from the beginning when metadata validation fails.
+            # Keep completion and colors tied to the attempt it actually returns.
+            frames.clear()
+            line_cache.clear()
+            reached_end = frame_limit_hit = False
+        capturing = article_screen and len(frames) < MAX_FRAMES
+        frame_limit_hit |= article_screen and not capturing
         try:
             result = send(message, targets, *args, **kwargs)
+            if article_screen and 0 <= result < len(targets):
+                reached_end |= targets[result].get_detect_target() == screens.Target.PostEnd
             if capturing and 0 <= result < len(targets) and targets[result].get_detect_target() in article_targets:
                 _, data = buffers.get(core.current_encoding, (None, None))
                 if data:
@@ -178,7 +197,14 @@ def read_colored_post(api, board, aid):
                         # Keep SDK navigation and plain text independent. A frame
                         # that disagrees with the SDK cannot supply reliable colors.
                         if '\n'.join(frame) == plain:
-                            frames.append(frame[:-1])
+                            packed = []
+                            for line in frame[:-1]:
+                                runs = tuple(line.runs()) if any(line.styles) else ()
+                                key = (str(line), runs)
+                                if key not in line_cache:
+                                    line_cache[key] = CapturedLine(*key)
+                                packed.append(line_cache[key])
+                            frames.append(packed)
                     except (ValueError, IndexError, LookupError):
                         pass
             return result
@@ -198,4 +224,6 @@ def read_colored_post(api, board, aid):
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(body.split('\n')), 'colored': len(colors)}
+        post['ansi_diagnostics'] = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
+                                    'reached_end': reached_end}
     return post

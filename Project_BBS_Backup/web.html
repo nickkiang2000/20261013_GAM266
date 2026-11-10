@@ -1,29 +1,218 @@
-<!doctype html><html lang="zh-Hant"><meta charset="utf-8"><title>PTT／PTT2 文章備份</title>
-<style>body{font:17px system-ui;background:#f1f4f7;color:#172b3d;max-width:760px;margin:40px auto;padding:20px}form,section{background:white;padding:24px;border-radius:12px;margin:16px 0}label{display:block;margin:14px 0}input{display:block;width:95%;padding:10px;font:inherit;border:1px solid #abc;border-radius:5px}button{padding:12px 20px;margin-right:12px;cursor:pointer}p{line-height:1.7}#status{white-space:pre-wrap}</style>
-<h1>PTT／PTT2 文章備份</h1><p>先用公開板下載 5 篇。請核對內文及推文，再擴大試跑。</p>
+<!doctype html><html lang="zh-Hant"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PTT／PTT2 文章備份</title>
+<style>
+* { box-sizing: border-box; }
+body { color-scheme: dark; font: 15px/1.45 system-ui, sans-serif; background: #000; color: #e0e0e0;
+       max-width: 1100px; margin: 0 auto; padding: 12px 18px; }
+h1 { font-size: 1.35rem; margin: 0; color: #ffff66; }
+a { color: #b5edff; }
+.heading { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap;
+           gap: 8px; margin-bottom: 10px; padding: 8px 12px; background: #0c0a66; }
+h2 { font-size: 1.12rem; margin: 0; }
+main { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+form, section, dialog { background: #10121a; padding: 12px; border: 1px solid #343952; }
+form { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
+label { display: block; grid-column: span 2; min-width: 0; }
+.half { grid-column: span 3; }
+.wide { grid-column: 1 / -1; }
+input:not([type=checkbox],[type=hidden]), select { display: block; width: 100%; padding: 6px 8px; margin-top: 3px;
+    color: inherit; background: #070910; font: inherit; border: 1px solid #59658b; border-radius: 3px; }
+button { padding: 5px 9px; font: inherit; color: inherit; background: #202441;
+         border: 1px solid #59658b; border-radius: 3px; cursor: pointer; }
+button:disabled { cursor: default; }
+#run { color: #ffffa0; background: #141488; border-color: #5353bc; }
+#run:disabled { opacity: .5; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.hint { margin: 0; color: #aab0c4; font-size: .84rem; }
+.status-header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                 padding: 4px 8px; background: #000088; }
+progress { display: block; width: 100%; margin-top: 8px; accent-color: #00bbbb; }
+progress[hidden] { display: none; }
+#status { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.stage { margin: 10px 0; }
+.stage p { margin: 4px 0 0; font-size: .88rem; }
+.pipeline { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px;
+            list-style: none; margin: 8px 0; padding: 0; }
+.pipeline li { background: #191e31; padding: 4px; text-align: center; font-size: .8rem; }
+.pipeline strong { display: block; color: #d1f8f8; font-variant-numeric: tabular-nums; }
+.issues { color: #ffdb91; margin: 4px 0; padding-left: 1.2rem; font-size: .84rem; }
+.destination { overflow-wrap: anywhere; }
+details { margin-top: 8px; color: #aab0c4; font-size: .86rem; }
+details p { margin: 4px 0 0; }
+summary { cursor: pointer; }
+.advanced-fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+dialog { color: inherit; max-width: min(430px, 92vw); }
+dialog::backdrop { background: #000a; }
+.heading-actions { display: flex; align-items: center; gap: .7rem; }
+.version { font-size: .8rem; font-variant-numeric: tabular-nums; }
+html[data-theme="light"] body { color-scheme: light; background: #f1f4f7; color: #172b3d; }
+html[data-theme="light"] .heading, html[data-theme="light"] .status-header { background: #e7edf4; }
+html[data-theme="light"] h1, html[data-theme="light"] a { color: #215987; }
+html[data-theme="light"] :is(form,section,dialog) { background: #fff; border-color: #d9e2ec; }
+html[data-theme="light"] :is(input:not([type=checkbox]),select,button) { background: #fff; border-color: #98a9bc; }
+html[data-theme="light"] #run { color: #fff; background: #215987; }
+html[data-theme="light"] :is(.hint,details) { color: #485c6f; }
+html[data-theme="light"] .pipeline li { background: #edf3f8; }
+html[data-theme="light"] .pipeline strong { color: #16446d; }
+html[data-theme="light"] .issues { color: #805100; }
+@media (max-width: 760px) {
+    body { padding: 10px; }
+    main { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+    section { grid-row: 1; }
+    form, section { padding: 10px; }
+}
+@media (max-width: 430px) {
+    label { grid-column: span 3; }
+}
+</style>
+<header class="heading"><h1>PTT／PTT2 文章備份</h1><div class="heading-actions">
+<span class="version">__APP_VERSION__</span>
+<a href="help.html" target="_blank" rel="noopener">操作與色彩說明</a>
+<button type="button" id="theme-toggle" aria-pressed="true">切換淺色</button></div></header>
+<main>
 <form id="form" method="post" autocomplete="off">
+<input type="hidden" name="theme" value="dark">
 <label>站台 <select name="site"><option value="PTT2">PTT2 批踢踢兔</option><option value="PTT">PTT 批踢踢實業坊</option></select></label>
 <label>帳號<input name="user" required autocomplete="off"></label>
-<label>密碼（只供這次登入）<input name="password" type="password" required autocomplete="new-password"></label>
-<label>英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
-<label>只下載指定文章（選填 AID）<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
-<p>填入 AID 時只讀取該篇並擷取配色。PTT 色碼教學可填板名 NctuNthuTYSH、AID 1AdzogFB。</p>
-<label>起始編號（0＝從最新幾篇開始）<input name="start" type="number" min="0" value="0" required></label>
-<label>本次掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
-<label><input name="ansi" type="checkbox" style="display:inline;width:auto"> 批次下載時也擷取 ANSI 配色（測試功能）</label>
-<label>備份資料夾完整路徑（請自行選擇是否放在 OneDrive）<input name="folder" required placeholder="例如 C:\Users\NICK\Documents\PTT2-Backup"></label>
-<button id="start">登入並開始</button><button type="button" id="stop">停止</button>
-<button type="button" id="export">匯出既有備份</button>
+<label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
+<label class="half">英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
+<label class="half">掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
+<label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
+<p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
+<div class="actions wide">
+    <button id="run">登入並下載／續傳</button>
+    <button type="button" id="export">離線內容重整</button>
+</div>
+<p class="hint wide">同站台、看板和目錄有未完成批次時，重新登入會接續。新批次會重新比對站上版本。</p>
+<details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
+    <div class="advanced-fields">
+        <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
+        <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
+        <label>掃描方向<select name="direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
+        <label class="wide"><input name="new_batch" type="checkbox"> 放棄上次的掃描範圍，改開新批次</label>
+    </div>
+    <p class="hint">起始編號 0 選最新幾篇。填 AID 時只處理該篇。</p>
+</details>
 </form>
-<section><h2>下載狀態</h2><p id="status" role="status">尚未開始</p>
-<p>文章會逐篇寫入資料庫。任務結束後，從備份資料夾開啟 index.html。匯出既有備份只需填資料夾，可把舊資料庫轉成單篇 HTML。</p>
-<p>本版透過 WSS 讀取一般文章。ANSI 以能和正文核對的行為準。置底文盤點、精華區、SSH 和二階段驗證接續待實作。</p></section>
+<section><div class="status-header"><h2>下載狀態</h2><button type="button" id="stop" disabled>停止</button></div>
+<p id="status" role="status">尚未開始</p>
+<div class="stage"><strong>1. 下載、配色與存檔</strong>
+<progress id="progress" aria-label="下載與掃描進度" hidden></progress>
+<ol class="pipeline" aria-label="已完成的處理步驟">
+    <li>本地讀取<strong id="local-count">—</strong></li>
+    <li>網站掃描<strong id="scan-count">—</strong></li>
+    <li>無更新<strong id="unchanged-count">0</strong></li>
+    <li>已更新<strong id="updated-count">0</strong></li>
+    <li>已存檔<strong id="saved-count">0</strong></li>
+</ol>
+<p id="range-count"></p>
+<details id="issue-details" hidden><summary id="review-count">處理明細</summary><ul id="issues" class="issues" hidden></ul></details></div>
+<div class="stage"><strong>2. 建立離線 HTML</strong>
+<progress id="export-progress" aria-label="HTML 匯出進度" hidden></progress>
+<p id="export-count">等待下載結束</p><p class="destination" id="index-path"></p>
+<p class="destination"><a id="index-link" target="_blank" rel="noopener" hidden></a></p></div>
+<p id="timing" class="hint"></p><p id="log-path" class="hint destination"></p></section>
+</main>
+<dialog id="range-dialog" aria-labelledby="range-title">
+<h2 id="range-title">發現未完成的批次</h2>
+<p id="range-message"></p>
+<div class="actions"><button value="resume">接續原批次</button>
+<button value="new">改抓這次的範圍</button><button value="cancel">取消</button></div>
+</dialog>
 <script>
 const form = document.getElementById('form');
 const status = document.getElementById('status');
-const start = document.getElementById('start');
+const start = document.getElementById('run');
+const progress = document.getElementById('progress');
+const exportProgress = document.getElementById('export-progress');
 const exportButton = document.getElementById('export');
 const stop = document.getElementById('stop');
+const destination = document.getElementById('destination');
+const indexLink = document.getElementById('index-link');
+const rangeDialog = document.getElementById('range-dialog');
+const preferenceFields = ['site', 'user', 'board', 'aid', 'start', 'count', 'folder', 'theme', 'direction'];
+const themeToggle = document.getElementById('theme-toggle');
+const advanced = document.getElementById('advanced');
+let previousSuffix = '';
+let preferenceTimer;
+let preferenceWrites = Promise.resolve();
+let formEdited = false;
+
+function showAdvancedNote() {
+    const {aid, start, direction, new_batch} = form.elements;
+    const settings = [];
+    if (aid.value) settings.push(`單篇 #${aid.value.replace(/^#/, '')}`);
+    else {
+        if (Number(start.value) > 0) settings.push(`起始 ${start.value}`);
+        if (direction.value === 'oldest') settings.push('舊到新');
+        if (new_batch.checked) settings.push('另開新批次');
+    }
+    document.getElementById('advanced-note').textContent = settings.length ? ' · ' + settings.join(' · ') : '';
+}
+
+advanced.addEventListener('input', showAdvancedNote);
+advanced.addEventListener('invalid', () => { advanced.open = true; }, true);
+
+function applyTheme(value) {
+    const theme = value === 'light' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = theme;
+    form.elements.theme.value = theme;
+    themeToggle.setAttribute('aria-pressed', String(theme === 'dark'));
+    themeToggle.textContent = theme === 'dark' ? '切換淺色' : '切換深色';
+}
+themeToggle.onclick = () => {
+    formEdited = true;
+    applyTheme(form.elements.theme.value === 'dark' ? 'light' : 'dark');
+    saveForm();
+};
+
+function normalizeDestination() {
+    const {site, board, folder} = form.elements;
+    const name = `${site.value}_${board.value}`;
+    let path = folder.value.trim().replace(/[\\/]+$/, '');
+    if (!path || !board.value || !board.checkValidity()) return;
+    const leaf = path.split(/[\\/]/).at(-1).toLowerCase();
+    if (leaf !== name.toLowerCase()) {
+        if (previousSuffix && leaf === previousSuffix) path = path.slice(0, -leaf.length - 1);
+        folder.value = `${path}\\${name}`;
+    }
+    previousSuffix = name.toLowerCase();
+}
+
+function saveForm() {
+    clearTimeout(preferenceTimer);
+    const data = Object.fromEntries(preferenceFields.map(key => [key, form.elements[key].value]));
+    preferenceWrites = preferenceWrites.then(() => fetch('/preferences', {
+        method: 'POST', keepalive: true,
+        headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'}, body: JSON.stringify(data)
+    })).then(response => {
+        if (!response.ok) throw Error('preferences');
+    }).catch(() => { destination.textContent = '本次欄位設定未能寫入本機。'; });
+}
+
+form.addEventListener('input', event => {
+    if (!preferenceFields.includes(event.target.name)) return;
+    formEdited = true;
+    clearTimeout(preferenceTimer);
+    preferenceTimer = setTimeout(saveForm, 300);
+});
+form.addEventListener('change', event => {
+    if (['site', 'board', 'folder'].includes(event.target.name)) {
+        normalizeDestination();
+        saveForm();
+    }
+});
+fetch('/preferences').then(response => response.json()).then(values => {
+    if (formEdited) return;
+    for (const name of preferenceFields) {
+        if (typeof values[name] === 'string') form.elements[name].value = values[name];
+    }
+    previousSuffix = `${form.elements.site.value}_${form.elements.board.value}`.toLowerCase();
+    applyTheme(values.theme);
+    if (!form.elements.direction.value) form.elements.direction.value = 'newest';
+    showAdvancedNote();
+}).catch(() => {});
 
 async function send(path, data) {
     try {
@@ -33,7 +222,29 @@ async function send(path, data) {
             body: JSON.stringify(data)
         });
         if (!response.ok) {
+            if (path === '/start' && response.status === 409) {
+                const {pending_range} = await response.json();
+                if (pending_range) {
+                    const {first, last, direction} = pending_range;
+                    const originalRange = direction === 'oldest' ? `${first} → ${last}` : `${last} → ${first}`;
+                    document.getElementById('range-message').textContent =
+                        `原批次 ${originalRange}，共 ${last - first + 1} 筆。這次填寫 ${data.count} 篇，起始編號 ${data.start}，${data.direction === 'oldest' ? '舊到新' : '新到舊'}。`;
+                    rangeDialog.returnValue = 'cancel';
+                    const choice = new Promise(resolve => {
+                        rangeDialog.addEventListener('close', () => resolve(rangeDialog.returnValue), {once: true});
+                    });
+                    rangeDialog.showModal();
+                    const action = await choice;
+                    if (action === 'resume') return send(path, {...data, confirm_resume: true});
+                    if (action === 'new') return send(path, {...data, new_batch: 'on'});
+                    return;
+                }
+            }
             alert(response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
+        } else if (path !== '/stop') {
+            const result = await response.json();
+            if (result.folder) form.elements.folder.value = result.folder;
+            saveForm();
         }
         await refresh();
     } catch {
@@ -41,35 +252,87 @@ async function send(path, data) {
     }
 }
 
+rangeDialog.querySelectorAll('button').forEach(button => {
+    button.onclick = () => rangeDialog.close(button.value);
+});
+
 form.addEventListener('submit', event => {
     event.preventDefault();
+    normalizeDestination();
     const data = Object.fromEntries(new FormData(form));
     form.elements.password.value = '';
+    form.elements.new_batch.checked = false;
+    showAdvancedNote();
+    saveForm();
     send('/start', data);
 });
 exportButton.onclick = () => {
-    const folder = form.elements.folder;
-    if (folder.reportValidity()) send('/export', {folder: folder.value});
+    const {folder, site, board} = form.elements;
+    if (folder.reportValidity() && board.reportValidity()) {
+        normalizeDestination();
+        send('/export', {folder: folder.value, site: site.value, board: board.value});
+    }
 };
 stop.onclick = () => send('/stop', {});
 
 async function refresh() {
     const state = await (await fetch('/status')).json();
-    const lines = [state.message, `新增 ${state.saved} 篇 · 已存 ${state.skipped} 篇 · 待核對 ${state.unresolved ?? 0} 筆`];
-    if (state.ansi_samples) {
-        const coverage = state.ansi_coverage;
-        lines.push(`ANSI：${state.ansi_colored}／${state.ansi_samples} 篇擷取到配色。`);
-        if (coverage.total) lines.push(`最後一篇：${coverage.matched}／${coverage.total} 行對上終端畫面，${coverage.colored} 行有配色。`);
+    status.textContent = state.message;
+    progress.hidden = !state.batch_total;
+    let scan = '—';
+    let range = '';
+    if (state.batch_total) {
+        progress.max = state.batch_total;
+        progress.value = state.scanned;
+        scan = `${state.scanned}／${state.batch_total}`;
+        if (state.batch_start) {
+            const ascending = state.direction === 'oldest';
+            range = `${state.resumed ? '接續' : '本次'}範圍 ${ascending ? state.batch_start : state.batch_end} → ${ascending ? state.batch_end : state.batch_start}`;
+        }
     }
-    if (state.elapsed) lines.push(`已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒`);
+    document.getElementById('scan-count').textContent = scan;
+    document.getElementById('range-count').textContent = range;
+    document.getElementById('local-count').textContent = state.local_count ?? '—';
+    document.getElementById('unchanged-count').textContent = state.skipped ?? 0;
+    document.getElementById('updated-count').textContent = state.updated ?? 0;
+    document.getElementById('saved-count').textContent = state.saved ?? 0;
+    const review = [];
+    if (state.resumed_verified) review.push(`本批先前已核對 ${state.resumed_verified} 篇`);
+    if (state.unresolved) review.push(`文章待查 ${state.unresolved} 筆`);
+    if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
+    document.getElementById('issue-details').hidden = !review.length;
+    document.getElementById('review-count').textContent = ['處理明細', ...review].join(' · ');
+    const issues = document.getElementById('issues');
+    const rows = (state.issues || []).map(issue => {
+        const row = document.createElement('li');
+        const label = [issue.index, issue.aid].filter(value => value != null).join(' / ');
+        row.textContent = label ? `${label}：${issue.message}` : issue.message;
+        return row;
+    });
+    issues.replaceChildren(...rows);
+    issues.hidden = !rows.length;
+    exportProgress.hidden = state.phase !== 'export' || !state.export_total;
+    exportProgress.max = state.export_total || 1;
+    exportProgress.value = state.exported || 0;
+    document.getElementById('export-count').textContent = state.index_path
+        ? `離線頁面已更新，共 ${state.exported} 篇`
+        : state.phase === 'export' || state.export_total
+            ? `已建立 ${state.exported}／${state.export_total} 篇 HTML`
+            : '等待下載結束';
+    document.getElementById('index-path').textContent = !state.index_url && state.folder ? `實際備份位置：${state.folder}` : '';
+    indexLink.hidden = !state.index_url;
+    if (state.index_url) {
+        indexLink.href = state.index_url;
+        indexLink.textContent = state.index_path;
+    }
+    let timing = state.elapsed ? `已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒` : '';
     if (state.seconds_per_article) {
-        const minutes = Math.ceil(state.seconds_per_article * 2218 / 60);
-        lines.push(`本次新增樣本 ${state.timed_samples} 篇，平均 ${state.seconds_per_article} 秒／篇。`);
-        lines.push(`依此速度估算 2,218 篇約 ${Math.floor(minutes / 60)} 小時 ${minutes % 60} 分，不含中斷與匯出。`);
+        timing += ` · 本次 ${state.timed_samples} 篇的平均下載時間 ${state.seconds_per_article} 秒／篇`;
     }
-    status.textContent = lines.join('\n');
+    document.getElementById('timing').textContent = timing;
+    document.getElementById('log-path').textContent = state.log_path ? `診斷紀錄：${state.log_path}` : '';
     start.disabled = exportButton.disabled = state.running;
-    stop.disabled = !state.running;
+    stop.disabled = !state.running || state.phase === 'export';
 }
 setInterval(() => refresh().catch(() => {}), 1000);
 </script></html>

@@ -4,6 +4,7 @@ from hashlib import sha256
 from html import escape
 from itertools import groupby
 import json
+from pathlib import Path
 
 from ansi_style import ANSI_STYLE, METADATA_STYLE, render_metadata, render_run
 
@@ -19,6 +20,8 @@ a { color: #a8d7ff; }
 }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #080c11; padding: 1rem;
       font: 1rem/1.55 Consolas, "Microsoft JhengHei", monospace; }
+pre.frame-view { max-height: calc(var(--frame-rows) * 1lh); padding-block: 0; overflow: auto; white-space: pre; }
+pre.frame-view::after { content: ''; display: block; height: var(--frame-padding); }
 nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 .pagination { align-items: center; gap: .75rem; }
 .pagination button { font: inherit; padding: .25rem .65rem; }
@@ -26,6 +29,8 @@ nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 '''
 
 PAGE_SIZE = 20
+FRAME_ROWS = 22
+HELP = Path(__file__).with_name('help.html')
 
 INDEX_KEYS = '''
 const boards = Array.from(document.querySelectorAll('.board'), section => ({
@@ -33,7 +38,10 @@ const boards = Array.from(document.querySelectorAll('.board'), section => ({
     entries: Array.from(section.querySelectorAll('.entries a')),
     older: section.querySelector('.older'),
     newer: section.querySelector('.newer'),
+    oldest: section.querySelector('.oldest'),
+    latest: section.querySelector('.latest'),
     label: section.querySelector('.page-label'),
+    name: section.dataset.board,
     currentPage: 0,
     position: -1,
 }));
@@ -45,6 +53,8 @@ function showPage(board, page) {
     board.pages[page].hidden = false;
     board.older.disabled = page === 0;
     board.newer.disabled = page === board.pages.length - 1;
+    board.oldest.disabled = page === 0;
+    board.latest.disabled = page === board.pages.length - 1;
     board.label.textContent = `第 ${page + 1}／${board.pages.length} 頁`;
 }
 
@@ -53,6 +63,7 @@ function select(board, index, focus = true) {
         activeBoard.entries[activeBoard.position].removeAttribute('aria-current');
     }
     activeBoard = board;
+    document.getElementById('active-board').textContent = board.name;
     board.position = index;
     const entry = board.entries[index];
     showPage(board, board.pages.indexOf(entry.closest('.entries')));
@@ -74,6 +85,8 @@ for (const board of boards) {
     });
     board.older.onclick = () => turnPage(board, -1);
     board.newer.onclick = () => turnPage(board, 1);
+    board.oldest.onclick = () => select(board, 0);
+    board.latest.onclick = () => select(board, board.entries.length - 1);
     showPage(board, board.pages.length - 1);
 }
 
@@ -97,6 +110,9 @@ document.addEventListener('keydown', event => {
     } else if (event.key === 'PageUp' || event.key === 'PageDown') {
         event.preventDefault();
         turnPage(board, event.key === 'PageUp' ? -1 : 1);
+    } else if (event.key === 'Home' || event.key === 'End') {
+        event.preventDefault();
+        select(board, event.key === 'Home' ? 0 : board.entries.length - 1);
     } else if (event.key === 'ArrowRight') {
         event.preventDefault();
         board.entries[board.position].click();
@@ -105,17 +121,26 @@ document.addEventListener('keydown', event => {
 '''
 
 ARTICLE_KEYS = '''
+const articleText = document.querySelector('pre');
+const frameButton = document.getElementById('frame-view');
+const frameRows = Number(articleText.style.getPropertyValue('--frame-rows'));
+frameButton.addEventListener('click', () => {
+    const enabled = articleText.classList.toggle('frame-view');
+    frameButton.setAttribute('aria-pressed', String(enabled));
+    frameButton.textContent = `${enabled ? '離開 ' : ''}${frameRows} 行視窗`;
+    articleText.scrollTop = 0;
+    document.scrollingElement.scrollTop = 0;
+});
 document.addEventListener('keydown', event => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
         event.preventDefault();
-        const viewport = document.scrollingElement;
+        const viewport = articleText.classList.contains('frame-view') ? articleText : document.scrollingElement;
         const remaining = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
         const pageForward = event.key === 'ArrowRight';
         if (remaining > 1) {
-            const distance = pageForward
-                ? viewport.clientHeight
-                : parseFloat(getComputedStyle(document.querySelector('pre')).lineHeight);
+            const lineHeight = parseFloat(getComputedStyle(articleText).lineHeight);
+            const distance = pageForward ? lineHeight * frameRows : lineHeight;
             viewport.scrollTop += Math.min(distance, remaining);
         } else {
             document.getElementById(pageForward ? 'back' : 'next')?.click();
@@ -147,18 +172,27 @@ def write_page(path, content):
 
 
 def article_body(body, color_lines, *, start_line=0):
-    if not color_lines:
-        return f'<pre>{escape(body)}</pre>'
+    lines = body.split('\n')
+    end = len(lines)
+    while end > start_line and not lines[end - 1].strip(' \t\r\x08'):
+        runs = (color_lines or {}).get(str(end - 1), ())
+        if any(any(token in {'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7'} for token in classes)
+               for _, classes in runs):
+            break
+        end -= 1
+    # Keep a short final frame aligned to the article's page boundary.
+    frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-(end - start_line)) % FRAME_ROWS}lh"'
+    if color_lines is None:
+        return f'<pre{frame_style}>\n' + escape('\n'.join(lines[:end])) + '</pre>'
     rendered = []
-    for index, line in enumerate(body.split('\n')):
-        if index < start_line:
-            continue
+    for index in range(start_line, end):
+        line = lines[index]
         runs = color_lines.get(str(index), [])
         if runs and ''.join(text for text, _ in runs) == line:
             rendered.append(''.join(render_run(text, classes) for text, classes in runs))
         else:
             rendered.append(escape(line))
-    return f'<style>{ANSI_STYLE}</style><pre class="color-reference">\n' + '\n'.join(rendered) + '</pre>'
+    return f'<style>{ANSI_STYLE}</style><pre class="color-reference"{frame_style}>\n' + '\n'.join(rendered) + '</pre>'
 
 
 COLOR_ARTICLE_STYLE = '''
@@ -169,6 +203,24 @@ body.ansi-article { background: #000; margin: 0 auto; padding: 0; }
     box-sizing: border-box; font: 20px/19px "MingLiU", "PMingLiU", "細明體", monospace; }
 .article-top .brand { color: #ff6; }
 .article-top nav { margin-left: auto; gap: .75em; font-size: 14px; }
+'''
+
+INDEX_STYLE = '''
+body:has(.index-top) { margin: 0 auto; padding: 0; background: #000; }
+html:has(.index-top) { background: #000; }
+.index-top { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+    background: #0c0a66; padding: .4rem .65rem; }
+.index-top h1 { color: #ffff66; margin: 0; font: 1.3rem/1.3 "MingLiU", "細明體", monospace; }
+.index-top a { margin-left: auto; font-size: .85rem; }
+.board-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem;
+    padding: .22rem .55rem; border-bottom: 1px solid #4a4a4a; }
+.board-tab { background: #b5b5b5; color: #000; padding: .08rem .55rem; }
+.board-tools .pagination { margin-left: auto; gap: .12rem; }
+.board-tools button { background: #3b3b3b; color: #eee; border: 1px solid #676767; padding: .08rem .45rem; }
+.board-tools button:disabled { background: #1e1e1e; color: #8b8b8b; }
+.board-tools .page-label { padding: 0 .25rem; }
+.board .entries { margin: .15rem 0; }
+.board .entries a { padding: .1rem .65rem; font-size: .92rem; line-height: 1.35; }
 '''
 
 
@@ -183,16 +235,19 @@ def color_article(site, board, title, post, body, nav):
               f'<span>› 看板 {escape(board)}</span>{nav}</header>')
     metadata = render_metadata(post.get('author'), title, post.get('date'), board) if has_terminal_header else ''
     return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
-            + article_body(body, post['ansi_lines'], start_line=4 if has_terminal_header else 0))
+            + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0))
 
 
-def export_html(db, folder):
+def export_html(db, folder, progress=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
     rows = db.execute('''SELECT site, board, aid, title, body, data, source_index FROM articles
                         ORDER BY site, board COLLATE NOCASE, board,
                         source_index IS NOT NULL, source_index ASC, fetched ASC, aid''')
+    total = db.execute('SELECT count(*) FROM articles').fetchone()[0]
     count = 0
+    if progress:
+        progress(count, total)
     sections = []
     for (site, board), group in groupby(rows, key=lambda row: row[:2]):
         items = list(group)
@@ -212,15 +267,18 @@ def export_html(db, folder):
                 links.append(f'<a id="previous" href="{keys[i-1]}.html">上一篇 ↑</a>')
             if i + 1 < len(keys):
                 links.append(f'<a id="next" href="{keys[i+1]}.html">下一篇 ↓</a>')
+            links.append(f'<button id="frame-view" type="button" aria-pressed="false">{FRAME_ROWS} 行視窗</button>')
             nav = '<nav>' + ''.join(links) + '</nav>'
-            colored = bool(post.get('ansi_lines'))
+            colored = bool(post.get('ansi_lines') or post.get('headerless'))
             if colored:
                 article = color_article(site, board, title, post, body, nav)
             else:
                 article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
                            f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
             write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored))
-        count += len(items)
+            count += 1
+            if progress:
+                progress(count, total)
         # Anchor pages at the newest end so the first view shows the latest 20.
         first_size = len(entries) % PAGE_SIZE or PAGE_SIZE
         batches = [entries[:first_size]] + [entries[start:start + PAGE_SIZE]
@@ -229,13 +287,21 @@ def export_html(db, folder):
         for i, batch in enumerate(batches):
             hidden = ' hidden' if i < len(batches) - 1 else ''
             pages.append(f'<ul class="entries"{hidden}>' + ''.join(batch) + '</ul>')
-        pagination = ('<nav class="pagination"><button class="older" type="button">← 較舊 20 篇</button>'
-                      f'<span class="page-label" aria-live="polite">第 {len(batches)}／{len(batches)} 頁</span>'
-                      '<button class="newer" type="button" disabled>較新 20 篇 →</button></nav>')
-        sections.append(f'<section class="board"><h2>{escape(site)} / {escape(board)} ({len(items)})</h2>'
-                        + pagination + ''.join(pages) + '</section>')
-    index = (f'<h1>BBS 離線文章</h1><p>共 {count} 篇。↑／↓ 選取，Enter／→ 開啟，'
-             'Page Up／Page Down 切換較舊／較新的文章。'
-             '閱讀時按 ← 或 Esc 返回。已擷取的 ANSI 配色會隨文章顯示。</p>' + ''.join(sections))
+        pagination = ('<nav class="pagination" aria-label="看板翻頁">'
+                      '<button class="oldest" type="button">最舊</button>'
+                      '<button class="older" type="button">‹ 上頁</button>'
+                      '<button class="newer" type="button" disabled>下頁 ›</button>'
+                      '<button class="latest" type="button" disabled>最新</button>'
+                      f'<span class="page-label meta" aria-live="polite">第 {len(batches)}／{len(batches)} 頁</span></nav>')
+        board_name = escape(f'{site} / {board}', quote=True)
+        sections.append(f'<section class="board" data-board="{board_name}">'
+                        '<div class="board-tools"><strong class="board-tab">看板</strong>'
+                        f'<span class="meta">{board_name} · {len(items)} 篇</span>'
+                        + pagination + '</div>' + ''.join(pages) + '</section>')
+    index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
+             '<h1>BBS 離線文章</h1><span>› <span id="active-board"></span></span>'
+             '<a href="help.html">操作與色彩說明</a></header>'
+             + (''.join(sections) if count else '<p>尚無文章</p>'))
+    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8'))
     write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS))
     return count
