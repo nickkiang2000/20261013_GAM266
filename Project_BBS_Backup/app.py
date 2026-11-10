@@ -1,8 +1,10 @@
 """Local PTT and PTT2 downloader."""
+import errno
 import json
 import logging
 import secrets
 import sqlite3
+import socket
 import threading
 import time
 import re
@@ -14,7 +16,8 @@ from archive import export_html
 from local_state import JobLog, load_preferences, save_preferences
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.3.0'
+APP_VERSION = 'v2.4.0'
+LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
 LOCK = threading.Lock()
@@ -225,6 +228,7 @@ def publish_archive(db, folder):
 
 def export_existing(folder):
     job = None
+    result = 'failed'
     try:
         STATE['folder'] = str(folder)
         if not (folder / 'articles.sqlite3').is_file():
@@ -237,13 +241,14 @@ def export_existing(folder):
             STATE['local_count'] = db.execute('SELECT count(*) FROM articles').fetchone()[0]
             count = publish_archive(db, folder)
         STATE['message'] = '離線內容重整完成。'
+        result = 'done'
         job.event('finish', exported=count)
     except Exception as exc:
         STATE['message'] = f'離線內容重整失敗：{type(exc).__name__}'
         if job:
             job.error('refresh_offline', exc)
     finally:
-        STATE.update(running=False, phase='done')
+        STATE.update(running=False, phase='done', result=result)
 
 
 def complete_capture(post):
@@ -409,7 +414,7 @@ def work(config):
             start, end = bounds if bounds is not None else (1, 0)
             original_end = end
         if start > end:
-            result = 'pending' if resumed else 'done'
+            result = 'pending' if resumed else 'failed'
             job.event('range', newest=newest, direction=direction, resumed=resumed,
                       planned_count=0, expected_count=expected_count, reason='no_range',
                       board_query_seconds=board_query_seconds)
@@ -683,14 +688,35 @@ class Handler(BaseHTTPRequestHandler):
                              batch_total=0, batch_start=None, batch_end=None, direction=None, phase='prepare',
                              exported=0, export_total=0, index_path=None, index_url=None, log_path=None,
                              resumed_verified=0, local_count=None, updated=0, issues=[], folder=str(folder),
-                             unavailable=0, kept_previous=0, result=None)
+                             unavailable=0, kept_previous=0, result=None,
+                             task_id=secrets.token_urlsafe(12),
+                             operation='download' if self.path == '/start' else 'export')
                 STOP.clear()
                 threading.Thread(target=target,args=args,daemon=True).start()
             self.reply(200,json.dumps({'folder': str(folder)}))
         except (ValueError,KeyError,TypeError,sqlite3.Error,OSError): self.reply(400,'{}')
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = not hasattr(socket, 'SO_EXCLUSIVEADDRUSE')
+
+    def server_bind(self):
+        if hasattr(socket, 'SO_EXCLUSIVEADDRUSE'):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def create_server():
+    # Browsers remember notification permission per origin, including the port.
+    try:
+        return LocalHTTPServer(('127.0.0.1', LOCAL_PORT), Handler)
+    except OSError as exc:
+        if exc.errno not in (errno.EADDRINUSE, errno.EACCES) and getattr(exc, 'winerror', None) not in (10048, 10013):
+            raise
+        return LocalHTTPServer(('127.0.0.1', 0), Handler)
+
+
 if __name__ == '__main__':
-    server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
+    server=create_server()
     url=f'http://127.0.0.1:{server.server_port}'
     print('PTT / PTT2 downloader:',url,flush=True)
     webbrowser.open(url)

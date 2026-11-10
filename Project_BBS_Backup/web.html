@@ -25,6 +25,9 @@ button:disabled { cursor: default; }
 #run:disabled { opacity: .5; }
 #stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.download-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.download-action { min-width: 0; border: 1px solid #343952; padding: 7px; }
+.download-action p { margin-top: 5px; }
 .hint { margin: 0; color: #aab0c4; font-size: .84rem; }
 .status-header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
                  padding: 4px 8px; background: #000088; }
@@ -47,6 +50,11 @@ dialog { color: inherit; max-width: min(430px, 92vw); }
 dialog::backdrop { background: #000a; }
 .heading-actions { display: flex; align-items: center; gap: .7rem; }
 .version { font-size: .8rem; font-variant-numeric: tabular-nums; }
+.notice { position: fixed; inset: auto 12px 12px auto; z-index: 2; width: min(24rem, calc(100% - 24px));
+          background: #171d2f; color: #eee; border: 1px solid #59658b; border-radius: 5px; padding: 10px 12px;
+          box-shadow: 0 4px 18px #0007; }
+.notice button { float: right; margin-left: 8px; }
+.notice p { margin: 4px 0 0; overflow-wrap: anywhere; white-space: pre-line; }
 html[data-theme="light"] body { color-scheme: light; background: #f1f4f7; color: #172b3d; }
 html[data-theme="light"] .heading, html[data-theme="light"] .status-header { background: #e7edf4; }
 html[data-theme="light"] h1, html[data-theme="light"] a { color: #215987; }
@@ -57,6 +65,8 @@ html[data-theme="light"] :is(.hint,details) { color: #485c6f; }
 html[data-theme="light"] .pipeline li { background: #edf3f8; }
 html[data-theme="light"] .pipeline strong { color: #16446d; }
 html[data-theme="light"] .issues { color: #805100; }
+html[data-theme="light"] .download-action, html[data-theme="light"] .notice { border-color: #98a9bc; }
+html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 @media (max-width: 760px) {
     body { padding: 10px; }
     main { grid-template-columns: minmax(0, 1fr); gap: 8px; }
@@ -65,6 +75,7 @@ html[data-theme="light"] .issues { color: #805100; }
 }
 @media (max-width: 430px) {
     label { grid-column: span 3; }
+    .download-actions { grid-template-columns: 1fr; }
 }
 </style>
 <header class="heading"><h1>PTT／PTT2 文章備份</h1><div class="heading-actions">
@@ -81,12 +92,20 @@ html[data-theme="light"] .issues { color: #805100; }
 <label class="half">掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
 <label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
 <p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
-<div class="actions wide">
-    <button id="run">登入並重定義下載</button>
-    <button type="button" id="resume" disabled>登入續傳</button>
-    <button type="button" id="export">離線內容重整</button>
+<div class="download-actions wide">
+    <div class="download-action">
+        <button id="run" aria-describedby="new-summary">登入並重定義下載</button>
+        <p id="new-summary" class="hint destination"></p>
+    </div>
+    <div class="download-action">
+        <button type="button" id="resume" aria-describedby="resume-summary" disabled>登入續傳</button>
+        <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
+    </div>
 </div>
-<div class="hint wide destination"><div id="new-summary"></div><div id="resume-summary">選擇看板與備份目錄後查詢續傳。</div></div>
+<div class="actions wide">
+    <button type="button" id="export">離線內容重整</button>
+    <button type="button" id="desktop-toggle" aria-pressed="false">啟用桌面通知</button>
+</div>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
     <div class="advanced-fields">
         <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
@@ -115,6 +134,10 @@ html[data-theme="light"] .issues { color: #805100; }
 <p class="destination"><a id="index-link" target="_blank" rel="noopener" hidden></a></p></div>
 <p id="timing" class="hint"></p><p id="log-path" class="hint destination"></p></section>
 </main>
+<aside id="notice" class="notice" hidden>
+    <button type="button" id="close-notice" aria-label="關閉提醒">×</button>
+    <div role="status"><strong id="notice-title"></strong><p id="notice-message"></p></div>
+</aside>
 <script>
 const form = document.getElementById('form');
 const status = document.getElementById('status');
@@ -128,6 +151,8 @@ const destination = document.getElementById('destination');
 const indexLink = document.getElementById('index-link');
 const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
 const themeToggle = document.getElementById('theme-toggle');
+const desktopToggle = document.getElementById('desktop-toggle');
+const notice = document.getElementById('notice');
 const advanced = document.getElementById('advanced');
 let previousSuffix = '';
 let preferenceTimer;
@@ -138,12 +163,95 @@ let pending = null;
 let pendingTimer;
 let pendingRequest = 0;
 let issueSignature = '';
+let lastNoticeTask = '';
+let refreshRequest = 0;
+let refreshApplied = 0;
+let connectionLost = false;
+
+function getSetting(storage, key) {
+    try { return window[storage].getItem(key); } catch { return null; }
+}
+
+function setSetting(storage, key, value) {
+    try { window[storage].setItem(key, value); } catch {}
+}
+
+let desktopEnabled = getSetting('localStorage', 'bbs-desktop-enabled') === 'yes';
 
 function setText(element, value) {
     const target = typeof element === 'string' ? document.getElementById(element) : element;
     const text = String(value);
     if (target.textContent !== text) target.textContent = text;
 }
+
+function showNotice(title, message, id) {
+    setText('notice-title', title);
+    setText('notice-message', message);
+    notice.hidden = false;
+    if (!id || !desktopEnabled || !window.Notification || Notification.permission !== 'granted') return;
+    if (getSetting('localStorage', 'bbs-desktop-last') === id) return;
+    try {
+        const notification = new Notification(title, {body: message, tag: `bbs-${id}`});
+        notification.onclick = () => { window.focus(); notification.close(); };
+        setSetting('localStorage', 'bbs-desktop-last', id);
+    } catch {
+        // The page notice also covers browsers that cannot show system alerts.
+    }
+}
+
+function showResult(state) {
+    if (state.running || !state.task_id || !state.result || state.task_id === lastNoticeTask) return;
+    lastNoticeTask = state.task_id;
+    if (getSetting('sessionStorage', 'bbs-last-result') === state.task_id) return;
+    setSetting('sessionStorage', 'bbs-last-result', state.task_id);
+    const titles = state.operation === 'export'
+        ? {done: '離線內容重整完成', failed: '離線內容重整失敗'}
+        : {done: '下載完成', stopped: '下載已中止', disconnected: '連線中斷',
+            pending: '有項目待處理', failed: '下載失敗'};
+    const summary = [];
+    if (state.batch_total) summary.push(`網站掃描 ${state.scanned}／${state.batch_total}`);
+    if (state.updated) summary.push(`已更新 ${state.updated} 篇`);
+    if (state.ansi_review) summary.push(`待核色 ${state.ansi_review} 篇`);
+    if (state.unresolved) summary.push(`待查 ${state.unresolved} 筆`);
+    if (state.unavailable) summary.push(`刪除或鎖定 ${state.unavailable} 筆`);
+    if (state.index_path) summary.push(`離線 HTML ${state.exported} 篇`);
+    showNotice(titles[state.result] || '備份狀態更新',
+        [state.message, summary.join(' · ')].filter(Boolean).join('\n'), state.task_id);
+}
+
+function updateDesktopToggle() {
+    const supported = Boolean(window.Notification) && window.isSecureContext;
+    const active = supported && desktopEnabled && Notification.permission === 'granted';
+    desktopToggle.disabled = !supported;
+    desktopToggle.setAttribute('aria-pressed', String(active));
+    setText(desktopToggle, !supported ? '此瀏覽器無法發送桌面通知'
+        : active ? '停用桌面通知' : '啟用桌面通知');
+}
+
+desktopToggle.onclick = async () => {
+    if (desktopToggle.getAttribute('aria-pressed') === 'true') {
+        desktopEnabled = false;
+        setSetting('localStorage', 'bbs-desktop-enabled', 'no');
+        updateDesktopToggle();
+        return;
+    }
+    try {
+        if (await Notification.requestPermission() !== 'granted') {
+            showNotice('桌面通知未啟用', '可在瀏覽器的網站權限允許通知。頁內提醒會繼續顯示。');
+            return;
+        }
+        desktopEnabled = true;
+        setSetting('localStorage', 'bbs-desktop-enabled', 'yes');
+        showNotice('桌面通知已啟用', '下載完成、連線中斷或有項目待處理時會提醒。');
+    } catch {
+        showNotice('桌面通知未啟用', '瀏覽器目前無法取得通知權限。');
+    } finally {
+        updateDesktopToggle();
+    }
+};
+document.getElementById('close-notice').onclick = () => { notice.hidden = true; };
+window.addEventListener('focus', updateDesktopToggle);
+updateDesktopToggle();
 
 function showAdvancedNote() {
     const {aid, start, direction, site, board, count, folder} = form.elements;
@@ -278,7 +386,8 @@ async function send(path, data) {
         });
         if (!response.ok) {
             const error = await response.json();
-            alert(error.no_pending ? '找不到未完成批次。'
+            showNotice('無法啟動操作', error.no_pending ? '找不到未完成批次。'
+                : response.status === 403 ? '本機程式可能已重新啟動，請重新整理頁面。'
                 : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
             checkPending();
         } else if (path !== '/stop') {
@@ -288,9 +397,9 @@ async function send(path, data) {
             checkPending();
             saveForm();
         }
-        await refresh();
+        await pollStatus();
     } catch {
-        status.textContent = '無法連線到本機程式。請確認啟動視窗仍開著。';
+        showNotice('無法連線到本機程式', '請確認啟動視窗仍開著。');
     }
 }
 
@@ -322,16 +431,24 @@ exportButton.onclick = () => {
 stop.onclick = () => send('/stop', {});
 
 async function refresh() {
-    const state = await (await fetch('/status')).json();
-    const finished = running && !state.running;
+    const request = ++refreshRequest;
+    const response = await fetch('/status');
+    if (!response.ok) throw Error('status');
+    const state = await response.json();
+    if (request < refreshApplied) return;
+    refreshApplied = request;
+    connectionLost = false;
+    const finished = !state.running && (running || (state.result && state.task_id !== lastNoticeTask));
     running = state.running;
     if (finished) checkPending();
+    showResult(state);
     start.disabled = exportButton.disabled = running;
     resume.disabled = running || !pending;
-    stop.disabled = !running || state.phase === 'export';
-    stop.dataset.result = state.result || '';
+    stop.disabled = !running || state.phase === 'export' || state.operation === 'export';
+    const downloadResult = state.operation === 'download' ? state.result : null;
+    stop.dataset.result = downloadResult || '';
     setText(stop, {done: '完成', stopped: '中止', disconnected: '連線中斷',
-        failed: '失敗', pending: '待續傳'}[state.result] || '停止');
+        failed: '失敗', pending: '待續傳'}[downloadResult] || '停止');
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.containsNode(status.closest('section'), true)) return;
     setText(status, state.message);
@@ -397,6 +514,16 @@ async function refresh() {
     setText('timing', timing);
     setText('log-path', state.log_path ? `診斷紀錄：${state.log_path}` : '');
 }
-refresh().catch(() => {});
-setInterval(() => refresh().catch(() => {}), 1000);
+async function pollStatus() {
+    try {
+        await refresh();
+    } catch {
+        if (!running || connectionLost) return;
+        connectionLost = true;
+        showNotice('無法連線到本機程式', '暫時無法取得下載狀態，請確認啟動視窗仍開著。',
+            `local-connection-${Date.now()}`);
+    }
+}
+pollStatus();
+setInterval(pollStatus, 1000);
 </script></html>
