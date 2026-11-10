@@ -106,6 +106,7 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     <button type="button" id="export">離線內容重整</button>
     <button type="button" id="desktop-toggle" aria-pressed="false">啟用桌面通知</button>
 </div>
+<p id="rate-status" class="hint wide" hidden></p>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
     <div class="advanced-fields">
         <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
@@ -167,6 +168,27 @@ let lastNoticeTask = '';
 let refreshRequest = 0;
 let refreshApplied = 0;
 let connectionLost = false;
+let rateLimits = {};
+let lastWaitNotice = '';
+
+function selectedRateLimit() {
+    return rateLimits[form.elements.site.value];
+}
+
+function updateDownloadButtons() {
+    const limit = selectedRateLimit();
+    start.disabled = running || Boolean(limit);
+    resume.disabled = running || !pending || Boolean(limit);
+    exportButton.disabled = running;
+    const status = document.getElementById('rate-status');
+    status.hidden = !limit;
+    if (limit) {
+        const until = new Date(limit.until).toLocaleString('zh-TW', {
+            timeZone: 'Asia/Taipei', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
+        });
+        setText(status, `站方限速。最早可在 ${until} 後再確認。`);
+    }
+}
 
 function getSetting(storage, key) {
     try { return window[storage].getItem(key); } catch { return null; }
@@ -207,6 +229,7 @@ function showResult(state) {
     const titles = state.operation === 'export'
         ? {done: '離線內容重整完成', failed: '離線內容重整失敗'}
         : {done: '下載完成', stopped: '下載已中止', disconnected: '連線中斷',
+            rate_limited: '站方限速',
             pending: '有項目待處理', failed: '下載失敗'};
     const summary = [];
     if (state.batch_total) summary.push(`網站掃描 ${state.scanned}／${state.batch_total}`);
@@ -280,7 +303,7 @@ function checkPending() {
     clearTimeout(pendingTimer);
     const request = ++pendingRequest;
     pending = null;
-    resume.disabled = true;
+    updateDownloadButtons();
     const {site, board, folder} = form.elements;
     if (!board.value || !board.checkValidity() || !folder.value) {
         setText('resume-summary', '選擇看板與備份目錄後查詢續傳。');
@@ -304,7 +327,7 @@ function checkPending() {
             } else {
                 setText('resume-summary', '這個看板與目錄沒有未完成批次。');
             }
-            resume.disabled = running || !pending;
+            updateDownloadButtons();
         } catch {
             if (request === pendingRequest) setText('resume-summary', '無法查詢續傳，請確認備份目錄。');
         }
@@ -387,6 +410,7 @@ async function send(path, data) {
         if (!response.ok) {
             const error = await response.json();
             showNotice('無法啟動操作', error.no_pending ? '找不到未完成批次。'
+                : error.rate_limit ? '站方限速仍在生效，請等到頁面顯示的時間後再續傳。'
                 : response.status === 403 ? '本機程式可能已重新啟動，請重新整理頁面。'
                 : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
             checkPending();
@@ -440,15 +464,22 @@ async function refresh() {
     connectionLost = false;
     const finished = !state.running && (running || (state.result && state.task_id !== lastNoticeTask));
     running = state.running;
+    rateLimits = state.rate_limits || {};
+    if (running && state.wait_until) {
+        const waitId = `${state.task_id}-wait-${state.wait_until}`;
+        if (waitId !== lastWaitNotice) {
+            lastWaitNotice = waitId;
+            showNotice(state.wait_kind === 'rate_limit' ? '站方限速' : '看板暫時關閉', state.message, waitId);
+        }
+    }
     if (finished) checkPending();
     showResult(state);
-    start.disabled = exportButton.disabled = running;
-    resume.disabled = running || !pending;
+    updateDownloadButtons();
     stop.disabled = !running || state.phase === 'export' || state.operation === 'export';
     const downloadResult = state.operation === 'download' ? state.result : null;
     stop.dataset.result = downloadResult || '';
     setText(stop, {done: '完成', stopped: '中止', disconnected: '連線中斷',
-        failed: '失敗', pending: '待續傳'}[downloadResult] || '停止');
+        failed: '失敗', pending: '待續傳', rate_limited: '站方限速'}[downloadResult] || '停止');
     const selection = window.getSelection();
     if (selection && !selection.isCollapsed && selection.containsNode(status.closest('section'), true)) return;
     setText(status, state.message);

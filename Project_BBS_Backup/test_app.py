@@ -11,6 +11,7 @@ class StorageTests(unittest.TestCase):
     def setUp(self):
         temporary = self.enterContext(tempfile.TemporaryDirectory())
         self.enterContext(patch('local_state.LOG_DIRECTORY', Path(temporary) / 'log'))
+        self.enterContext(patch.object(app, 'BoardSession', side_effect=lambda api: api))
 
     def test_batch_bounds_start_at_requested_article_in_either_direction(self):
         for newest, start, count, direction, expected in [
@@ -26,6 +27,24 @@ class StorageTests(unittest.TestCase):
         ]:
             with self.subTest(newest=newest, start=start, count=count, direction=direction):
                 self.assertEqual(app.batch_bounds(newest, start, count, direction), expected)
+
+    def test_board_screen_diagnostic_distinguishes_headers_and_access_without_screen_text(self):
+        from types import SimpleNamespace
+
+        core = SimpleNamespace(last_timeout_was_silent=False)
+        api = SimpleNamespace(connect_core=core, cursor='>')
+        for screen, kind, flexible in [
+            ('看板 YP91-304\n編號  日  期 作 者\n> private-title', 'article_list', True),
+            ('★ 您沒有權限進入此看板\nprivate-notice', 'access_notice', False),
+            ('查無此看板', 'missing_board_notice', False),
+        ]:
+            with self.subTest(kind=kind):
+                core.get_screen_queue = lambda: [screen]
+                diagnostic = app.board_screen_diagnostic(api)
+                self.assertEqual(diagnostic['screen_kind'], kind)
+                self.assertEqual(diagnostic['flexible_board_header'], flexible)
+                self.assertFalse(diagnostic['strict_board_header'])
+                self.assertNotIn('private-', json.dumps(diagnostic))
 
     def test_trailing_terminal_padding_does_not_extend_article(self):
         from archive import article_body
@@ -399,5 +418,247 @@ class StorageTests(unittest.TestCase):
             capture.assert_called_once_with(api, 'Test', 'sample')
             self.assertEqual(app.STATE['ansi_colored'], 1)
             self.assertEqual(len(list((folder / 'articles').glob('*.html'))), 1)
+
+    def test_automatic_rest_can_stop_and_resume_past_a_persistent_gap(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app.STOP, 'wait') as wait, patch.object(app, 'STATE', {}), \
+                patch('ansi_capture.read_colored_post') as capture:
+            api = factory.return_value
+            api.get_newest_index.return_value = 52
+            api.get_post.side_effect = lambda board, index, query: {'aid': f'article{index}' if index != 1 else None}
+            capture.side_effect = lambda api, board, aid: {
+                'aid': aid, 'full_content': '正文', 'pass_format_check': True,
+                'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0},
+            }
+            config = dict(site='PTT', board='Test', start=1, count=52, direction='oldest',
+                          folder=d, user='test', password='dummy')
+            for stop_at_rest, expected, rests in [(True, ('stopped', 24), 1), (False, ('pending', 51), 1)]:
+                app.STATE.clear()
+                app.STATE.update(saved=0, skipped=0, unresolved=0, timed_samples=0)
+                wait.side_effect = lambda seconds: stop_at_rest and seconds == app.REST_SECONDS
+                app.work(config.copy())
+                self.assertEqual((app.STATE['result'], app.STATE['exported']), expected)
+                rows = [json.loads(line) for line in
+                        Path(app.STATE['log_path']).read_text(encoding='utf-8').splitlines()]
+                self.assertEqual(rows[-1]['rest_count'], rests)
+                self.assertEqual(sum(row['event'] == 'pacing_rest' for row in rows), rests)
+            self.assertEqual(capture.call_count, 51)
+            self.assertEqual(api.login.call_count, 2)
+
+    def test_rate_limit_preserves_batch_and_closes_without_logout_keys(self):
+        from datetime import datetime, timedelta
+        import PyPtt
+        from board_session import StationRateLimit, TAIPEI
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0)), \
+                patch.object(app, 'RATE_LIMITS', {}), patch('local_state.RATE_LIMIT_FILE', Path(d) / 'limits.json'):
+            api = factory.return_value
+            api.get_newest_index.return_value = 2
+            deadline = (datetime.now(TAIPEI) + timedelta(hours=1)).isoformat(timespec='seconds')
+            limit = {'until': deadline, 'station_board_entries': 2666}
+            api.get_post.side_effect = StationRateLimit(limit)
+            app.work(dict(site='PTT', board='Test', start=0, count=2, direction='newest',
+                          folder=d, user='test', password='dummy'))
+            self.assertEqual(app.STATE['result'], 'rate_limited')
+            self.assertEqual(app.find_pending_range(Path(d), 'PTT', 'Test'), (1, 2, 'newest'))
+            self.assertEqual(app.active_rate_limits()['PTT'], limit)
+            self.assertEqual(json.loads((Path(d) / 'limits.json').read_text()), {'PTT': limit})
+            api.logout.assert_not_called()
+            api.connect_core.close.assert_called_once()
+
+    def test_batch_continues_after_a_safely_recovered_stall(self):
+        import PyPtt
+        from board_session import ArticleStalled
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app.STOP, 'wait', return_value=False), \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0, timed_samples=0)), \
+                patch('ansi_capture.read_colored_post') as capture:
+            api = factory.return_value
+            api.get_newest_index.return_value = 3
+            api.get_post.side_effect = lambda board, index, query: {'aid': f'article{index}', 'index': index}
+
+            def read(api, board, aid):
+                if aid == 'article2':
+                    exc = ArticleStalled(103)
+                    exc.capture_diagnostics = {'reached_end': False}
+                    raise exc
+                return {'aid': aid, 'full_content': '正文', 'pass_format_check': True,
+                        'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0}}
+
+            capture.side_effect = read
+            app.work(dict(site='PTT', board='Test', start=1, count=3, direction='oldest',
+                          folder=d, user='test', password='dummy'))
+            self.assertEqual((app.STATE['result'], app.STATE['scanned'], app.STATE['exported']), ('pending', 3, 2))
+            self.assertEqual(app.find_pending_range(Path(d), 'PTT', 'Test'), (1, 3, 'oldest'))
+            rows = [json.loads(line) for line in Path(app.STATE['log_path']).read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(next(row['stalled_line'] for row in rows if row.get('outcome') == 'unreadable'), 103)
+            api.login.assert_called_once()
+
+class BoardSessionTests(unittest.TestCase):
+    def test_station_wait_retries_once_with_no_relogin(self):
+        from datetime import datetime, timedelta
+        from unittest.mock import Mock
+        from board_session import StationRateLimit, TAIPEI
+
+        until = datetime.now(TAIPEI) + timedelta(minutes=5)
+        notice = StationRateLimit({'until': until.isoformat()})
+        session = Mock(notice=notice)
+        session.recover_notice.return_value = True
+        action = Mock(side_effect=notice)
+        retry = Mock(return_value='same connection')
+        log = Mock()
+        with patch.object(app, 'STATE', {'phase': 'download'}), patch.object(app, 'RATE_LIMITS', {}), \
+                patch.object(app, 'save_rate_limits'), patch.object(app, 'load_rate_limits', return_value={}):
+            self.assertEqual(app.station_action(session, 'Test', 'PTT', log, action, retry=retry),
+                             'same connection')
+            self.assertEqual(app.STATE['phase'], 'download')
+            self.assertIsNone(app.STATE['wait_until'])
+        session.recover_notice.assert_called_once_with('Test', until, app.STOP)
+        action.assert_called_once()
+        retry.assert_called_once()
+
+    def test_recover_notice_waits_on_same_socket_before_acknowledging(self):
+        import asyncio
+        import threading
+        from datetime import datetime, timedelta
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from board_session import BoardSession, BoardTemporarilyClosed, TAIPEI
+        from PyPtt import command
+
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+        events = []
+        listing = '【看板】 [i]看板設定\n> 9 test\n文章列表 (b)進板'
+
+        async def recv():
+            events.append('receive')
+            await asyncio.sleep(5)
+
+        def send(keys, targets, **kwargs):
+            events.append(keys)
+            return 0
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=send, _recv=recv,
+                               _get_event_loop=lambda: loop, get_screen_queue=lambda: [listing])
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+        with self.assertRaises(BoardTemporarilyClosed):
+            core._decode_screen('看板暫時關閉\n請按任意鍵繼續')
+        until = datetime.now(TAIPEI) - timedelta(seconds=1)
+        self.assertTrue(session.recover_notice('Test', until, threading.Event()))
+        self.assertEqual(events, ['receive', command.enter])
+        self.assertEqual((session.board, session.view), ('Test', 'list'))
+
+    def test_recovering_known_stall_sends_one_left_and_requires_list(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from board_session import ArticleStalled, BoardSession
+        from PyPtt import command, exceptions
+
+        frames = ['瀏覽 第 1/2 頁 目前顯示: 第 5~103 行']
+        keys = []
+
+        def send(message, targets):
+            keys.append(message)
+            frames[-1] = '【看板】 [i]看板設定\n> 9 test\n文章列表 (b)進板'
+            return 0
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=send, get_screen_queue=lambda: frames)
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+        with self.assertRaises(ArticleStalled) as caught:
+            session._recover_stalled_article(exceptions.UnknownError('get_content: stuck at line 103'))
+        self.assertEqual(caught.exception.line, 103)
+        self.assertEqual(keys, [command.left])
+        self.assertEqual(session.view, 'list')
+
+    def test_reads_adjacent_articles_with_one_board_entry_and_no_aid_search(self):
+        from types import SimpleNamespace
+        import PyPtt
+        from PyPtt import command, connect_core, screens
+        from board_session import BoardSession
+
+        class Terminal:
+            last_timeout_was_silent = False
+
+            def __init__(self):
+                self.keys = []
+                self.index = 12
+                self.screen = ''
+
+            def send(self, keys, targets, **kwargs):
+                self.keys.append(keys)
+                if keys == command.up:
+                    self.index -= 1
+                if keys == 'Q':
+                    self.screen = '文章代碼(AID):\n文章網址:\n請按任意鍵繼續'
+                elif keys == command.enter * 2:
+                    self.screen = '瀏覽 第 1/1 頁 (100%) 目前顯示: 第 1~1 行'
+                else:
+                    self.screen = f'【看板】 [i]看板設定\n> {self.index} test\n文章列表 (b)進板'
+                self._decode_screen(self.screen)
+                return next((i for i, target in enumerate(targets) if target.is_match(self.screen, '>')), -1)
+
+            def _decode_screen(self, screen):
+                return screen
+
+            def get_screen_queue(self):
+                return [self.screen]
+
+        api = PyPtt.API(check_update=False, screen_height=100)
+        api.cursor = '>'
+        api.connect_core = core = Terminal()
+        session = BoardSession(api)
+
+        def selected(*args):
+            return SimpleNamespace(index=core.index, aid=f'item{core.index}', author='tester',
+                                   title='article', url=None, money=0, list_date=None,
+                                   push_number=None, lock_post=False)
+
+        def content(reader):
+            reader.connect_core.send(command.enter * 2, [connect_core.TargetUnit(screens.Target.PostEnd)])
+            reader.Unconfirmed = False
+            return '正文', False
+
+        with patch('board_session.MIN_COMMAND_INTERVAL', 0), \
+                patch('board_session._api_get_newest_index._get_newest_index', return_value=12), \
+                patch('board_session._api_util.parse_query_post', side_effect=selected), \
+                patch('board_session._api_util.get_content', side_effect=content):
+            self.assertEqual(session.get_newest_index(None, board='Test'), 12)
+            for index in (12, 11):
+                post = session.get_post('Test', index=index, query=True)
+                self.assertEqual(post['aid'], f'item{index}')
+                self.assertEqual(session.get_post('Test', aid=post['aid'])['full_content'], '正文')
+        self.assertEqual(session.operations['board_entries'], 1)
+        self.assertEqual(session.operations['board_searches'], 1)
+        self.assertEqual(session.operations['aid_searches'], 0)
+        self.assertEqual(session.operations['article_opens'], 2)
+        self.assertEqual(core.keys[1:], ['$', 'Q', command.enter * 2, command.left, command.up,
+                                        'Q', command.enter * 2])
+
+    def test_rate_limit_is_intercepted_before_automatic_response(self):
+        from datetime import datetime
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from board_session import BoardSession, StationRateLimit, TAIPEI, detect_rate_limit
+
+        screen = ('使用限制   限速中\n切換看板、搜尋和閱讀文章暫時限速中，預計 11/10 17:03 恢復\n'
+                  '紀錄：1.0小時內進入看板2666次、搜尋337次\n請按任意鍵繼續')
+        limit = detect_rate_limit(screen, datetime(2026, 11, 10, 16, 30, tzinfo=TAIPEI))
+        self.assertEqual(limit['until'], '2026-11-10T17:04:00+08:00')
+        self.assertEqual((limit['station_board_entries'], limit['station_searches']), (2666, 337))
+        decode, send = Mock(), Mock()
+        core = SimpleNamespace(_decode_screen=decode, send=send)
+        BoardSession(SimpleNamespace(connect_core=core))
+        with self.assertRaises(StationRateLimit):
+            core._decode_screen(screen)
+        with self.assertRaises(StationRateLimit):
+            core.send(' ', [])
+        decode.assert_not_called()
+        send.assert_not_called()
+
 
 if __name__=='__main__': unittest.main()

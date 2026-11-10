@@ -10,19 +10,23 @@ import time
 import re
 import webbrowser
 from contextlib import closing
+from datetime import datetime, timedelta
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from archive import export_html
-from local_state import JobLog, load_preferences, save_preferences
+from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, MIN_COMMAND_INTERVAL,
+                           StationRateLimit, TAIPEI, detect_rate_limit)
+from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.4.0'
+APP_VERSION = 'v2.7.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
 LOCK = threading.Lock()
 STOP = threading.Event()
 READERS = {}
+RATE_LIMITS = load_rate_limits()
 logging.disable(logging.CRITICAL)
 
 
@@ -33,12 +37,19 @@ SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2'}
 DIRECTIONS = {'newest': '新到舊', 'oldest': '舊到新'}
 BEFORE_READ_SECONDS = 2
 BETWEEN_ITEMS_SECONDS = 3
+ITEMS_BEFORE_REST = 25
+REST_SECONDS = 20
+BOARD_RECHECK_SECONDS = 180
 # Increment when the stored capture format changes. HTML-only changes can be re-exported.
 CAPTURE_VERSION = 1
 
 
 class ArticleReadError(ValueError):
     """An individual article could not be saved safely."""
+
+
+class DownloadStopped(Exception):
+    """The user stopped an in-progress station wait."""
 
 
 def database(folder):
@@ -72,6 +83,9 @@ def database(folder):
                 db.execute("ALTER TABLE batch_ranges ADD COLUMN direction TEXT NOT NULL DEFAULT 'newest'")
             db.execute('''CREATE TABLE IF NOT EXISTS batch_verified(
                           site TEXT, board TEXT, aid TEXT, PRIMARY KEY(site,board,aid))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS batch_unavailable(
+                          site TEXT, board TEXT, idx INTEGER, aid TEXT, status TEXT,
+                          PRIMARY KEY(site,board,idx))''')
             db.execute('''CREATE TABLE IF NOT EXISTS unavailable_articles(
                           site TEXT, board TEXT, idx INTEGER, aid TEXT, status TEXT,
                           PRIMARY KEY(site,board,idx))''')
@@ -148,6 +162,33 @@ def batch_bounds(newest, requested_start, count, direction):
     return first, min(newest, first + count - 1)
 
 
+def active_rate_limits(*, from_disk=False):
+    now = datetime.now().astimezone()
+    active = {}
+    for limits in (RATE_LIMITS, load_rate_limits() if from_disk else {}):
+        for site, limit in limits.items():
+            if site not in SITES:
+                continue
+            try:
+                deadline = datetime.fromisoformat(limit['until'])
+                if deadline > now and (site not in active or deadline > datetime.fromisoformat(active[site]['until'])):
+                    active[site] = limit
+            except (TypeError, KeyError, ValueError):
+                continue
+    return active
+
+
+def resume_checkpoints(db, site, board):
+    rows = db.execute('''SELECT a.source_index, min(a.aid) FROM articles a
+                         JOIN batch_verified b USING(site,board,aid)
+                         WHERE a.site=? AND a.board=?
+                         GROUP BY a.source_index HAVING count(*)=1''', (site, board))
+    checkpoints = {index: (aid, 'saved') for index, aid in rows if index is not None}
+    skipped = db.execute('SELECT idx,aid,status FROM batch_unavailable WHERE site=? AND board=?', (site, board))
+    checkpoints.update({index: (aid, status) for index, aid, status in skipped})
+    return checkpoints
+
+
 def confirmed_deleted(api, query, index):
     # The SDK can report DELETED on a timeout with a stale listing. Require the
     # actual selected row, index and explicit BBS deletion marker.
@@ -161,11 +202,44 @@ def confirmed_deleted(api, query, index):
                for row in queue[-1].splitlines())
 
 
-def note_unavailable(db, site, board, index, aid, status):
+def board_screen_diagnostic(api):
+    """Classify the last screen without persisting any terminal text."""
+    from PyPtt import _api_util, screens
+
+    core = api.connect_core
+    queue = core.get_screen_queue()
+    screen = queue[-1] if queue else ''
+    rows = screen.splitlines()
+    strict_header = any('作  者' in row and '日 期' in row for row in rows)
+    flexible_header = any(re.search(r'作\s*者', row) and re.search(r'日\s*期', row)
+                          for row in rows)
+    if screens.in_board_setting(screen):
+        kind = 'board_settings'
+    elif _api_util.is_article_list(api, screen) or flexible_header:
+        kind = 'article_list'
+    elif any(re.match(r'^\s*[★※＊!！]*\s*(?:您|你)?(?:沒有權限|無權|不允許|無法)進入(?:此|本|該|這個)?看板', row)
+             for row in rows):
+        kind = 'access_notice'
+    elif any(re.match(r'^\s*[★※＊!！]*\s*(?:查無此看板|無此看板|找不到(?:此|該)看板|看板不存在)', row)
+             for row in rows):
+        kind = 'missing_board_notice'
+    elif any('主功能表' in row for row in rows[:5]):
+        kind = 'main_menu'
+    else:
+        kind = 'unrecognized' if rows else 'empty'
+    return {'screen_kind': kind, 'screen_rows': len(rows),
+            'strict_board_header': strict_header, 'flexible_board_header': flexible_header,
+            'silent_timeout': getattr(core, 'last_timeout_was_silent', False) is True}
+
+
+def note_unavailable(db, site, board, index, aid, status, *, checkpoint=False):
     with db:
         if index is not None:
             db.execute('INSERT OR REPLACE INTO unavailable_articles VALUES(?,?,?,?,?)',
                        (site, board, index, aid, status))
+            if checkpoint:
+                db.execute('INSERT OR REPLACE INTO batch_unavailable VALUES(?,?,?,?,?)',
+                           (site, board, index, aid, status))
     STATE['unavailable'] = STATE.get('unavailable', 0) + 1
     show_issue(index, aid, '（被刪除）' if status == 'deleted' else '（已鎖定）')
 
@@ -271,7 +345,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     if source_index is None and type(post.get('index')) is int and post['index'] > 0:
         source_index = post['index']
     if post.get('is_lock'):
-        note_unavailable(db, site, board, source_index, aid, 'locked')
+        note_unavailable(db, site, board, source_index, aid, 'locked', checkpoint=checkpoint)
         return 'locked', False
     if not post.get('full_content'):
         raise ArticleReadError('終端未回傳可保存的正文，未建立本次文章 HTML')
@@ -316,6 +390,8 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
                        (site, board, aid, source_index, matched, total))
         if checkpoint:
             db.execute('INSERT OR IGNORE INTO batch_verified VALUES(?,?,?)', (site, board, aid))
+            db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=? AND idx=?',
+                       (site, board, source_index))
     if unchanged:
         STATE['skipped'] += 1
         return 'unchanged', verified
@@ -331,8 +407,47 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     return 'saved', verified
 
 
+def record_rate_limit(site, limit, job):
+    RATE_LIMITS[site] = limit
+    job.event('rate_limit', **limit)
+    try:
+        save_rate_limits(active_rate_limits(from_disk=True))
+    except OSError as exc:
+        job.error('save_rate_limit', exc)
+
+
+def station_action(session, board, site, job, action, *, retry=None):
+    try:
+        return action()
+    except (StationRateLimit, BoardTemporarilyClosed) as exc:
+        # Only wait when the terminal itself recognized the prompt and saved its state.
+        if session.notice is not exc:
+            raise
+        limited = isinstance(exc, StationRateLimit)
+        if limited:
+            record_rate_limit(site, exc.details, job)
+            until = datetime.fromisoformat(exc.details['until'])
+        else:
+            until = datetime.now(TAIPEI) + timedelta(seconds=BOARD_RECHECK_SECONDS)
+        kind = 'rate_limit' if limited else 'board_closed'
+        phase = STATE.get('phase', 'prepare')
+        label = '站方限速' if limited else '看板暫時關閉'
+        STATE.update(phase='station_wait', wait_kind=kind, wait_until=until.isoformat(timespec='seconds'),
+                     message=f'{label}，保留連線等到 {until:%m/%d %H:%M} 再確認一次。')
+        job.event('station_wait', kind=kind, until=STATE['wait_until'])
+        try:
+            if not session.recover_notice(board, until, STOP):
+                raise DownloadStopped()
+        finally:
+            STATE.update(phase=phase, wait_kind=None, wait_until=None)
+        job.event('station_recovered', kind=kind)
+        STATE['message'] = '站方畫面已恢復，正在接續原批次。'
+        return (retry or action)()
+
+
 def work(config):
     api = None
+    session = None
     db = None
     idx = None
     aid = None
@@ -345,6 +460,8 @@ def work(config):
     board = config['board']
     site = config['site']
     fresh_seconds = 0.0
+    rest_count = 0
+    rest_seconds = 0.0
     try:
         import PyPtt
 
@@ -361,14 +478,19 @@ def work(config):
                   requested_count=config.get('count') if mode == 'new' else None,
                   requested_direction=config.get('direction', 'newest') if mode == 'new' else None,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
-                  between_items_seconds=BETWEEN_ITEMS_SECONDS)
+                  between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
+                  items_before_rest=ITEMS_BEFORE_REST, rest_seconds=REST_SECONDS)
         stage = 'login'
         stage_started = time.monotonic()
         STATE['message'] = f'正在登入 {site}…'
         api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
-                        check_update=False, verify_ssl=True)
+                        check_update=False, verify_ssl=True, screen_height=100)
+        session = BoardSession(api)
         api.login(config.pop('user'), config.pop('password'), kick_other_session=False)
         job.event('login', seconds=round(time.monotonic() - stage_started, 3))
+        def run_station(action, *, retry=None):
+            return station_action(session, board, site, job, action, retry=retry)
+
         if STOP.is_set():
             result = 'stopped'
             STATE['message'] = '已中止。'
@@ -380,14 +502,15 @@ def work(config):
             article_started = stage_started = time.monotonic()
             STATE['message'] = f'正在讀取 {board} #{aid}…'
             try:
-                outcome, _ = download_article(api, db, site, board, aid,
-                                              existing=stored_article(db, site, board, aid))
-            except ArticleReadError as exc:
+                outcome, _ = run_station(lambda: download_article(
+                    session, db, site, board, aid, existing=stored_article(db, site, board, aid)))
+            except (ArticleReadError, ArticleStalled) as exc:
                 result = 'pending'
                 STATE.update(scanned=1, unresolved=1)
                 show_issue(None, aid, str(exc))
                 job.event('article', aid=aid, outcome='unreadable', reason=str(exc),
-                          capture=STATE['ansi_diagnostics'], seconds=round(time.monotonic() - article_started, 3))
+                          capture=getattr(exc, 'capture_diagnostics', STATE.get('ansi_diagnostics')),
+                          stalled_line=getattr(exc, 'line', None), seconds=round(time.monotonic() - article_started, 3))
                 STATE['message'] = '指定文章待查。'
                 record_failure(db, site, board, None, f'{aid} {exc}')
                 return
@@ -398,7 +521,7 @@ def work(config):
             return
         stage = 'read_board_range'
         stage_started = time.monotonic()
-        newest = api.get_newest_index(PyPtt.NewIndex.BOARD, board=board)
+        newest = run_station(lambda: session.get_newest_index(PyPtt.NewIndex.BOARD, board=board))
         board_query_seconds = round(time.monotonic() - stage_started, 3)
         pending = db.execute('''SELECT first_index,last_index,direction FROM batch_ranges
                                 WHERE site=? AND board=? AND completed=0''', (site, board)).fetchone()
@@ -425,6 +548,7 @@ def work(config):
         with db:
             if not resumed:
                 db.execute('DELETE FROM batch_verified WHERE site=? AND board=?', (site, board))
+                db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=?', (site, board))
             db.execute('''INSERT OR REPLACE INTO batch_ranges (site,board,first_index,last_index,direction)
                           VALUES(?,?,?,?,?)''', (site, board, start, original_end, direction))
         planned_count = end - start + 1
@@ -435,12 +559,57 @@ def work(config):
                   saved_end=original_end, board_query_seconds=board_query_seconds)
         STATE.update(phase='download', batch_start=start, batch_end=end, scanned=0, batch_total=end-start+1,
                      direction=direction, resumed=resumed)
-        indices = range(start, end + 1)
-        for idx in (reversed(indices) if direction == 'newest' else indices):
+        indices = range(end, start - 1, -1) if direction == 'newest' else range(start, end + 1)
+        checkpoints = resume_checkpoints(db, site, board) if resumed else {}
+        checked_until = skip_until = items_since_rest = 0
+        for position, idx in enumerate(indices):
             if STOP.is_set():
                 result = 'stopped'
                 STATE['message'] = '已停止；已完成的文章已保存。'
                 break
+            if position < skip_until:
+                continue
+            if items_since_rest >= ITEMS_BEFORE_REST:
+                stage = 'pacing_rest'
+                stage_started = time.monotonic()
+                STATE['message'] = f'已處理 {items_since_rest} 筆，休息 {REST_SECONDS} 秒後自動繼續。'
+                job.event('pacing_rest', next_index=idx, scanned=STATE['scanned'],
+                          scheduled_seconds=REST_SECONDS, operations=dict(session.operations))
+                interrupted = STOP.wait(REST_SECONDS)
+                rest_count += 1
+                rest_seconds += time.monotonic() - stage_started
+                items_since_rest = 0
+                if interrupted:
+                    result = 'stopped'
+                    STATE['message'] = '已中止。下次登入同一看板會接回這批。'
+                    break
+            if position >= checked_until and idx in checkpoints:
+                checked_until = position + 1
+                while checked_until < len(indices) and indices[checked_until] in checkpoints:
+                    checked_until += 1
+                anchor_index = indices[checked_until - 1]
+                anchor_aid, status = checkpoints[anchor_index]
+                stage = 'resume_anchor'
+                stage_started = time.monotonic()
+                aid = anchor_aid
+                idx = anchor_index
+                anchor = run_station(lambda: session.get_post(board, index=anchor_index, query=True))
+                idx = indices[position]
+                matches_aid = anchor.get('aid') == anchor_aid and anchor.get('index') in (None, anchor_index)
+                if status == 'deleted':
+                    matched = confirmed_deleted(session, anchor, anchor_index)
+                else:
+                    matched = matches_aid and bool(anchor.get('is_lock')) == (status == 'locked')
+                candidates = checked_until - position
+                job.event('resume_anchor', index=anchor_index, aid=anchor_aid, matched=matched,
+                          candidates=candidates, status=status)
+                if matched:
+                    skipped = sum(checkpoints[index][1] != 'saved' for index in indices[position:checked_until])
+                    STATE['scanned'] += candidates
+                    STATE['resumed_verified'] = STATE.get('resumed_verified', 0) + candidates - skipped
+                    STATE['unavailable'] = STATE.get('unavailable', 0) + skipped
+                    skip_until = checked_until
+                    continue
             STATE['message'] = f'正在讀取編號 {idx}（{DIRECTIONS[direction]}）'
             article_started = stage_started = time.monotonic()
             query_seconds = None
@@ -449,16 +618,16 @@ def work(config):
             added = False
             stage = 'query_article'
             aid = None
-            query = api.get_post(board, index=idx, query=True)
+            query = run_station(lambda: session.get_post(board, index=idx, query=True))
             query_seconds = round(time.monotonic() - stage_started, 3)
             aid = query.get('aid')
             query_index = query.get('index')
             wrong_index = bool(query_index and query_index != idx)
             existing = stored_article(db, site, board, aid) if aid and not wrong_index else None
             locked = not wrong_index and query.get('is_lock') and (aid or query_index == idx)
-            if confirmed_deleted(api, query, idx) or locked:
+            if confirmed_deleted(session, query, idx) or locked:
                 status = 'locked' if locked else 'deleted'
-                note_unavailable(db, site, board, idx, aid, status)
+                note_unavailable(db, site, board, idx, aid, status, checkpoint=True)
                 outcome = status
             elif not aid or wrong_index:
                 reason = '站方回傳的編號與要求不符' if wrong_index else '未取得 AID'
@@ -474,6 +643,8 @@ def work(config):
                                (idx, site, board, aid))
                     db.execute('DELETE FROM unavailable_articles WHERE site=? AND board=? AND (idx=? OR aid=?)',
                                (site, board, idx, aid))
+                    db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=? AND idx=?',
+                               (site, board, idx))
                 STATE['resumed_verified'] = STATE.get('resumed_verified', 0) + 1
                 outcome = 'verified_earlier_in_batch'
             else:
@@ -485,20 +656,33 @@ def work(config):
                     break
                 stage = 'read_article'
                 stage_started = time.monotonic()
+                def read_article():
+                    return download_article(session, db, site, board, aid, source_index=idx,
+                                            existing=existing, checkpoint=True)
+
+                def retry_article():
+                    current = session.get_post(board, index=idx, query=True)
+                    if current.get('aid') != aid:
+                        raise ArticleReadError('恢復後文章代碼已變動，保留待查')
+                    return read_article()
+
                 try:
-                    outcome, _ = download_article(api, db, site, board, aid, source_index=idx,
-                                                 existing=existing, checkpoint=True)
-                except ArticleReadError as exc:
+                    outcome, _ = run_station(read_article, retry=retry_article)
+                except (ArticleReadError, ArticleStalled) as exc:
                     record_failure(db, site, board, idx, f'{aid} {exc}')
                     STATE['unresolved'] += 1
                     show_issue(idx, aid, str(exc))
                     outcome = 'unreadable'
-                    details.update(reason=str(exc), capture=STATE['ansi_diagnostics'])
+                    details.update(reason=str(exc), capture=getattr(exc, 'capture_diagnostics',
+                                                                     STATE.get('ansi_diagnostics')))
+                    if isinstance(exc, ArticleStalled):
+                        details['stalled_line'] = exc.line
                 else:
                     details.update(coverage=STATE.get('ansi_coverage', {}), capture=STATE['ansi_diagnostics'])
                     added = True
                 body_seconds = round(time.monotonic() - stage_started, 3)
             STATE['scanned'] += 1
+            items_since_rest += 1
             job.event('article', index=idx, aid=aid, outcome=outcome, position=STATE['scanned'],
                       returned_index=query_index, had_backup=existing is not None,
                       query_seconds=query_seconds, body_seconds=body_seconds,
@@ -523,10 +707,13 @@ def work(config):
                 with db:
                     db.execute('UPDATE batch_ranges SET completed=1 WHERE site=? AND board=?', (site, board))
                 STATE['message'] = '本次範圍處理完畢。'
+    except DownloadStopped:
+        result = 'stopped'
+        STATE['message'] = '已中止，已完成的進度已保存。'
     except Exception as exc:
         # Never echo exception text: libraries may include screen/account data.
         name = type(exc).__name__
-        result = 'disconnected' if name in ('ConnectionClosed', 'UseTooManyResources') else 'failed'
+        result = 'disconnected' if name == 'ConnectionClosed' else 'failed'
         if job:
             job.error(stage, exc, index=idx, aid=aid)
             job.event('stage_failed', stage=stage, seconds=round(time.monotonic() - stage_started, 3))
@@ -537,10 +724,33 @@ def work(config):
                           capture=getattr(exc, 'capture_diagnostics', None))
         detail = str(exc) if isinstance(exc, ArticleReadError) else {
             'ConnectionClosed': '等網路恢復後，重新登入同一看板即可接續。',
-            'UseTooManyResources': '站方限制本次連線，請稍後再試。',
+            'BoardNavigationError': '終端位置無法確認，已停止送鍵。原批次可稍後續傳。',
+            'BoardTemporarilyClosed': '看板仍暫時關閉，已保留進度。',
             'TwoFactorAuthRequired': '此版尚未支援輸入二階段驗證碼。',
         }.get(name, '請查看程式 log 資料夾內的診斷紀錄。')
-        STATE['message'] = f'已停止：{name}。{detail}'
+        if isinstance(exc, StationRateLimit) or name == 'UseTooManyResources':
+            result = 'rate_limited'
+            limit = exc.details if isinstance(exc, StationRateLimit) else detect_rate_limit('程式耗用過多')
+            if job:
+                record_rate_limit(site, limit, job)
+            until = datetime.fromisoformat(limit['until']).strftime('%m/%d %H:%M')
+            detail = f'已保留批次並停止送鍵。最早可在 {until} 後手動續傳。'
+        if name == 'NoSuchBoard' and api is not None:
+            try:
+                diagnostic = board_screen_diagnostic(api)
+            except Exception as diagnostic_error:
+                if job:
+                    job.error('board_diagnostic', diagnostic_error)
+                diagnostic = {}
+            if job:
+                job.event('board_diagnostic', stage=stage, **diagnostic)
+            detail = {
+                'article_list': '收到類似文章列表的畫面，但 SDK 未能完成看板辨識。請手動確認看板可讀。',
+                'access_notice': '終端出現看板進入限制提示，請用同一帳號手動確認站方訊息。',
+                'missing_board_notice': '終端出現找不到看板的提示，請確認站台、板名及閱讀權限。',
+            }.get(diagnostic.get('screen_kind'),
+                  '已登入，但未能辨識看板畫面。請用同一帳號手動確認能否進板，再按登入續傳。')
+        STATE['message'] = f'站方限速。{detail}' if result == 'rate_limited' else f'已停止：{name}。{detail}'
         if db:
             try:
                 record_failure(db, site, board, idx, name)
@@ -552,11 +762,12 @@ def work(config):
             logout_started = time.monotonic()
             logout_error = None
             try:
-                api.logout()
+                api.connect_core.close()
             except Exception as exc:
                 logout_error = type(exc).__name__
             if job:
-                job.event('logout', seconds=round(time.monotonic() - logout_started, 3), error=logout_error)
+                job.event('logout', method='transport_close',
+                          seconds=round(time.monotonic() - logout_started, 3), error=logout_error)
         if db:
             if any(STATE.get(key) for key in ('saved', 'skipped', 'resumed_verified', 'kept_previous', 'unavailable')):
                 message = STATE['message']
@@ -577,11 +788,14 @@ def work(config):
             db.close()
         STATE['elapsed'] = round(time.monotonic() - started)
         if job:
+            if session:
+                job.event('terminal_operations', **dict(session.operations))
             job.event('finish', elapsed=STATE['elapsed'], local_count=STATE.get('local_count'),
                       scanned=STATE.get('scanned', 0), updated=STATE.get('updated', 0),
                       planned_count=STATE.get('batch_total', 0),
                       remaining_scan=STATE.get('batch_total', 0) - STATE.get('scanned', 0),
                       pending_color=STATE.get('ansi_review', 0), timed_samples=STATE.get('timed_samples', 0),
+                      rest_count=rest_count, rest_seconds=round(rest_seconds, 3),
                       average_seconds=STATE.get('seconds_per_article'),
                       saved=STATE['saved'], unchanged=STATE['skipped'],
                       resumed=STATE.get('resumed_verified', 0), unresolved=STATE['unresolved'],
@@ -611,7 +825,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/help.html':
             return self.reply(200,(ROOT/'help.html').read_text(encoding='utf-8'),'text/html')
         if self.path == '/status':
-            return self.reply(200,json.dumps(STATE,ensure_ascii=False))
+            return self.reply(200,json.dumps({**STATE, 'rate_limits': active_rate_limits()},ensure_ascii=False))
         if self.path == '/preferences':
             return self.reply(200,json.dumps(load_preferences(),ensure_ascii=False))
         reader = re.fullmatch(r'/reader/([A-Za-z0-9_-]+)/(index\.html|help\.html|articles/[0-9a-f]{64}\.html)', self.path)
@@ -680,6 +894,11 @@ class Handler(BaseHTTPRequestHandler):
                 target, args = export_existing, (folder,)
             with LOCK:
                 if STATE['running']: return self.reply(409,'{}')
+                if self.path == '/start':
+                    limit = active_rate_limits(from_disk=True).get(site)
+                    if limit:
+                        RATE_LIMITS[site] = limit
+                        return self.reply(429, json.dumps({'rate_limit': limit}))
                 if self.path == '/start' and mode == 'resume' and not find_pending_range(folder, site, board):
                     return self.reply(409, '{"no_pending": true}')
                 STATE.update(running=True, message='正在啟動…', saved=0, skipped=0,
@@ -688,7 +907,7 @@ class Handler(BaseHTTPRequestHandler):
                              batch_total=0, batch_start=None, batch_end=None, direction=None, phase='prepare',
                              exported=0, export_total=0, index_path=None, index_url=None, log_path=None,
                              resumed_verified=0, local_count=None, updated=0, issues=[], folder=str(folder),
-                             unavailable=0, kept_previous=0, result=None,
+                             unavailable=0, kept_previous=0, result=None, wait_kind=None, wait_until=None,
                              task_id=secrets.token_urlsafe(12),
                              operation='download' if self.path == '/start' else 'export')
                 STOP.clear()

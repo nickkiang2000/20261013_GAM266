@@ -11,6 +11,7 @@ import traceback
 PREFERENCE_FIELDS = ('site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction')
 LOCAL_DIRECTORY = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'BBS Downloader'
 SETTINGS = LOCAL_DIRECTORY / 'form.json'
+RATE_LIMIT_FILE = LOCAL_DIRECTORY / 'rate_limits.json'
 LOG_DIRECTORY = Path(__file__).resolve().parent / 'log'
 
 
@@ -32,6 +33,24 @@ def save_preferences(data):
     try:
         temp.write_text(json.dumps(values, ensure_ascii=False), encoding='utf-8')
         temp.replace(SETTINGS)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def load_rate_limits():
+    try:
+        data = json.loads(RATE_LIMIT_FILE.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_rate_limits(data):
+    RATE_LIMIT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temp = RATE_LIMIT_FILE.with_name(f'rate-limits-{secrets.token_hex(5)}.tmp')
+    try:
+        temp.write_text(json.dumps(data), encoding='utf-8')
+        temp.replace(RATE_LIMIT_FILE)
     finally:
         temp.unlink(missing_ok=True)
 
