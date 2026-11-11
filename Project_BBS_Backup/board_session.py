@@ -14,6 +14,9 @@ from websockets.exceptions import ConnectionClosed as SocketClosed
 
 
 MIN_COMMAND_INTERVAL = 1.0
+END_KEY = '\x1b[4~'
+FALLBACK_HEIGHT = 24
+FALLBACK_MAX_STEPS = 128
 TAIPEI = timezone(timedelta(hours=8))
 
 
@@ -32,8 +35,10 @@ class BoardTemporarilyClosed(RuntimeError):
 
 
 class ArticleStalled(RuntimeError):
-    def __init__(self, line):
-        super().__init__(f'文章翻頁停在第 {line} 行，已回到看板列表')
+    def __init__(self, line, reason=None):
+        if reason is None:
+            reason = f'文章翻頁停在第 {line} 行' if line else '無法確認文章已完整讀到文末'
+        super().__init__(f'{reason}，已回到看板列表')
         self.line = line
 
 
@@ -85,8 +90,11 @@ class BoardSession:
         self.operations = Counter()
         self.notice = None
         self.notice_screen = ''
+        self.retry_height = None
         self.last_sent = None
         self.pacing = False
+        self.capture_mode = 'line'
+        self.check_stop = None
         self.send = self.connect_core.send
         self.decode = self.connect_core._decode_screen
         self.connect_core.send = self._send
@@ -97,13 +105,16 @@ class BoardSession:
         return self.api.cursor
 
     def _decode(self, screen, *args, **kwargs):
+        self._check_notice(screen)
+        return self.decode(screen, *args, **kwargs)
+
+    def _check_notice(self, screen):
         limit = detect_rate_limit(screen)
         notice = StationRateLimit(limit) if limit else BoardTemporarilyClosed() if is_temporary_closure(screen) else None
         if notice:
             self.notice = notice
             self.notice_screen = screen
             raise notice
-        return self.decode(screen, *args, **kwargs)
 
     def _send(self, message, targets, *args, **kwargs):
         if self.notice:
@@ -168,6 +179,54 @@ class BoardSession:
             self._checked_send(command.left, self._list_targets())
         self._require_list()
 
+    def _refresh_list(self):
+        self._checked_send(command.refresh, self._list_targets())
+        self._require_list()
+
+    def _resize_list(self, height):
+        self._require_list()
+        core = self.connect_core
+        recv = core._recv
+        chunks = []
+
+        async def capture_redraw():
+            chunk = await recv()
+            chunks.append(chunk)
+            return chunk
+
+        core._recv = capture_redraw
+        try:
+            core.set_screen_height(height)
+        finally:
+            core._recv = recv
+        # PyPtt drains the resize redraw before returning. Verify that actual
+        # response first, rather than depending on a second Ctrl-L redraw.
+        if chunks and core._pending and core._pending[0] is chunks[-1]:
+            chunks.pop()
+        redraw = b''.join(chunks)
+        clear = redraw.find(b'\x1b[2J')
+        if clear >= 0:
+            start = redraw.rfind(b'\x1b[?2026h', 0, clear + 1)
+            if start < 0:
+                start = clear
+            end = redraw.find(b'\x1b[?2026l', clear)
+            parser = screens.IncrementalScreen(core.current_encoding, height)
+            parser.feed(redraw[start:end + len(b'\x1b[?2026l')] if end >= 0 else redraw[start:])
+            screen = parser.screen
+            self._check_notice(screen)
+            if (start == clear or end >= 0) and _api_util.is_article_list(self.api, screen):
+                core._RDQ.add(screen)
+                self._require_list()
+                self.operations['resize_redraws_verified'] += 1
+                return
+        self.operations['resize_refreshes'] += 1
+        self._refresh_list()
+
+    def _restore_height(self):
+        if self.retry_height is not None:
+            self._resize_list(self.retry_height)
+            self.retry_height = None
+
     def recover_notice(self, board, until, stop):
         """Wait on the existing socket, then acknowledge one recognized prompt."""
         async def wait():
@@ -214,9 +273,105 @@ class BoardSession:
                 raise BoardNavigationError()
             self._require_list()
             self.board = board
+        self._restore_height()
         return True
 
-    def _recover_stalled_article(self, exc):
+    def _article_targets(self):
+        return [connect_core.TargetUnit(screens.Target.PostEnd, break_detect=True),
+                connect_core.TargetUnit(screens.Target.InPost, break_detect=True),
+                *self._list_targets()]
+
+    def _send_article_key(self, key):
+        targets = self._article_targets()
+        if self.capture_mode == 'page' and key == command.enter * 2:
+            targets.append(connect_core.TargetUnit(screens.Target.Animation, break_detect=True))
+        result = self._checked_send(key, targets)
+        if result == 2:
+            self._require_list()
+        elif result in (0, 1):
+            self.view = 'article'
+        return result
+
+    def _verify_end(self, get_numbering):
+        numbering = get_numbering()
+        end = numbering.last_window
+        if not end or not numbering.covers(end[1]) or numbering.color_conflicts:
+            return None
+        if self._send_article_key(command.up) == 2:
+            return None
+        earlier = numbering.last_window
+        if not earlier or earlier[1] >= end[1]:
+            return None
+        self.operations['end_checks'] += 1
+        if self._send_article_key(END_KEY) == 2:
+            return None
+        return numbering.confirm_end(end)
+
+    def _read_numbered_article(self, get_numbering):
+        result = self._send_article_key(command.enter * 2)
+        numbering = get_numbering()
+        for step in range(FALLBACK_MAX_STEPS + 1):
+            if result == 0:
+                return numbering.assemble() if not numbering.color_conflicts else None
+            previous = numbering.last_window
+            if (result == 2 or step == FALLBACK_MAX_STEPS or previous is None
+                    or not numbering.covers(previous[1]) or numbering.color_conflicts):
+                break
+            result = self._send_article_key(command.down)
+            current_window = numbering.last_window
+            if result == 1 and current_window and current_window[1] <= previous[1]:
+                return self._verify_end(get_numbering)
+        return None
+
+    def _read_article_pages(self, get_numbering):
+        """Use one right key per validated screen and stop on the captured end screen."""
+        key = command.enter * 2
+        last = 0
+        while True:
+            if self.check_stop:
+                self.check_stop()
+            result = self._send_article_key(key)
+            if result == 3:
+                # Decline automatic playback so each screen advances on one key.
+                key = 'n'
+                continue
+            numbered = get_numbering()
+            window = numbered.last_window
+            if result == 2:
+                reason = '逐頁擷取在確認文末前回到看板'
+            elif not window or numbered.width_mismatches or numbered.unnumbered:
+                reason = '逐頁擷取無法核對畫面列與站方行號'
+            elif window[0] > last + 1:
+                reason = f'逐頁擷取缺少第 {last + 1}～{window[0] - 1} 行'
+            elif numbered.conflicts:
+                reason = '逐頁擷取的重疊行正文不一致'
+            elif window[1] <= last:
+                reason = '逐頁擷取未取得新的正文行'
+            elif result == 0:
+                body = numbered.assemble()
+                if body is not None:
+                    return body
+                reason = '逐頁擷取已到文末，但未能核對完整正文'
+            else:
+                last = window[1]
+                key = command.right
+                continue
+            self._return_to_list()
+            raise ArticleStalled(window[1] if window else last or None, reason)
+
+    def _read_at_fallback_height(self, selected, get_numbering):
+        self.retry_height = self.connect_core.config.screen_height
+        self._resize_list(FALLBACK_HEIGHT)
+        self._position(selected.index)
+        current = self._query('')
+        body = None
+        if current.aid == selected.aid and current.index == selected.index and not current.lock_post:
+            body = self._read_numbered_article(get_numbering)
+        self._return_to_list()
+        self._restore_height()
+        return body
+
+    def _recover_stalled_article(self, exc, selected=None, get_numbering=None, fallback_attempts=None):
         match = re.fullmatch(r'get_content: stuck at line (\d+)', str(exc))
         if not match:
             return
@@ -226,9 +381,25 @@ class BoardSession:
         elif any(connect_core.TargetUnit(target).is_match(screen, self.cursor)
                  for target in (screens.Target.InPost, screens.Target.PostEnd)):
             self.view = 'article'
+            if get_numbering is not None:
+                attempt = {'height': self.connect_core.config.screen_height, 'method': 'end_round_trip'}
+                fallback_attempts.append(attempt)
+                body = self._verify_end(get_numbering)
+                attempt.update(verified=body is not None, numbering=get_numbering().diagnostics())
+                if body:
+                    return body
             self._return_to_list()
         else:
             return
+        if (get_numbering is not None and selected.index > 0
+                and self.connect_core.config.screen_height > FALLBACK_HEIGHT):
+            self.operations['short_terminal_retries'] += 1
+            attempt = {'height': FALLBACK_HEIGHT, 'method': 'short_terminal'}
+            fallback_attempts.append(attempt)
+            body = self._read_at_fallback_height(selected, get_numbering)
+            attempt.update(verified=body is not None, numbering=get_numbering().diagnostics())
+            if body:
+                return body
         self.operations['stalled_articles'] += 1
         raise ArticleStalled(int(match[1])) from exc
 
@@ -274,7 +445,7 @@ class BoardSession:
         self.selected = _api_util.parse_query_post(self.api, self._screen())
         return self.selected
 
-    def get_post(self, board, *, index=None, aid=None, query=False):
+    def get_post(self, board, *, index=None, aid=None, query=False, get_numbering=None, fallback_attempts=None):
         self._enter(board)
         if index is not None and query:
             self.index_mode = True
@@ -306,15 +477,33 @@ class BoardSession:
             PostField.post_status: data_type.PostStatus.EXISTS, PostField.comments: [],
         }
         if not selected.lock_post:
-            try:
-                body, has_control_code = _api_util.get_content(self.api)
-            except exceptions.UnknownError as exc:
-                self._recover_stalled_article(exc)
-                raise
+            if self.capture_mode == 'page':
+                body = self._read_article_pages(get_numbering)
+                has_control_code = False
+                self.api.Unconfirmed = False
+            elif get_numbering is not None and self.connect_core.config.screen_height == FALLBACK_HEIGHT:
+                body = self._read_numbered_article(get_numbering)
+                numbering = get_numbering()
+                fallback_attempts.append({'height': FALLBACK_HEIGHT, 'method': 'short_terminal_from_login',
+                                          'verified': body is not None, 'numbering': numbering.diagnostics()})
+                if body is None:
+                    self._return_to_list()
+                    raise ArticleStalled(numbering.last_window[1] if numbering.last_window else None)
+                has_control_code = False
+                self.api.Unconfirmed = False
+            else:
+                try:
+                    body, has_control_code = _api_util.get_content(self.api)
+                except exceptions.UnknownError as exc:
+                    body = self._recover_stalled_article(exc, selected, get_numbering, fallback_attempts)
+                    if body is None:
+                        raise
+                    has_control_code = False
+                else:
+                    self.view = 'article'
             if body is None:
                 # The current screen may be a prompt, so leave navigation to a new session.
                 raise BoardNavigationError()
-            self.view = 'article'
             post.update({PostField.full_content: body, PostField.has_control_code: has_control_code,
                          PostField.is_unconfirmed: self.api.Unconfirmed})
             if len(body.split('\n', 3)) >= 3:

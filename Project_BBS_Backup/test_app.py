@@ -5,6 +5,7 @@ import re
 import json
 from unittest.mock import patch
 from pathlib import Path
+from contextlib import closing
 import app
 
 class StorageTests(unittest.TestCase):
@@ -12,6 +13,94 @@ class StorageTests(unittest.TestCase):
         temporary = self.enterContext(tempfile.TemporaryDirectory())
         self.enterContext(patch('local_state.LOG_DIRECTORY', Path(temporary) / 'log'))
         self.enterContext(patch.object(app, 'BoardSession', side_effect=lambda api: api))
+
+    def test_issue_history_migrates_only_missing_articles_and_resolves_after_retry(self):
+        import issue_records
+
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            db = app.database(folder)
+            app.save_article(db, 'Test', {'aid': 'restored', 'full_content': '正文',
+                                          'pass_format_check': True}, site='PTT', source_index=1)
+            app.record_failure(db, 'PTT', 'Test', 1, 'restored 舊失敗')
+            app.record_failure(db, 'PTT', 'Test', 1825, '12hJORGg 無法確認文末')
+            app.record_failure(db, 'PTT', 'Test', None, '12hJORGg 再次無法確認')
+            app.record_failure(db, 'PTT', 'Test', None, 'ConnectionClosed')
+            db.execute('DELETE FROM archive_migrations')
+            db.commit()
+            db.close()
+            db = app.database(folder)
+            self.addCleanup(db.close)
+            self.assertEqual(db.execute('SELECT idx,aid,attempts FROM article_issues').fetchall(),
+                             [(1825, '12hJORGg', 2)])
+            app.publish_archive(db, folder)
+            help_page = (folder / 'help.html').read_text(encoding='utf-8')
+            self.assertIn('1825', help_page)
+            self.assertIn('12hJORGg', help_page)
+            self.assertNotIn('舊失敗', help_page)
+            issue_records.resolve(db, 'PTT', 'Test', 1825, '12hJORGg')
+            db.commit()
+            # Reopening must not resurrect the old failure after a successful retry.
+            issue_records.initialize(db)
+            self.assertEqual(db.execute('SELECT count(*) FROM article_issues').fetchone()[0], 0)
+            db.close()
+
+    def test_single_failure_still_publishes_report_without_claiming_an_article(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API'), \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0)), \
+                patch('ansi_capture.read_colored_post', side_effect=app.ArticleReadError('未確認文末')):
+            app.work(dict(site='PTT', board='Test', aid='12hJORGg',
+                          folder=d, user='test', password='dummy'))
+            self.assertEqual(app.STATE['result'], 'pending')
+            self.assertEqual(app.STATE['exported'], 0)
+            self.assertIn('12hJORGg', (Path(d) / 'help.html').read_text(encoding='utf-8'))
+            self.assertEqual(list((Path(d) / 'articles').glob('*.html')), [])
+
+    def test_html_render_failure_falls_back_and_clears_after_local_repair(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            db = app.database(folder)
+            self.addCleanup(db.close)
+            app.save_article(db, '<Test>', {'aid': 'fixture1', 'full_content': '<正文>',
+                                          'pass_format_check': True}, site='PTT', source_index=2)
+            db.execute("UPDATE articles SET data='invalid JSON'")
+            db.commit()
+            self.assertEqual(app.publish_archive(db, folder), 1)
+            report = (folder / 'help.html').read_text(encoding='utf-8')
+            self.assertIn('HTML 呈現失敗', report)
+            self.assertIn('&lt;Test&gt;', report)
+            link = re.search(r'href="(articles/[a-f0-9]+\.html)"', report)[1]
+            article = (folder / link).read_text(encoding='utf-8')
+            self.assertIn('&lt;正文&gt;', article)
+            self.assertIn('改用純文字 HTML', report)
+            db.execute("UPDATE articles SET data='{}'")
+            db.commit()
+            app.publish_archive(db, folder)
+            self.assertEqual(db.execute('SELECT count(*) FROM article_issues').fetchone()[0], 0)
+            db.close()
+
+    def test_successful_download_clears_read_issue_but_keeps_color_review(self):
+        import issue_records
+
+        with tempfile.TemporaryDirectory() as d, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0)), \
+                patch('ansi_capture.read_colored_post', return_value={
+                    'aid': 'fixture1', 'full_content': '正文\n第二行', 'pass_format_check': True,
+                    'ansi_coverage': {'matched': 1, 'total': 2}}):
+            db = app.database(Path(d))
+            self.addCleanup(db.close)
+            app.record_failure(db, 'PTT', 'Test', 3, '未取得 AID', article=True)
+            app.record_failure(db, 'PTT', 'Test', 3, '未確認文末', article=True, aid='fixture1')
+            self.assertEqual(db.execute('SELECT attempts FROM article_issues').fetchone()[0], 2)
+            app.download_article(None, db, 'PTT', 'Test', 'fixture1', source_index=3)
+            self.assertEqual(db.execute('SELECT count(*) FROM article_issues').fetchone()[0], 0)
+            report = issue_records.report(db)
+            self.assertIn('待核色', report)
+            self.assertIn('1／2', report)
+            self.assertNotIn('未能下載／確認全文', report)
+            db.close()
 
     def test_batch_bounds_start_at_requested_article_in_either_direction(self):
         for newest, start, count, direction, expected in [
@@ -27,6 +116,39 @@ class StorageTests(unittest.TestCase):
         ]:
             with self.subTest(newest=newest, start=start, count=count, direction=direction):
                 self.assertEqual(app.batch_bounds(newest, start, count, direction), expected)
+
+    def test_all_articles_uses_live_board_end_above_manual_count_limit(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0, timed_samples=0)), \
+                patch.object(app.STOP, 'wait', side_effect=[False, True]), \
+                patch('ansi_capture.read_colored_post', return_value={
+                    'aid': 'fixture1', 'full_content': '正文', 'pass_format_check': True,
+                    'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0},
+                }):
+            api = factory.return_value
+            api.get_newest_index.return_value = 15001
+            api.get_post.return_value = {'aid': 'fixture1', 'index': 15001}
+            app.work(dict(site='PTT', board='Test', all_articles=True, direction='newest',
+                          folder=d, user='test', password='dummy'))
+            self.assertEqual(app.find_pending_range(Path(d), 'PTT', 'Test'), (1, 15001, 'newest'))
+            api.get_post.assert_called_once_with('Test', index=15001, query=True)
+            self.assertEqual(factory.call_args.kwargs['screen_height'], 100)
+
+    def test_compatibility_single_article_starts_at_24_rows(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0)), \
+                patch('ansi_capture.read_colored_post', return_value={
+                    'aid': 'fixture1', 'full_content': '正文', 'pass_format_check': True,
+                    'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0},
+                }):
+            app.work(dict(site='PTT', board='Test', aid='fixture1', short_terminal=True,
+                          folder=d, user='test', password='dummy'))
+            self.assertEqual(factory.call_args.kwargs['screen_height'], 24)
+            self.assertEqual(app.STATE['exported'], 1)
 
     def test_board_screen_diagnostic_distinguishes_headers_and_access_without_screen_text(self):
         from types import SimpleNamespace
@@ -88,24 +210,34 @@ class StorageTests(unittest.TestCase):
 
     def test_ansi_capture_and_archive_preserve_two_pages(self):
         from types import SimpleNamespace
-        from PyPtt import screens
+        from PyPtt import command, screens
         from PyPtt.connect_core import TargetUnit
         from ansi_capture import read_colored_post
+        from board_session import BoardSession
 
         class FakeCore:
             config = SimpleNamespace(screen_height=5)
             current_encoding = 'utf-8'
-            pages = iter([
+            pages = [
                 '\x1b[H\x1b[2J標題\n\x1b[1;33;41m彩色\x1b[m\n\n重疊列\n瀏覽 第 1/2 頁 目前顯示: 第 1~4 行',
                 '\x1b[H\x1b[2J重疊列\n\x1b[36;44m████\x1b[m\n末段\n\n瀏覽 第 2/2 頁 (100%) 目前顯示: 第 4~6 行',
-            ])
+            ]
+
+            def __init__(self):
+                self.responses = iter(self.pages)
+                self.sent = []
+
+            def _decode_screen(self, screen):
+                return screen
 
             def send(self, message, targets):
+                self.sent.append(message)
                 self._stream_parsers = {}
-                data = next(self.pages).encode('utf-8')
+                data = next(self.responses).encode('utf-8')
                 self._stream_screen('utf-8', data[:13])
                 self._screen = self._stream_screen('utf-8', data[13:])
-                return 0
+                expected = screens.Target.PostEnd if '(100%)' in self._screen else screens.Target.InPost
+                return next(i for i, target in enumerate(targets) if target.get_detect_target() == expected)
 
             def _stream_screen(self, encoding, data):
                 if encoding not in self._stream_parsers:
@@ -138,6 +270,18 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(post['ansi_lines']['1'], [('彩色', ('f3', 'b1', 'hl'))])
         self.assertEqual(post['ansi_lines']['4'], [('████', ('f6', 'b4'))])
         self.assertEqual(core.send.__func__, FakeCore.send)
+        page_core = FakeCore()
+        session = BoardSession(SimpleNamespace(connect_core=page_core))
+        session.capture_mode = 'page'
+        session.board = 'Test'
+        session.view = 'query'
+        session.selected = SimpleNamespace(aid='1AdzogFB', index=1, author='', title='標題',
+                                           url='', money=0, list_date='', push_number=0, lock_post=False)
+        page_post = read_colored_post(session, 'Test', '1AdzogFB')
+        for field in ('full_content', 'ansi_lines', 'ansi_coverage'):
+            self.assertEqual(page_post[field], post[field])
+        self.assertEqual(page_core.sent, [command.enter * 2, command.right])
+        self.assertEqual(page_post['ansi_diagnostics']['page_turns'], 1)
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             db = app.database(folder)
@@ -299,7 +443,8 @@ class StorageTests(unittest.TestCase):
             config = dict(site='PTT', board='Test', start=9, count=2, folder=d, user='test', password='dummy')
             for resumed, expected in [(False, (1, 0, 1)), (True, (1, 0, 2))]:
                 app.STATE.update(saved=0, skipped=0, unresolved=0, timed_samples=0, resumed=False, resumed_verified=0)
-                app.work(dict(config, direction='newest' if resumed else 'oldest'))
+                app.work(dict(config, direction='newest' if resumed else 'oldest',
+                              capture_mode='page' if resumed else 'line'))
                 self.assertEqual((app.STATE['batch_start'], app.STATE['batch_end']), (9, 10))
                 self.assertEqual((app.STATE['saved'], app.STATE['skipped'], app.STATE['scanned']), expected)
                 self.assertEqual(app.STATE['resumed'], resumed)
@@ -307,6 +452,18 @@ class StorageTests(unittest.TestCase):
                 self.assertEqual(app.STATE['resumed_verified'], int(resumed))
             queries = [call.kwargs['index'] for call in api.get_post.call_args_list if call.kwargs.get('query')]
             self.assertEqual(queries, [9, 9, 10])
+            with closing(sqlite3.connect(Path(d) / 'articles.sqlite3')) as db:
+                self.assertEqual(db.execute('SELECT capture_mode FROM batch_ranges').fetchone(), ('page',))
+
+    def test_legacy_pending_batch_defaults_to_line_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            with closing(sqlite3.connect(folder / 'articles.sqlite3')) as db, db:
+                db.execute('CREATE TABLE batch_ranges (site, board, first_index, last_index, completed, direction)')
+                db.execute("INSERT INTO batch_ranges VALUES ('PTT','Test',1,10,0,'newest')")
+            self.assertEqual(app.find_pending_range(folder, 'PTT', 'Test', with_progress=True)['capture_mode'], 'line')
+            with closing(app.database(folder)) as db:
+                self.assertEqual(db.execute('SELECT capture_mode FROM batch_ranges').fetchone(), ('line',))
 
     def test_preferences_exclude_password_and_logs_exclude_exception_text(self):
         from local_state import JobLog, load_preferences, save_preferences
@@ -499,6 +656,150 @@ class StorageTests(unittest.TestCase):
             api.login.assert_called_once()
 
 class BoardSessionTests(unittest.TestCase):
+    def test_page_capture_checks_continuity_and_stops_at_captured_end(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import CapturedLine, NumberedArticle
+        from board_session import ArticleStalled, BoardSession
+        from PyPtt import command
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=Mock())
+        session = BoardSession(SimpleNamespace(connect_core=core))
+        for label, last_rows, span, result, reason in (
+            ('complete', ['', 'same', 'last', '   '], '2~4', 0, None),
+            ('gap', ['last'], '5~5', 0, '缺少第 4～4 行'),
+            ('conflict', ['changed', 'last'], '3~4', 0, '重疊行正文不一致'),
+            ('duplicate', ['first', '', 'same'], '1~3', 1, '未取得新的正文行'),
+            ('no end', [], '', 2, '確認文末前回到看板'),
+            ('extra text', ['same', 'last', 'extra'], '3~4', 0, '無法核對畫面列'),
+        ):
+            with self.subTest(label=label):
+                numbered = NumberedArticle(page_mode=True)
+
+                def send(key):
+                    if key == command.enter * 2:
+                        numbered.observe(['first', '', 'same'], '瀏覽 第 1/2 頁 (66%) 第 1~3 行',
+                                         at_end=False, styled=None)
+                        return 1
+                    if result != 2:
+                        styled = [CapturedLine(row, ()) for row in last_rows]
+                        numbered.observe(last_rows, f'瀏覽 第 2/2 頁 (100%) 第 {span} 行',
+                                         at_end=result == 0, styled=styled)
+                    return result
+
+                with patch.object(session, '_return_to_list') as back, \
+                        patch.object(session, '_send_article_key', side_effect=send) as keys:
+                    if reason:
+                        with self.assertRaisesRegex(ArticleStalled, reason):
+                            session._read_article_pages(lambda: numbered)
+                        back.assert_called_once()
+                    else:
+                        self.assertEqual(session._read_article_pages(lambda: numbered), 'first\n\nsame\nlast')
+                        back.assert_not_called()
+                    self.assertEqual([call.args[0] for call in keys.call_args_list],
+                                     [command.enter * 2, command.right])
+
+    def test_resize_reuses_drained_list_redraw_without_ctrl_l(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from board_session import BoardSession
+
+        listing = '【看板】 [i]看板設定\n> 9 test\n文章列表 (b)進板'
+        output = [listing]
+        redraw = ('\x1b[?2026h\x1b[H\x1b[2J' + listing + '\x1b[?2026l').encode()
+        chunks = iter([redraw[:12], redraw[12:]])
+
+        async def recv():
+            return next(chunks)
+
+        async def drain():
+            await core._recv()
+            await core._recv()
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=Mock(), _recv=recv, _pending=[],
+                               current_encoding='utf-8', _RDQ=SimpleNamespace(add=output.append),
+                               set_screen_height=lambda height: asyncio.run(drain()),
+                               get_screen_queue=lambda: output[-1:])
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+        session._resize_list(24)
+        self.assertEqual(session.operations['resize_redraws_verified'], 1)
+        self.assertEqual(session._cursor_row()[0], 9)
+        self.assertIs(core._recv, recv)
+        session.send.assert_not_called()
+
+    def test_end_fallback_requires_contiguous_rows_and_a_real_round_trip(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import BoardSession, END_KEY
+        from PyPtt import command
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=Mock())
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+        for end_returns in (True, False):
+            with self.subTest(end_returns=end_returns):
+                numbering = NumberedArticle()
+                numbering.observe(['one', '', 'three'], '瀏覽 第 1/2 頁 (66%) 第 1~3 行',
+                                  at_end=False, styled=None)
+                numbering.observe(['', 'three', 'four'], '瀏覽 第 2/2 頁 (83%) 第 2~4 行',
+                                  at_end=False, styled=None)
+
+                def send(key):
+                    final = key == END_KEY and end_returns
+                    numbering.observe(['', 'three', 'four'] if final else ['one', '', 'three'],
+                                      '瀏覽 第 2/2 頁 (83%) 第 2~4 行' if final
+                                      else '瀏覽 第 1/2 頁 (66%) 第 1~3 行', at_end=False, styled=None)
+                    return 1
+
+                with patch.object(session, '_send_article_key', side_effect=send) as keys:
+                    body = session._verify_end(lambda: numbering)
+                self.assertEqual([call.args[0] for call in keys.call_args_list], [command.up, END_KEY])
+                self.assertEqual(body, 'one\n\nthree\nfour' if end_returns else None)
+                self.assertEqual(numbering.end_evidence, 'end_key_round_trip' if end_returns else None)
+
+    def test_conflicting_tall_capture_retries_once_at_24_rows_and_restores_height(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import BoardSession, END_KEY
+        from PyPtt import command, exceptions
+
+        config = SimpleNamespace(screen_height=100)
+
+        def resize(height):
+            config.screen_height = height
+
+        core = SimpleNamespace(_decode_screen=Mock(), send=Mock(), config=config, set_screen_height=Mock(side_effect=resize),
+                               get_screen_queue=lambda: ['瀏覽 第 2/2 頁 (83%) 目前顯示: 第 2~4 行'])
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+        selected = SimpleNamespace(aid='12hJORGg', index=1825, lock_post=False)
+        numbering = NumberedArticle()
+        numbering.observe(['one', '', 'three'], '瀏覽 第 1/2 頁 (66%) 第 1~3 行', at_end=False, styled=None)
+        numbering.observe(['conflict', 'three', 'four'], '瀏覽 第 2/2 頁 (83%) 第 2~4 行', at_end=False, styled=None)
+        attempts = []
+
+        def send(key):
+            nonlocal numbering
+            if key == command.enter * 2:
+                numbering = NumberedArticle()
+            if key in (command.enter * 2, command.up):
+                numbering.observe(['one', '', 'three'], '瀏覽 第 1/2 頁 (66%) 第 1~3 行', at_end=False, styled=None)
+            else:
+                numbering.observe(['', 'three', 'four'], '瀏覽 第 2/2 頁 (83%) 第 2~4 行', at_end=False, styled=None)
+            return 1
+
+        with patch.object(session, '_return_to_list'), patch.object(session, '_resize_list', side_effect=core.set_screen_height), \
+                patch.object(session, '_position'), patch.object(session, '_query', return_value=selected), \
+                patch.object(session, '_send_article_key', side_effect=send) as keys:
+            body = session._recover_stalled_article(exceptions.UnknownError('get_content: stuck at line 4'),
+                                                    selected, lambda: numbering, attempts)
+        self.assertEqual(body, 'one\n\nthree\nfour')
+        self.assertEqual([call.args[0] for call in core.set_screen_height.call_args_list], [24, 100])
+        self.assertEqual([call.args[0] for call in keys.call_args_list],
+                         [command.enter * 2, command.down, command.down, command.up, END_KEY])
+        self.assertEqual([attempt['verified'] for attempt in attempts], [False, True])
+
     def test_station_wait_retries_once_with_no_relogin(self):
         from datetime import datetime, timedelta
         from unittest.mock import Mock

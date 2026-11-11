@@ -149,17 +149,26 @@ def match_colors(body, frames):
 class NumberedArticle:
     """Reassemble physical rows only when the terminal numbering proves their positions."""
 
-    def __init__(self):
+    def __init__(self, *, page_mode=False):
+        self.page_mode = page_mode
         self.rows = {}
         self.colors = {}
+        self.color_conflict_rows = set()
         self.seen = self.unnumbered = self.width_mismatches = self.conflicts = 0
         self.first_range = self.last_range = self.end_range = None
         self.first_conflict = None
         self.end_usable = False
         self.width_sample = []
+        self.last_window = None
+        self.last_percent = None
+        self.color_conflicts = 0
+        self.end_evidence = None
 
     def observe(self, rows, status, *, at_end, styled):
         self.seen += 1
+        self.last_window = None
+        percent = re.search(r'\(\s*(\d{1,3})%\)', status)
+        self.last_percent = int(percent[1]) if percent else None
         match = LINE_RANGE.search(status)
         if not match:
             self.unnumbered += 1
@@ -173,7 +182,10 @@ class NumberedArticle:
         if at_end:
             self.end_range = span
         count = last - first + 1
-        if first < 1 or not 0 < count <= len(rows) or any(rows[count:]):
+        extra = rows[max(count, 0):]
+        padded = (self.page_mode and not any(row.strip() for row in extra)
+                  and (styled is None or not any(line.color_runs for line in styled[max(count, 0):])))
+        if first < 1 or not 0 < count <= len(rows) or (any(extra) and not padded):
             self.width_mismatches += 1
             if len(self.width_sample) < 12:
                 self.width_sample.append({'screen': self.seen, 'range': span, 'rows': len(rows),
@@ -181,6 +193,7 @@ class NumberedArticle:
             return
         if at_end:
             self.end_usable = True
+        self.last_window = (first, last, tuple(rows[:count]))
 
         for offset, row in enumerate(rows[:count]):
             number = first + offset
@@ -189,15 +202,29 @@ class NumberedArticle:
                 if self.first_conflict is None:
                     self.first_conflict = number
                 continue
-            if styled is not None and number not in self.colors:
-                self.colors[number] = styled[offset].color_runs
+            if styled is not None:
+                runs = styled[offset].color_runs
+                if self.colors.setdefault(number, runs) != runs:
+                    self.color_conflicts += 1
+                    self.color_conflict_rows.add(number)
+
+    def covers(self, end):
+        return (not (self.conflicts or self.width_mismatches or self.unnumbered)
+                and len(self.rows) == end and min(self.rows, default=0) == 1
+                and max(self.rows, default=0) == end)
+
+    def confirm_end(self, window):
+        if window is None or window != self.last_window or self.color_conflicts or not self.covers(window[1]):
+            return None
+        self.end_range = list(window[:2])
+        self.end_usable = True
+        self.end_evidence = 'end_key_round_trip'
+        return self.assemble()
 
     def assemble(self):
-        if not self.end_usable or self.conflicts or self.width_mismatches or self.unnumbered or not self.rows:
+        if not self.end_usable or not self.covers(self.end_range[1]):
             return None
         end = self.end_range[1]
-        if len(self.rows) != end or min(self.rows) != 1 or max(self.rows) != end:
-            return None
         return '\n'.join(self.rows[number] for number in range(1, end + 1))
 
     def diagnostics(self):
@@ -215,6 +242,8 @@ class NumberedArticle:
         return {
             'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
+            'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
+            'last_percent': self.last_percent,
             'width_mismatches_sample': self.width_sample,
             'first_conflict_line': self.first_conflict, 'first_range': self.first_range,
             'last_range': self.last_range, 'end_range': self.end_range, 'end_usable': self.end_usable,
@@ -225,16 +254,26 @@ class NumberedArticle:
 
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
+    from board_session import BoardSession
+
     core = api.connect_core
     send = core.send
     stream = core._stream_screen
     buffers = {}
     frames = []
     line_cache = {}
-    numbered = NumberedArticle()
+    mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
+    numbered = NumberedArticle(page_mode=mode == 'page')
     capturing = False
     frame_limit_hit = False
     reached_end = False
+    page_turns = 0
+    fallback_attempts = []
+
+    def diagnostics():
+        return {'mode': mode, 'page_turns': page_turns, 'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
+                'reached_end': reached_end or numbered.end_evidence is not None,
+                'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts}
 
     def capture_stream(encoding, chunk):
         result = stream(encoding, chunk)
@@ -252,7 +291,7 @@ def read_colored_post(api, board, aid):
         return result
 
     def capture_send(message, targets, *args, **kwargs):
-        nonlocal capturing, frame_limit_hit, reached_end, numbered
+        nonlocal capturing, frame_limit_hit, reached_end, numbered, page_turns
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
         article_screen = any(target.get_detect_target() in article_targets for target in targets)
         if article_screen and message == command.enter * 2:
@@ -260,8 +299,11 @@ def read_colored_post(api, board, aid):
             # Keep completion and colors tied to the attempt it actually returns.
             frames.clear()
             line_cache.clear()
-            numbered = NumberedArticle()
+            numbered = NumberedArticle(page_mode=mode == 'page')
             reached_end = frame_limit_hit = False
+            page_turns = 0
+        if mode == 'page' and article_screen and message == command.right:
+            page_turns += 1
         capturing = article_screen and numbered.seen < MAX_FRAMES
         frame_limit_hit |= article_screen and not capturing
         try:
@@ -289,7 +331,8 @@ def read_colored_post(api, board, aid):
                             frames.append(packed)
                     except (ValueError, IndexError, LookupError):
                         pass
-                numbered.observe(rows[:-1], rows[-1], at_end=reached_end, styled=packed)
+                at_end = targets[result].get_detect_target() == screens.Target.PostEnd
+                numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed)
             return result
         finally:
             capturing = False
@@ -297,32 +340,37 @@ def read_colored_post(api, board, aid):
     core.send = capture_send
     core._stream_screen = capture_stream
     try:
-        post = api.get_post(board, aid=aid)
+        if isinstance(api, BoardSession):
+            post = api.get_post(board, aid=aid, get_numbering=lambda: numbered, fallback_attempts=fallback_attempts)
+        else:
+            post = api.get_post(board, aid=aid)
     except Exception as exc:
-        exc.capture_diagnostics = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
-                                   'reached_end': reached_end, 'numbering': numbered.diagnostics()}
+        exc.capture_diagnostics = diagnostics()
         raise
     finally:
         core.send = send
         core._stream_screen = stream
-    diagnostics = {'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
-                   'reached_end': reached_end, 'numbering': numbered.diagnostics()}
-    post['ansi_diagnostics'] = diagnostics
+    capture = diagnostics()
+    post['ansi_diagnostics'] = capture
     body = post.get('full_content')
     if body:
         sdk_rows = body.split('\n')
         reconstructed = numbered.assemble()
         if reconstructed is not None:
             body = post['full_content'] = reconstructed
-            colors = {str(number - 1): list(runs) for number, runs in numbered.colors.items() if runs}
-            covered = len(numbered.colors)
+            reliable = numbered.colors.keys()
+            if mode == 'page':
+                reliable = reliable - numbered.color_conflict_rows
+            colors = {str(number - 1): list(numbered.colors[number]) for number in sorted(reliable)
+                      if numbered.colors[number]}
+            covered = len(reliable)
         else:
             colors, covered = match_colors(body, frames)
         selected_rows = body.split('\n')
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}
-        diagnostics.update(
+        capture.update(
             assembly='numbered' if reconstructed is not None else 'sdk',
             sdk_lines=len(sdk_rows), selected_lines=len(selected_rows),
             sdk_blank_lines=sum(not line.strip() for line in sdk_rows),

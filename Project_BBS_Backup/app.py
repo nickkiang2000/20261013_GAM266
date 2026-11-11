@@ -14,12 +14,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from archive import export_html
-from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, MIN_COMMAND_INTERVAL,
+import issue_records
+from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, FALLBACK_HEIGHT, MIN_COMMAND_INTERVAL,
                            StationRateLimit, TAIPEI, detect_rate_limit)
 from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.7.0'
+APP_VERSION = 'v2.11.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
@@ -35,6 +36,7 @@ ARTICLE_TABLE = '''CREATE TABLE IF NOT EXISTS articles(
     fetched REAL, source_index INTEGER, PRIMARY KEY(site,board,aid))'''
 SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2'}
 DIRECTIONS = {'newest': '新到舊', 'oldest': '舊到新'}
+CAPTURE_MODES = {'line': '逐行', 'page': '逐頁'}
 BEFORE_READ_SECONDS = 2
 BETWEEN_ITEMS_SECONDS = 3
 ITEMS_BEFORE_REST = 25
@@ -81,6 +83,8 @@ def database(folder):
                 db.execute('ALTER TABLE batch_ranges ADD COLUMN completed INTEGER NOT NULL DEFAULT 0')
             if 'direction' not in batch_columns:
                 db.execute("ALTER TABLE batch_ranges ADD COLUMN direction TEXT NOT NULL DEFAULT 'newest'")
+            if 'capture_mode' not in batch_columns:
+                db.execute("ALTER TABLE batch_ranges ADD COLUMN capture_mode TEXT NOT NULL DEFAULT 'line'")
             db.execute('''CREATE TABLE IF NOT EXISTS batch_verified(
                           site TEXT, board TEXT, aid TEXT, PRIMARY KEY(site,board,aid))''')
             db.execute('''CREATE TABLE IF NOT EXISTS batch_unavailable(
@@ -92,6 +96,7 @@ def database(folder):
             db.execute('''CREATE TABLE IF NOT EXISTS color_line_checks(
                           site TEXT, board TEXT, aid TEXT, idx INTEGER, matched INTEGER, total INTEGER,
                           PRIMARY KEY(site,board,aid))''')
+            issue_records.initialize(db)
     except Exception:
         db.close()
         raise
@@ -114,9 +119,11 @@ def save_article(db, board, post, *, site='PTT2', source_index=None, commit=True
         db.commit()
 
 
-def record_failure(db, site, board, index, reason):
+def record_failure(db, site, board, index, reason, *, article=False, aid=None):
     db.execute('INSERT INTO failures (site,board,idx,reason,created) VALUES(?,?,?,?,?)',
                (site, board, index, reason, time.time()))
+    if article:
+        issue_records.record(db, site, board, index, aid, reason)
     db.commit()
 
 
@@ -143,7 +150,10 @@ def find_pending_range(folder, site, board, *, with_progress=False):
         has_checkpoints = db.execute("SELECT 1 FROM sqlite_master WHERE name='batch_verified'").fetchone()
         reusable = db.execute('SELECT count(*) FROM batch_verified WHERE site=? AND board=?',
                               (site, board)).fetchone()[0] if has_checkpoints else 0
-        return {'first': first, 'last': last, 'direction': direction, 'reusable': reusable}
+        capture_mode = db.execute('SELECT capture_mode FROM batch_ranges WHERE site=? AND board=?',
+                                  (site, board)).fetchone()[0] if 'capture_mode' in columns else 'line'
+        return {'first': first, 'last': last, 'direction': direction, 'reusable': reusable,
+                'capture_mode': capture_mode}
 
 
 def stored_article(db, site, board, aid):
@@ -234,6 +244,7 @@ def board_screen_diagnostic(api):
 
 def note_unavailable(db, site, board, index, aid, status, *, checkpoint=False):
     with db:
+        issue_records.resolve(db, site, board, index, aid)
         if index is not None:
             db.execute('INSERT OR REPLACE INTO unavailable_articles VALUES(?,?,?,?,?)',
                        (site, board, index, aid, status))
@@ -289,10 +300,18 @@ def export_progress(done, total):
     STATE.update(exported=done, export_total=total)
 
 
-def publish_archive(db, folder):
+def publish_archive(db, folder, job=None):
     STATE['phase'] = 'export'
     publish_color_checks(db, folder)
     count = export_html(db, folder, progress=export_progress)
+    if job:
+        for site, board, index, aid, reason, attempts in db.execute(
+                'SELECT site,board,idx,aid,reason,attempts FROM article_issues ORDER BY site,board,idx,aid'):
+            job.event('offline_issue', site=site, board=board, index=index, aid=aid,
+                      reason=reason, attempts=attempts)
+        job.event('offline_records', unreadable=db.execute('SELECT count(*) FROM article_issues').fetchone()[0],
+                  color_checks=db.execute('SELECT count(*) FROM color_line_checks').fetchone()[0],
+                  unavailable=db.execute('SELECT count(*) FROM unavailable_articles').fetchone()[0])
     STATE['index_path'] = str(folder / 'index.html')
     reader = secrets.token_urlsafe(24)
     READERS[reader] = folder.resolve()
@@ -313,7 +332,7 @@ def export_existing(folder):
         job.event('start', version=APP_VERSION, operation='refresh_offline')
         with closing(database(folder)) as db:
             STATE['local_count'] = db.execute('SELECT count(*) FROM articles').fetchone()[0]
-            count = publish_archive(db, folder)
+            count = publish_archive(db, folder, job=job)
         STATE['message'] = '離線內容重整完成。'
         result = 'done'
         job.event('finish', exported=count)
@@ -374,6 +393,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     matched = coverage.get('matched', 0)
     total = coverage.get('total') or post['full_content'].count('\n') + 1
     with db:
+        issue_records.resolve(db, site, board, source_index, aid)
         if unchanged or keep_previous:
             db.execute('UPDATE articles SET source_index=coalesce(?,source_index) WHERE site=? AND board=? AND aid=?',
                        (source_index, site, board, aid))
@@ -472,11 +492,16 @@ def work(config):
         job = JobLog()
         STATE['log_path'] = str(job.path)
         mode = 'single' if config.get('aid') else config.get('mode', 'new')
+        requested_capture_mode = config.get('capture_mode')
+        height = FALLBACK_HEIGHT if mode == 'single' and config.get('short_terminal') else 100
+        all_articles = mode == 'new' and config.get('all_articles', False)
         job.event('start', version=APP_VERSION, site=site, board=board, capture_version=CAPTURE_VERSION,
                   mode=mode, requested_aid=config.get('aid') or None,
                   requested_start=config.get('start') if mode == 'new' else None,
                   requested_count=config.get('count') if mode == 'new' else None,
                   requested_direction=config.get('direction', 'newest') if mode == 'new' else None,
+                  requested_capture_mode=requested_capture_mode,
+                  all_articles=all_articles, terminal_height=height,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
                   between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
                   items_before_rest=ITEMS_BEFORE_REST, rest_seconds=REST_SECONDS)
@@ -484,8 +509,13 @@ def work(config):
         stage_started = time.monotonic()
         STATE['message'] = f'正在登入 {site}…'
         api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
-                        check_update=False, verify_ssl=True, screen_height=100)
+                        check_update=False, verify_ssl=True, screen_height=height)
         session = BoardSession(api)
+        session.capture_mode = requested_capture_mode or 'line'
+        def check_stop():
+            if STOP.is_set():
+                raise DownloadStopped()
+        session.check_stop = check_stop
         api.login(config.pop('user'), config.pop('password'), kick_other_session=False)
         job.event('login', seconds=round(time.monotonic() - stage_started, 3))
         def run_station(action, *, retry=None):
@@ -512,7 +542,7 @@ def work(config):
                           capture=getattr(exc, 'capture_diagnostics', STATE.get('ansi_diagnostics')),
                           stalled_line=getattr(exc, 'line', None), seconds=round(time.monotonic() - article_started, 3))
                 STATE['message'] = '指定文章待查。'
-                record_failure(db, site, board, None, f'{aid} {exc}')
+                record_failure(db, site, board, None, str(exc), article=True, aid=aid)
                 return
             job.event('article', aid=aid, outcome=outcome, coverage=STATE.get('ansi_coverage', {}),
                       capture=STATE['ansi_diagnostics'], seconds=round(time.monotonic() - article_started, 3))
@@ -523,17 +553,18 @@ def work(config):
         stage_started = time.monotonic()
         newest = run_station(lambda: session.get_newest_index(PyPtt.NewIndex.BOARD, board=board))
         board_query_seconds = round(time.monotonic() - stage_started, 3)
-        pending = db.execute('''SELECT first_index,last_index,direction FROM batch_ranges
+        pending = db.execute('''SELECT first_index,last_index,direction,capture_mode FROM batch_ranges
                                 WHERE site=? AND board=? AND completed=0''', (site, board)).fetchone()
         resumed = pending is not None and not config.get('new_batch')
         if resumed:
-            start, original_end, direction = pending
+            start, original_end, direction, previous_capture_mode = pending
+            session.capture_mode = requested_capture_mode or previous_capture_mode
             end = min(newest, original_end)
             expected_count = original_end - start + 1
         else:
             direction = config.get('direction', 'newest')
-            expected_count = config['count']
-            bounds = batch_bounds(newest, config['start'], expected_count, direction)
+            expected_count = newest if all_articles else config['count']
+            bounds = (1, newest) if all_articles else batch_bounds(newest, config['start'], expected_count, direction)
             start, end = bounds if bounds is not None else (1, 0)
             original_end = end
         if start > end:
@@ -549,10 +580,12 @@ def work(config):
             if not resumed:
                 db.execute('DELETE FROM batch_verified WHERE site=? AND board=?', (site, board))
                 db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=?', (site, board))
-            db.execute('''INSERT OR REPLACE INTO batch_ranges (site,board,first_index,last_index,direction)
-                          VALUES(?,?,?,?,?)''', (site, board, start, original_end, direction))
+            db.execute('''INSERT OR REPLACE INTO batch_ranges
+                          (site,board,first_index,last_index,direction,capture_mode)
+                          VALUES(?,?,?,?,?,?)''', (site, board, start, original_end, direction, session.capture_mode))
         planned_count = end - start + 1
         job.event('range', start=start, end=end, direction=direction, resumed=resumed,
+                  capture_mode=session.capture_mode,
                   newest=newest, first_scan=end if direction == 'newest' else start,
                   last_scan=start if direction == 'newest' else end, planned_count=planned_count,
                   expected_count=expected_count, clipped_count=expected_count - planned_count,
@@ -610,7 +643,7 @@ def work(config):
                     STATE['unavailable'] = STATE.get('unavailable', 0) + skipped
                     skip_until = checked_until
                     continue
-            STATE['message'] = f'正在讀取編號 {idx}（{DIRECTIONS[direction]}）'
+            STATE['message'] = f'正在讀取編號 {idx}（{DIRECTIONS[direction]} · {CAPTURE_MODES[session.capture_mode]}）'
             article_started = stage_started = time.monotonic()
             query_seconds = None
             body_seconds = None
@@ -631,7 +664,7 @@ def work(config):
                 outcome = status
             elif not aid or wrong_index:
                 reason = '站方回傳的編號與要求不符' if wrong_index else '未取得 AID'
-                record_failure(db, site, board, idx, reason)
+                record_failure(db, site, board, idx, reason, article=True)
                 STATE['unresolved'] += 1
                 show_issue(idx, aid, reason + '，可續傳重試')
                 outcome = 'wrong_index' if wrong_index else 'no_aid'
@@ -639,6 +672,7 @@ def work(config):
             elif existing and db.execute(
                     'SELECT 1 FROM batch_verified WHERE site=? AND board=? AND aid=?', (site, board, aid)).fetchone():
                 with db:
+                    issue_records.resolve(db, site, board, idx, aid)
                     db.execute('UPDATE articles SET source_index=? WHERE site=? AND board=? AND aid=?',
                                (idx, site, board, aid))
                     db.execute('DELETE FROM unavailable_articles WHERE site=? AND board=? AND (idx=? OR aid=?)',
@@ -669,7 +703,7 @@ def work(config):
                 try:
                     outcome, _ = run_station(read_article, retry=retry_article)
                 except (ArticleReadError, ArticleStalled) as exc:
-                    record_failure(db, site, board, idx, f'{aid} {exc}')
+                    record_failure(db, site, board, idx, str(exc), article=True, aid=aid)
                     STATE['unresolved'] += 1
                     show_issue(idx, aid, str(exc))
                     outcome = 'unreadable'
@@ -753,7 +787,8 @@ def work(config):
         STATE['message'] = f'站方限速。{detail}' if result == 'rate_limited' else f'已停止：{name}。{detail}'
         if db:
             try:
-                record_failure(db, site, board, idx, name)
+                record_failure(db, site, board, idx, name + '：' + detail,
+                               article=stage in ('query_article', 'read_article'), aid=aid)
             except sqlite3.Error:
                 STATE['message'] += ' 無法寫入失敗紀錄。'
     finally:
@@ -769,12 +804,13 @@ def work(config):
                 job.event('logout', method='transport_close',
                           seconds=round(time.monotonic() - logout_started, 3), error=logout_error)
         if db:
-            if any(STATE.get(key) for key in ('saved', 'skipped', 'resumed_verified', 'kept_previous', 'unavailable')):
+            if (any(STATE.get(key) for key in ('saved', 'skipped', 'resumed_verified', 'kept_previous', 'unavailable', 'unresolved'))
+                    or db.execute('SELECT 1 FROM article_issues LIMIT 1').fetchone()):
                 message = STATE['message']
                 STATE['message'] = '正在建立離線頁面…'
                 export_started = time.monotonic()
                 try:
-                    count = publish_archive(db, folder)
+                    count = publish_archive(db, folder, job=job)
                     if job:
                         job.event('export', seconds=round(time.monotonic() - export_started, 3), html_count=count)
                     STATE['message'] = message
@@ -881,12 +917,25 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError()
                 data['aid'] = aid
                 data['new_batch'] = mode == 'new'
+                data['short_terminal'] = bool(aid) and data.get('short_terminal') == 'on'
+                capture_mode = data.get('capture_mode', '')
+                if capture_mode not in ('', 'line', 'page'):
+                    raise ValueError()
+                data['capture_mode'] = capture_mode or None
+                data['all_articles'] = mode == 'new' and data.get('all_articles') == 'on'
+                if aid and data['all_articles']:
+                    raise ValueError()
                 if mode == 'new' and not aid:
                     data['direction'] = data.get('direction', 'newest')
-                    data['count'] = int(data['count'])
-                    data['start'] = int(data['start'])
-                    if data['direction'] not in DIRECTIONS or not 1 <= data['count'] <= 10000 or data['start'] < 0:
+                    if data['direction'] not in DIRECTIONS:
                         raise ValueError()
+                    if data['all_articles']:
+                        data['count'] = data['start'] = None
+                    else:
+                        data['count'] = int(data['count'])
+                        data['start'] = int(data['start'])
+                        if not 1 <= data['count'] <= 10000 or data['start'] < 0:
+                            raise ValueError()
                 if not all(isinstance(data[key], str) and data[key] for key in ('user', 'password')):
                     raise ValueError()
                 target, args = work, (data,)

@@ -14,6 +14,7 @@ main { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); ga
 form, section, dialog { background: #10121a; padding: 12px; border: 1px solid #343952; }
 form { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
 label { display: block; grid-column: span 2; min-width: 0; }
+label[hidden] { display: none; }
 .half { grid-column: span 3; }
 .wide { grid-column: 1 / -1; }
 input:not([type=checkbox],[type=hidden]), select { display: block; width: 100%; padding: 6px 8px; margin-top: 3px;
@@ -25,6 +26,10 @@ button:disabled { cursor: default; }
 #run:disabled { opacity: .5; }
 #stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.count-fields { display: flex; gap: 6px; align-items: end; }
+.count-fields label { flex: 1; }
+.count-fields button { white-space: nowrap; }
+#all-articles[aria-pressed="true"] { outline: 2px solid #6c9bce; }
 .download-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .download-action { min-width: 0; border: 1px solid #343952; padding: 7px; }
 .download-action p { margin-top: 5px; }
@@ -48,7 +53,7 @@ summary { cursor: pointer; }
 .advanced-fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
 dialog { color: inherit; max-width: min(430px, 92vw); }
 dialog::backdrop { background: #000a; }
-.heading-actions { display: flex; align-items: center; gap: .7rem; }
+.heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: .7rem; }
 .version { font-size: .8rem; font-variant-numeric: tabular-nums; }
 .notice { position: fixed; inset: auto 12px 12px auto; z-index: 2; width: min(24rem, calc(100% - 24px));
           background: #171d2f; color: #eee; border: 1px solid #59658b; border-radius: 5px; padding: 10px 12px;
@@ -80,7 +85,8 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 </style>
 <header class="heading"><h1>PTT／PTT2 文章備份</h1><div class="heading-actions">
 <span class="version">__APP_VERSION__</span>
-<a href="help.html" target="_blank" rel="noopener">操作與色彩說明</a>
+<a href="help.html" target="_blank" rel="noopener">操作說明與紀錄</a>
+<button type="button" id="desktop-toggle" aria-pressed="false">啟用桌面通知</button>
 <button type="button" id="theme-toggle" aria-pressed="true">切換淺色</button></div></header>
 <main>
 <form id="form" method="post" autocomplete="off">
@@ -89,12 +95,15 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 <label>帳號<input name="user" required autocomplete="off"></label>
 <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
 <label class="half">英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
-<label class="half">掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
+<div class="half count-fields">
+    <label>掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
+    <button type="button" id="all-articles" aria-pressed="false">下載全部文章</button>
+</div>
 <label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
 <p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
 <div class="download-actions wide">
     <div class="download-action">
-        <button id="run" aria-describedby="new-summary">登入並重定義下載</button>
+        <button id="run" aria-describedby="new-summary">登入開啟新下載</button>
         <p id="new-summary" class="hint destination"></p>
     </div>
     <div class="download-action">
@@ -104,7 +113,6 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 </div>
 <div class="actions wide">
     <button type="button" id="export">離線內容重整</button>
-    <button type="button" id="desktop-toggle" aria-pressed="false">啟用桌面通知</button>
 </div>
 <p id="rate-status" class="hint wide" hidden></p>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
@@ -112,8 +120,11 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
         <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
         <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
         <label>掃描方向<select name="direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
+        <label>新下載擷取方式<select name="capture_mode"><option value="line">逐行 ↓（預設）</option><option value="page">逐頁 →</option></select></label>
+        <label id="resume-capture-field" hidden>續傳擷取方式<select name="resume_capture_mode"><option value="">沿用上次設定</option><option value="line">逐行 ↓</option><option value="page">逐頁 →</option></select></label>
+        <label class="wide"><input name="short_terminal" type="checkbox" disabled> 24 列相容讀取（指定文章）</label>
     </div>
-    <p class="hint">起始編號寫0 則最新一篇為起始編號。</p>
+    <p class="hint">起始編號若寫0，則從最新一篇的編號起始。</p>
 </details>
 </form>
 <section><div class="status-header"><h2>下載狀態</h2><button type="button" id="stop" disabled>停止</button></div>
@@ -153,6 +164,7 @@ const indexLink = document.getElementById('index-link');
 const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
 const themeToggle = document.getElementById('theme-toggle');
 const desktopToggle = document.getElementById('desktop-toggle');
+const allButton = document.getElementById('all-articles');
 const notice = document.getElementById('notice');
 const advanced = document.getElementById('advanced');
 let previousSuffix = '';
@@ -170,6 +182,7 @@ let refreshApplied = 0;
 let connectionLost = false;
 let rateLimits = {};
 let lastWaitNotice = '';
+let allArticles = false;
 
 function selectedRateLimit() {
     return rateLimits[form.elements.site.value];
@@ -277,32 +290,60 @@ window.addEventListener('focus', updateDesktopToggle);
 updateDesktopToggle();
 
 function showAdvancedNote() {
-    const {aid, start, direction, site, board, count, folder} = form.elements;
+    const {aid, start, direction, site, board, count, folder, short_terminal, capture_mode} = form.elements;
     const first = Number(start.value);
     const oldestFirst = direction.value === 'oldest';
-    aid.disabled = first > 0;
+    aid.disabled = first > 0 || allArticles;
     const single = !aid.disabled && Boolean(aid.value.trim());
-    start.disabled = direction.disabled = single;
+    start.disabled = count.disabled = single || allArticles;
+    direction.disabled = single;
+    short_terminal.disabled = !single;
+    if (!single) short_terminal.checked = false;
+    allButton.disabled = single;
+    allButton.setAttribute('aria-pressed', String(allArticles));
+    setText(allButton, allArticles ? '已選全部文章' : '下載全部文章');
     const settings = [];
     if (single) settings.push(`單篇 #${aid.value.replace(/^#/, '')}`);
+    else if (allArticles) settings.push('全部文章');
     else {
         if (first > 0) settings.push(`起始 ${start.value}`);
         if (oldestFirst) settings.push('舊到新');
     }
     setText('advanced-note', settings.length ? ' · ' + settings.join(' · ') : '');
     let range;
-    if (single) range = `單篇 #${aid.value.replace(/^#/, '')}`;
+    if (single) range = `單篇 #${aid.value.replace(/^#/, '')}${short_terminal.checked ? ' · 24 列相容讀取' : ''}`;
+    else if (allArticles) range = `全部一般文章 · ${oldestFirst ? '舊到新' : '新到舊'}`;
     else if (first === 0 && oldestFirst) range = '從最新一篇起 · 舊到新 · 只掃最新一篇';
     else range = `從${first > 0 ? ` ${first} ` : '最新一篇'}起 · 最多 ${count.value} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
-    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${range} · ${folder.value || '未填備份目錄'}`);
+    const warning = pending && !single ? ' · 會取代未完成的批次設定' : '';
+    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${range} · ${captureLabel(capture_mode.value)} · ${folder.value || '未填備份目錄'}${warning}`);
+    showResumeSummary();
 }
 
+function captureLabel(mode) {
+    return mode === 'page' ? '逐頁 →' : '逐行 ↓';
+}
+
+function showResumeSummary() {
+    document.getElementById('resume-capture-field').hidden = !pending;
+    if (!pending) return;
+    const {first, last, direction, reusable, capture_mode} = pending;
+    const range = direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
+    const mode = form.elements.resume_capture_mode.value || capture_mode;
+    setText('resume-summary', `上次未完成：${range} · 已有 ${reusable} 篇可沿用 · 本次${captureLabel(mode)} · ${pending.folder}`);
+}
+
+allButton.onclick = () => {
+    allArticles = !allArticles;
+    showAdvancedNote();
+};
 advanced.addEventListener('invalid', () => { advanced.open = true; }, true);
 
 function checkPending() {
     clearTimeout(pendingTimer);
     const request = ++pendingRequest;
     pending = null;
+    showAdvancedNote();
     updateDownloadButtons();
     const {site, board, folder} = form.elements;
     if (!board.value || !board.checkValidity() || !folder.value) {
@@ -319,11 +360,9 @@ function checkPending() {
             if (!response.ok) throw Error('pending');
             const result = await response.json();
             if (request !== pendingRequest) return;
-            pending = result.pending;
+            pending = result.pending ? {...result.pending, folder: result.folder} : null;
             if (pending) {
-                const {first, last, direction, reusable} = pending;
-                const range = direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
-                setText('resume-summary', `上次未完成：${range} · 已有 ${reusable} 篇可沿用 · ${result.folder}`);
+                showAdvancedNote();
             } else {
                 setText('resume-summary', '這個看板與目錄沒有未完成批次。');
             }
@@ -373,7 +412,10 @@ function saveForm() {
 
 form.addEventListener('input', event => {
     showAdvancedNote();
-    if (['site', 'board', 'folder'].includes(event.target.name)) checkPending();
+    if (['site', 'board', 'folder'].includes(event.target.name)) {
+        form.elements.resume_capture_mode.value = '';
+        checkPending();
+    }
     if (!preferenceFields.includes(event.target.name)) return;
     formEdited = true;
     clearTimeout(preferenceTimer);
@@ -435,14 +477,14 @@ form.addEventListener('submit', event => {
     form.elements.aid.value = '';
     showAdvancedNote();
     saveForm();
-    send('/start', {...data, mode: 'new'});
+    send('/start', {...data, mode: 'new', all_articles: allArticles ? 'on' : ''});
 });
 resume.onclick = () => {
     const {site, board, folder, user, password} = form.elements;
     if (![board, folder, user, password].every(field => field.reportValidity())) return;
     normalizeDestination();
     send('/start', {mode: 'resume', site: site.value, board: board.value, folder: folder.value,
-        user: user.value, password: password.value});
+        user: user.value, password: password.value, capture_mode: form.elements.resume_capture_mode.value});
     password.value = '';
 };
 exportButton.onclick = () => {

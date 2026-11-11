@@ -4,6 +4,8 @@ from hashlib import sha256
 from html import escape
 from itertools import groupby
 import json
+from issue_records import report as issue_report
+import issue_records
 from pathlib import Path
 
 from ansi_style import ANSI_STYLE, METADATA_STYLE, render_metadata, render_run
@@ -262,7 +264,14 @@ def export_html(db, folder, progress=None):
             key = keys[i]
             title = title or '(無標題)'
             label = f'{source_index} · ' if source_index is not None else ''
-            post = json.loads(data) if data is not None else {}
+            render_error = None
+            try:
+                post = json.loads(data) if data is not None else {}
+                if not isinstance(post, dict):
+                    raise ValueError('Article data must be an object')
+            except (ValueError, TypeError) as exc:
+                post = {}
+                render_error = type(exc).__name__
             author = post.get('author') or ''
             label += f'{author} · ' if author else ''
             entries.append(f'<li><a id="a-{key}" href="articles/{key}.html">'
@@ -275,14 +284,29 @@ def export_html(db, folder, progress=None):
             links.append(f'<button id="frame-view" type="button" aria-pressed="false">{FRAME_ROWS} 行視窗</button>')
             nav = '<nav>' + ''.join(links) + '</nav>'
             colored = bool(post.get('ansi_lines') or post.get('headerless'))
-            if data is None:
-                article = f'{nav}<h1>{escape(title)}</h1>' + article_body(body or title, None)
-            elif colored:
-                article = color_article(site, board, title, post, body, nav)
-            else:
-                article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
-                           f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
+            try:
+                if data is None:
+                    article = f'{nav}<h1>{escape(title)}</h1>' + article_body(body or title, None)
+                elif colored:
+                    article = color_article(site, board, title, post, body, nav)
+                else:
+                    article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
+                               f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
+            except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                render_error = type(exc).__name__
+            if render_error:
+                colored = False
+                article = (nav + f'<h1>{escape(title)}</h1><p>原格式呈現失敗，以下保留本機正文；'
+                           '<a href="../help.html#issue-records">查看錯漏紀錄</a>。</p><pre>' +
+                           escape(body or '') + '</pre>')
+                with db:
+                    issue_records.record(db, site, board, source_index, aid,
+                                         '原格式呈現失敗，已改用純文字 HTML：' + render_error, kind='html')
             write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored))
+            if data is not None and not render_error:
+                with db:
+                    db.execute('DELETE FROM article_issues WHERE site=? AND board=? AND issue_key=?',
+                               (site, board, 'html:' + aid))
             if data is not None:
                 count += 1
                 if progress:
@@ -311,8 +335,8 @@ def export_html(db, folder, progress=None):
                         + pagination + '</div>' + ''.join(pages) + '</section>')
     index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
              '<h1>BBS 離線文章</h1><span>› <span id="active-board"></span></span>'
-             '<a href="help.html">操作與色彩說明</a></header>'
+             '<a href="help.html">操作說明與紀錄</a></header>'
              + (''.join(sections) if sections else '<p>尚無文章</p>'))
-    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8'))
+    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8').replace('<!-- ISSUE_RECORDS -->', issue_report(db)))
     write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS))
     return count
