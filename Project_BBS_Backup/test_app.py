@@ -53,6 +53,49 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(database_file.read_bytes(), before)
             self.assertFalse((main / 'index.html').exists())
 
+    def test_empty_notice_records_status_and_leaves_session_at_verified_list(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from PyPtt import command
+        from board_session import BoardSession
+
+        listing = '【看板】 [i]看板設定\n> 462 test\n文章列表 (b)進板'
+        for mode in ('line', 'page'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d, \
+                    closing(app.database(Path(d))) as db, patch.object(app, 'STATE', {}):
+                screen = ''
+                keys = []
+
+                def send(message, targets):
+                    nonlocal screen
+                    keys.append(message)
+                    screen = ('\n\n ◆ 此文章無內容            [按任意鍵繼續]'
+                              if message == command.enter * 2 else listing)
+                    return next(i for i, target in enumerate(targets) if target.is_match(screen, '>'))
+
+                config = SimpleNamespace(screen_height=100)
+                core = SimpleNamespace(config=config, send=send, _decode_screen=Mock(),
+                                       _stream_screen=Mock(), get_screen_queue=lambda: [screen])
+                session = BoardSession(SimpleNamespace(connect_core=core, config=config, cursor='>'))
+                session.capture_mode = mode
+                session.board = 'Test'
+                session.view = 'query'
+                session.selected = SimpleNamespace(aid='0-x7W9kB', index=462, author='', title='文章',
+                                                   url='', money=0, list_date='', push_number=0, lock_post=False)
+                app.save_article(db, 'Test', {'aid': '0-x7W9kB', 'full_content': '舊備份',
+                                             'pass_format_check': True}, site='PTT', source_index=462)
+                outcome, _ = app.download_article(session, db, 'PTT', 'Test', '0-x7W9kB',
+                                                  source_index=462, checkpoint=True)
+                self.assertEqual(outcome, 'empty')
+                self.assertEqual(session.view, 'list')
+                self.assertEqual(keys, [command.enter * 2, command.space])
+                self.assertEqual(app.resume_checkpoints(db, 'PTT', 'Test')[462], ('0-x7W9kB', 'empty'))
+                self.assertEqual(db.execute('SELECT body FROM articles').fetchone(), ('舊備份',))
+                app.export_html(db, Path(d))
+                self.assertIn('站上無正文', (Path(d) / 'index.html').read_text(encoding='utf-8'))
+                screen = '正文提到這句話\n◆ 此文章無內容 [按任意鍵繼續]'
+                self.assertFalse(session._is_empty_article_notice())
+
     def test_page_first_reopens_same_article_once_after_safe_return(self):
         from unittest.mock import Mock
         from board_session import ArticleStalled
@@ -605,8 +648,13 @@ class StorageTests(unittest.TestCase):
             config = dict(site='PTT', board='Test', start=9, count=2, folder=d, user='test', password='dummy')
             for resumed, expected in [(False, (1, 0, 1)), (True, (1, 0, 2))]:
                 app.STATE.update(saved=0, skipped=0, unresolved=0, timed_samples=0, resumed=False, resumed_verified=0)
+                if resumed:
+                    # Simulate an unfinished batch created when line mode was selectable.
+                    with closing(sqlite3.connect(Path(d) / 'articles.sqlite3')) as db, db:
+                        db.execute("UPDATE batch_ranges SET capture_mode='line'")
                 app.work(dict(config, direction='newest' if resumed else 'oldest',
-                              capture_mode='page' if resumed else 'line'))
+                              backup_mode='recheck' if resumed else 'fill', capture_mode='line'))
+                self.assertEqual(api.capture_mode, 'page')
                 self.assertEqual((app.STATE['batch_start'], app.STATE['batch_end']), (9, 10))
                 self.assertEqual((app.STATE['saved'], app.STATE['skipped'], app.STATE['scanned']), expected)
                 self.assertEqual(app.STATE['resumed'], resumed)
@@ -615,9 +663,10 @@ class StorageTests(unittest.TestCase):
             queries = [call.kwargs['index'] for call in api.get_post.call_args_list if call.kwargs.get('query')]
             self.assertEqual(queries, [9, 9, 10])
             with closing(sqlite3.connect(Path(d) / 'articles.sqlite3')) as db:
-                self.assertEqual(db.execute('SELECT capture_mode FROM batch_ranges').fetchone(), ('page',))
+                self.assertEqual(db.execute('SELECT capture_mode,backup_mode FROM batch_ranges').fetchone(),
+                                 ('page', 'fill'))
 
-    def test_legacy_pending_batch_defaults_to_line_mode(self):
+    def test_legacy_pending_batch_can_read_stored_capture_mode(self):
         with tempfile.TemporaryDirectory() as d:
             folder = Path(d)
             with closing(sqlite3.connect(folder / 'articles.sqlite3')) as db, db:
@@ -881,6 +930,26 @@ class BoardSessionTests(unittest.TestCase):
                 if expected:
                     self.assertEqual(numbered.page_line_offset, 1)
                     self.assertEqual(numbered.page_ranges[-1]['mapped'], [4, 7])
+
+    def test_page_capture_keeps_blank_row_when_second_screen_proves_shift(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        body = ['' if index % 2 else f'正文 {index}' for index in range(1, 174)]
+        for expected_offset in (0, 1):
+            with self.subTest(offset=expected_offset):
+                numbered = NumberedArticle(page_mode=True)
+                first = body[:99]
+                colored = [('色', ('f3',))]
+                styles = [CapturedLine(row, colored if index == 1 else ())
+                          for index, row in enumerate(first)]
+                numbered.observe(first, '瀏覽 第 1/2 頁 (58%) 第 1~98 行', at_end=False, styled=styles)
+                self.assertFalse(numbered.extra_first_row)
+                last = body[73 + expected_offset:172 + expected_offset]
+                numbered.observe(last, '瀏覽 第 2/2 頁 (100%) 第 74~172 行', at_end=True, styled=None)
+                self.assertEqual(numbered.page_line_offset, expected_offset)
+                self.assertEqual(numbered.assemble(), '\n'.join(body[:172 + expected_offset]))
+                self.assertEqual(numbered.colors[2], colored)
+                self.assertEqual(numbered.extra_first_row, bool(expected_offset))
 
     def test_resize_reuses_drained_list_redraw_without_ctrl_l(self):
         import asyncio

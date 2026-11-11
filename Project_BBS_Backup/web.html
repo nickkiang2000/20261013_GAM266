@@ -42,7 +42,6 @@ button:disabled { cursor: default; }
     border: 1px solid #59658b; border-left: 0; border-radius: 0 3px 3px 0;
     background: #151c31; color: #d9faff; overflow-wrap: anywhere; }
 .folder-suffix[hidden] { display: none; }
-#resume-capture-field { margin-top: 6px; max-width: 16rem; }
 html[data-theme="light"] :is(.range-value,.folder-suffix) { background: #e7edf4; color: #244565; border-color: #98a9bc; }
 .download-actions { display: grid; gap: 6px; }
 .download-action { display: grid; grid-template-columns: 9em minmax(0, 1fr); align-items: start;
@@ -142,10 +141,7 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     </div>
     <div class="download-action">
         <button type="button" id="resume" aria-describedby="resume-summary" disabled>登入續傳</button>
-        <div>
-            <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
-            <label id="resume-capture-field" hidden>續傳擷取方式<select name="resume_capture_mode"><option value="">沿用上次設定</option><option value="line">逐行 ↓</option><option value="page">自動擷取</option></select></label>
-        </div>
+        <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
     </div>
     <div class="download-action">
         <button type="button" id="export" aria-describedby="export-hint">離線內容重整</button>
@@ -153,11 +149,6 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     </div>
 </div>
 <p id="rate-status" class="hint wide" hidden></p>
-<details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
-    <div class="advanced-fields">
-        <label>新下載擷取方式<select name="capture_mode"><option value="page">自動擷取（預設）</option><option value="line">逐行 ↓</option></select></label>
-    </div>
-</details>
 <details class="wide" id="test-area"><summary>單篇測試</summary>
     <div class="advanced-fields">
         <label class="half">指定文章 AID<input name="test_aid" placeholder="例如 1AdzogFB"></label>
@@ -209,7 +200,6 @@ const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', '
 const themeToggle = document.getElementById('theme-toggle');
 const desktopToggle = document.getElementById('desktop-toggle');
 const notice = document.getElementById('notice');
-const advanced = document.getElementById('advanced');
 let resolvedFolder = '';
 let preferenceTimer;
 let preferenceWrites = Promise.resolve();
@@ -293,7 +283,7 @@ function showResult(state) {
     if (state.reused_local) summary.push(`沿用本機 ${state.reused_local} 篇`);
     if (state.ansi_review) summary.push(`待核色 ${state.ansi_review} 篇`);
     if (state.unresolved) summary.push(`待查 ${state.unresolved} 筆`);
-    if (state.unavailable) summary.push(`刪除或鎖定 ${state.unavailable} 筆`);
+    if (state.unavailable) summary.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
     if (state.index_path) summary.push(`離線 HTML ${state.exported} 篇`);
     showNotice(titles[state.result] || '備份狀態更新',
         [state.message, summary.join(' · ')].filter(Boolean).join('\n'), state.task_id);
@@ -333,8 +323,8 @@ document.getElementById('close-notice').onclick = () => { notice.hidden = true; 
 window.addEventListener('focus', updateDesktopToggle);
 updateDesktopToggle();
 
-function showAdvancedNote() {
-    const {start, direction, site, board, count, folder, backup_mode, capture_mode,
+function updateFormSummary() {
+    const {start, direction, site, board, count, folder, backup_mode,
         test_aid, test_capture_mode, test_short_terminal} = form.elements;
     const first = Number(start.value);
     const amount = Number(count.value);
@@ -354,7 +344,6 @@ function showAdvancedNote() {
     setText('range-preview', estimate);
     document.getElementById('range-preview').title = valid && first > 0
         ? '實際掃描範圍以登入時的看板編號為準' : '';
-    setText('advanced-note', ` · ${captureLabel(capture_mode.value)}`);
     const name = archiveName();
     const actualLeaf = resolvedFolder.split(/[\\/]/).filter(Boolean).at(-1);
     folderSuffix.hidden = !name || Boolean(resolvedFolder && actualLeaf?.toLowerCase() !== name.toLowerCase());
@@ -362,19 +351,16 @@ function showAdvancedNote() {
     const root = rootFolder(folder.value);
     const path = resolvedFolder || (root && name ? root.replace(/[\\/]+$/, '') + '\\' + name : root);
     const warning = pending ? `。將取代未完成範圍 ${pendingRange(pending)}` : '';
-    setText('new-summary', `${backupLabel(backup_mode.value)} · ${captureLabel(capture_mode.value)} · ${range} · ${path || '未填備份目錄'}${warning}`);
+    setText('new-summary', `${backupLabel(backup_mode.value)} · ${range} · ${path || '未填備份目錄'}${warning}`);
     const testAid = test_aid.value.trim().replace(/^#/, '');
     const height = test_short_terminal.checked ? 24 : 100;
     const testMode = test_capture_mode.value;
+    const testMethod = testMode === 'page' ? '逐頁（Page Down）' : '逐行 ↓';
     const destination = testAid && board.value
         ? `test-downloads/${site.value}_${board.value}/${testAid}/${testMode}-${height}/`
         : 'test-downloads/';
-    setText('test-summary', `${captureLabel(testMode, true)} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
+    setText('test-summary', `${testMethod} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
     showResumeSummary();
-}
-
-function captureLabel(mode, test = false) {
-    return mode === 'page' ? (test ? '逐頁（Page Down）' : '自動擷取') : '逐行 ↓';
 }
 
 function backupLabel(mode) {
@@ -386,21 +372,17 @@ function pendingRange({first, last, direction}) {
 }
 
 function showResumeSummary() {
-    document.getElementById('resume-capture-field').hidden = !pending;
     if (!pending) return;
-    const {reusable, capture_mode, backup_mode} = pending;
-    const mode = form.elements.resume_capture_mode.value || capture_mode;
-    setText('resume-summary', `上次未完成：${pendingRange(pending)} · ${backupLabel(backup_mode)} · 已有 ${reusable} 篇可沿用 · 本次${captureLabel(mode)} · ${pending.folder}`);
+    const {reusable, backup_mode} = pending;
+    setText('resume-summary', `上次未完成：${pendingRange(pending)} · ${backupLabel(backup_mode)} · 已有 ${reusable} 篇可沿用`);
 }
-
-advanced.addEventListener('invalid', () => { advanced.open = true; }, true);
 
 function checkPending() {
     clearTimeout(pendingTimer);
     const request = ++pendingRequest;
     pending = null;
     resolvedFolder = '';
-    showAdvancedNote();
+    updateFormSummary();
     updateDownloadButtons();
     const {site, board, folder} = form.elements;
     if (!board.value || !board.checkValidity() || !folder.value) {
@@ -418,9 +400,9 @@ function checkPending() {
             const result = await response.json();
             if (request !== pendingRequest) return;
             resolvedFolder = result.folder || '';
-            pending = result.pending ? {...result.pending, folder: resolvedFolder} : null;
+            pending = result.pending || null;
             if (!pending) setText('resume-summary', '這個看板與目錄沒有未完成批次。');
-            showAdvancedNote();
+            updateFormSummary();
             updateDownloadButtons();
         } catch {
             if (request === pendingRequest) setText('resume-summary', '無法查詢續傳，請確認備份目錄。');
@@ -470,9 +452,8 @@ function saveForm() {
 }
 
 form.addEventListener('input', event => {
-    showAdvancedNote();
+    updateFormSummary();
     if (['site', 'board', 'folder'].includes(event.target.name)) {
-        form.elements.resume_capture_mode.value = '';
         checkPending();
     }
     if (!preferenceFields.includes(event.target.name)) return;
@@ -495,10 +476,10 @@ fetch('/preferences').then(response => response.json()).then(values => {
     form.elements.folder.value = rootFolder(form.elements.folder.value);
     applyTheme(values.theme);
     if (!form.elements.direction.value) form.elements.direction.value = 'newest';
-    showAdvancedNote();
+    updateFormSummary();
     checkPending();
 }).catch(() => {});
-showAdvancedNote();
+updateFormSummary();
 
 async function send(path, data) {
     try {
@@ -532,7 +513,7 @@ form.addEventListener('submit', event => {
     data.folder = rootFolder(data.folder);
     form.elements.password.value = '';
     for (const key of ['test_aid', 'test_capture_mode', 'test_short_terminal']) delete data[key];
-    showAdvancedNote();
+    updateFormSummary();
     saveForm();
     send('/start', {...data, mode: 'new'});
 });
@@ -540,7 +521,7 @@ resume.onclick = () => {
     const {site, board, folder, user, password} = form.elements;
     if (![board, folder, user, password].every(field => field.reportValidity())) return;
     send('/start', {mode: 'resume', site: site.value, board: board.value, folder: rootFolder(folder.value),
-        user: user.value, password: password.value, capture_mode: form.elements.resume_capture_mode.value});
+        user: user.value, password: password.value});
     password.value = '';
 };
 testButton.onclick = () => {
@@ -556,7 +537,7 @@ testButton.onclick = () => {
         aid, capture_mode: test_capture_mode.value, short_terminal: test_short_terminal.checked ? 'on' : ''});
     password.value = '';
     test_aid.value = '';
-    showAdvancedNote();
+    updateFormSummary();
 };
 form.elements.test_aid.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.isComposing) {
@@ -622,7 +603,7 @@ async function refresh() {
     const review = [];
     if (state.resumed_verified) review.push(`沿用 ${state.resumed_verified} 篇`);
     if (state.unresolved) review.push(`文章待查 ${state.unresolved} 筆`);
-    if (state.unavailable) review.push(`刪除或鎖定 ${state.unavailable} 筆`);
+    if (state.unavailable) review.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
     if (state.kept_previous) review.push(`保留舊備份 ${state.kept_previous} 篇`);
     if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
     document.getElementById('issue-details').hidden = !review.length;

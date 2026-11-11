@@ -153,6 +153,7 @@ class NumberedArticle:
     def __init__(self, *, page_mode=False):
         self.page_mode = page_mode
         self.extra_first_row = False
+        self.first_padding_row = None
         self.page_line_offset = 0
         self.page_ranges = []
         self.single_screen_body = None
@@ -192,19 +193,35 @@ class NumberedArticle:
                   and (styled is None or not any(line.color_runs for line in styled[max(count, 0):])))
         # Some first screens contain one more display row than the reported span.
         # Keep it provisionally, then require a unique overlap on the next screen.
-        if (self.page_mode and self.seen == 1 and not at_end and first == 1
-                and count > 0 and len(extra) == 1 and not padded):
-            self.extra_first_row = True
-            count += 1
-        elif self.page_mode and self.extra_first_row and self.seen == 2:
-            candidates = [offset for offset in (0, 1)
-                          if self._confirms_first_overlap(first + offset, rows[:count])]
+        if self.page_mode and self.seen == 1 and not at_end and first == 1 and count > 0 and len(extra) == 1:
+            if padded:
+                self.first_padding_row = (extra[0], styled[count].color_runs if styled is not None else None)
+            else:
+                self.extra_first_row = True
+                count += 1
+        elif self.page_mode and self.seen == 2 and (self.extra_first_row or self.first_padding_row is not None):
+            candidates = []
+            visible = rows[:count]
+            if self._confirms_first_overlap(first, visible) or (
+                    self.first_padding_row is not None and first == len(self.rows) + 1):
+                candidates.append(0)
+            extra_row = self.first_padding_row[0] if self.first_padding_row is not None else None
+            if self._confirms_first_overlap(first + 1, visible, extra_row=extra_row):
+                candidates.append(1)
             if len(candidates) != 1:
                 self.width_mismatches += 1
                 self.width_sample.append({'screen': self.seen, 'range': span,
                                           'rows': len(rows), 'overlap_candidates': candidates})
                 return
             self.page_line_offset = candidates[0]
+            if self.page_line_offset and self.first_padding_row is not None:
+                row, runs = self.first_padding_row
+                number = len(self.rows) + 1
+                self.rows[number] = row
+                if runs is not None:
+                    self.colors[number] = runs
+                self.extra_first_row = True
+                self.page_ranges[0]['mapped'][1] = number
         if first < 1 or not 0 < count <= len(rows) or (any(rows[count:]) and not padded):
             self.width_mismatches += 1
             # Match the SDK's first-and-final screen extraction. The status
@@ -240,13 +257,15 @@ class NumberedArticle:
                     self.color_conflicts += 1
                     self.color_conflict_rows.add(number)
 
-    def _confirms_first_overlap(self, first, rows):
+    def _confirms_first_overlap(self, first, rows, *, extra_row=None):
         end = max(self.rows, default=0)
-        if not 1 <= first <= end < first + len(rows) - 1:
+        candidate_end = end + (extra_row is not None)
+        if not 1 <= first <= candidate_end < first + len(rows) - 1:
             return False
-        overlap = rows[:end - first + 1]
-        return (any(row.strip() for row in overlap)
-                and all(self.rows[first + index] == row for index, row in enumerate(overlap)))
+        expected = [self.rows[number] for number in range(first, end + 1)]
+        if extra_row is not None:
+            expected.append(extra_row)
+        return any(row.strip() for row in expected) and rows[:len(expected)] == expected
 
     def covers(self, end):
         return (not (self.conflicts or self.width_mismatches or self.unnumbered)

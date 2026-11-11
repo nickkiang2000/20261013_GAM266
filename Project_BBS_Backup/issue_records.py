@@ -90,8 +90,10 @@ def report(db):
             'SELECT site,board,idx,aid,status FROM unavailable_articles ORDER BY site,board,idx'):
         saved = db.execute('SELECT 1 FROM articles WHERE site=? AND board=? AND aid=?',
                            (site, board, aid)).fetchone()
-        entries.append((site, board, idx, aid, '被刪除' if status == 'deleted' else '已鎖定',
-                        '站方已確認不可讀，已跳過。', bool(saved), '保留舊備份' if saved else '索引顯示站方狀態'))
+        label = {'deleted': '被刪除', 'locked': '已鎖定', 'empty': '站上無正文'}[status]
+        reason = '站方顯示此文章無內容。' if status == 'empty' else '站方已確認不可讀，已跳過。'
+        entries.append((site, board, idx, aid, label, reason, bool(saved),
+                        '保留舊備份' if saved else '索引顯示站方狀態'))
     header = ('<section id="issue-records"><h2>錯漏紀錄</h2>'
               '<p>此表反映本機已遇到的問題，不是全板完整性證明；未掃描文章不在此表。'
               '編號可能隨站上文章異動，特案查找請優先使用 AID。補抓成功會清除對應待查，'

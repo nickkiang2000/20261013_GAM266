@@ -20,7 +20,7 @@ from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed,
 from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.15.0'
+APP_VERSION = 'v2.16.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
@@ -257,7 +257,8 @@ def note_unavailable(db, site, board, index, aid, status, *, checkpoint=False):
                 db.execute('INSERT OR REPLACE INTO batch_unavailable VALUES(?,?,?,?,?)',
                            (site, board, index, aid, status))
     STATE['unavailable'] = STATE.get('unavailable', 0) + 1
-    show_issue(index, aid, '（被刪除）' if status == 'deleted' else '（已鎖定）')
+    label = {'deleted': '（被刪除）', 'locked': '（已鎖定）', 'empty': '（站上無正文）'}[status]
+    show_issue(index, aid, label)
 
 
 def publish_color_checks(db, folder):
@@ -407,6 +408,10 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     if post.get('is_lock'):
         note_unavailable(db, site, board, source_index, aid, 'locked', checkpoint=checkpoint)
         return 'locked', False
+    if post.get('no_content'):
+        STATE['ansi_coverage'] = {}
+        note_unavailable(db, site, board, source_index, aid, 'empty', checkpoint=checkpoint)
+        return 'empty', False
     if not post.get('full_content'):
         raise ArticleReadError('終端未回傳可保存的正文，未建立本次文章 HTML')
     if not post.get('pass_format_check'):
@@ -535,7 +540,7 @@ def work(config):
         mode = config.get('mode', 'new')
         if config.get('aid') and mode != 'test':
             mode = 'single'
-        requested_capture_mode = config.get('capture_mode')
+        capture_mode = (config.get('capture_mode') or 'line') if config.get('aid') else 'page'
         backup_mode = config.get('backup_mode', 'recheck')
         height = FALLBACK_HEIGHT if config.get('aid') and config.get('short_terminal') else 100
         all_articles = mode == 'new' and config.get('all_articles', False)
@@ -544,7 +549,7 @@ def work(config):
                   requested_start=config.get('start') if mode == 'new' else None,
                   requested_count=config.get('count') if mode == 'new' else None,
                   requested_direction=config.get('direction', 'newest') if mode == 'new' else None,
-                  requested_capture_mode=requested_capture_mode,
+                  requested_capture_mode=capture_mode,
                   backup_mode=backup_mode if mode == 'new' else None,
                   all_articles=all_articles, terminal_height=height,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
@@ -556,7 +561,7 @@ def work(config):
         api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
                         check_update=False, verify_ssl=True, screen_height=height)
         session = BoardSession(api)
-        session.capture_mode = requested_capture_mode or 'line'
+        session.capture_mode = capture_mode
         def check_stop():
             if STOP.is_set():
                 raise DownloadStopped()
@@ -598,12 +603,11 @@ def work(config):
         stage_started = time.monotonic()
         newest = run_station(lambda: session.get_newest_index(PyPtt.NewIndex.BOARD, board=board))
         board_query_seconds = round(time.monotonic() - stage_started, 3)
-        pending = db.execute('''SELECT first_index,last_index,direction,capture_mode,backup_mode FROM batch_ranges
+        pending = db.execute('''SELECT first_index,last_index,direction,backup_mode FROM batch_ranges
                                 WHERE site=? AND board=? AND completed=0''', (site, board)).fetchone()
         resumed = pending is not None and not config.get('new_batch')
         if resumed:
-            start, original_end, direction, previous_capture_mode, backup_mode = pending
-            session.capture_mode = requested_capture_mode or previous_capture_mode
+            start, original_end, direction, backup_mode = pending
             end = min(newest, original_end)
             expected_count = original_end - start + 1
         else:
@@ -970,11 +974,11 @@ class Handler(BaseHTTPRequestHandler):
                 data['aid'] = aid
                 data['new_batch'] = mode == 'new'
                 data['short_terminal'] = bool(aid) and data.get('short_terminal') == 'on'
-                capture_mode = data.get('capture_mode', '')
-                if capture_mode not in ('', 'line', 'page'):
-                    raise ValueError()
-                data['capture_mode'] = capture_mode or ('page' if mode == 'new' else None)
                 if mode == 'test':
+                    capture_mode = data.get('capture_mode') or 'line'
+                    if capture_mode not in ('line', 'page'):
+                        raise ValueError()
+                    data['capture_mode'] = capture_mode
                     folder = test_destination(site, board, aid, capture_mode, data['short_terminal'])
                 data['folder'] = str(folder)
                 data['all_articles'] = mode == 'new' and data.get('all_articles') == 'on'

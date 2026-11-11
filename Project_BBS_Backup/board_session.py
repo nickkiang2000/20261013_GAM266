@@ -35,6 +35,10 @@ class BoardTemporarilyClosed(RuntimeError):
     """The station explicitly reported a temporary board closure."""
 
 
+class ArticleNoContent(Exception):
+    """The station explicitly displayed its empty-article notice."""
+
+
 class ArticleStalled(RuntimeError):
     def __init__(self, line, reason=None):
         if reason is None:
@@ -277,10 +281,26 @@ class BoardSession:
         self._restore_height()
         return True
 
+    def _is_empty_article_notice(self):
+        rows = [row.strip() for row in self._screen().splitlines() if row.strip()]
+        return len(rows) == 1 and bool(re.fullmatch(
+            r'◆\s*此文章無內容\s*(?:\[\s*按任意鍵繼續\s*\]|按任意鍵繼續)', rows[0]))
+
+    def _acknowledge_empty_article(self):
+        if not self._is_empty_article_notice():
+            raise BoardNavigationError()
+        if self.check_stop:
+            self.check_stop()
+        self._checked_send(command.space, self._list_targets())
+        self._require_list()
+        self._restore_height()
+        self.operations['empty_articles'] += 1
+
     def _article_targets(self):
         return [connect_core.TargetUnit(screens.Target.PostEnd, break_detect=True),
                 connect_core.TargetUnit(screens.Target.InPost, break_detect=True),
-                *self._list_targets()]
+                *self._list_targets(),
+                connect_core.TargetUnit(screens.Target.PostNoContent, break_detect=True)]
 
     def _send_article_key(self, key):
         targets = self._article_targets()
@@ -289,6 +309,10 @@ class BoardSession:
         result = self._checked_send(key, targets)
         if result == 2:
             self._require_list()
+        elif result == 3:
+            if not self._is_empty_article_notice():
+                raise BoardNavigationError()
+            raise ArticleNoContent()
         elif result in (0, 1):
             self.view = 'article'
         return result
@@ -333,7 +357,7 @@ class BoardSession:
             if self.check_stop:
                 self.check_stop()
             result = self._send_article_key(key)
-            if result == 3:
+            if result == 4:
                 # Decline automatic playback so each screen advances on one key.
                 key = 'n'
                 continue
@@ -483,35 +507,43 @@ class BoardSession:
             PostField.post_status: data_type.PostStatus.EXISTS, PostField.comments: [],
         }
         if not selected.lock_post:
-            if self.capture_mode == 'page':
-                body = self._read_article_pages(get_numbering)
-                has_control_code = False
-                self.api.Unconfirmed = False
-            elif get_numbering is not None and self.connect_core.config.screen_height == FALLBACK_HEIGHT:
-                body = self._read_numbered_article(get_numbering)
-                numbering = get_numbering()
-                fallback_attempts.append({'height': FALLBACK_HEIGHT, 'method': 'short_terminal_from_login',
-                                          'verified': body is not None, 'numbering': numbering.diagnostics()})
-                if body is None:
-                    self._return_to_list()
-                    raise ArticleStalled(numbering.last_window[1] if numbering.last_window else None)
-                has_control_code = False
-                self.api.Unconfirmed = False
+            try:
+                body, has_control_code = self._read_selected_body(selected, get_numbering, fallback_attempts)
+            except ArticleNoContent:
+                self._acknowledge_empty_article()
+                post['no_content'] = True
             else:
-                try:
-                    body, has_control_code = _api_util.get_content(self.api)
-                except exceptions.UnknownError as exc:
-                    body = self._recover_stalled_article(exc, selected, get_numbering, fallback_attempts)
-                    if body is None:
-                        raise
-                    has_control_code = False
-                else:
-                    self.view = 'article'
-            if body is None:
-                # The current screen may be a prompt, so leave navigation to a new session.
-                raise BoardNavigationError()
-            post.update({PostField.full_content: body, PostField.has_control_code: has_control_code,
-                         PostField.is_unconfirmed: self.api.Unconfirmed})
-            if len(body.split('\n', 3)) >= 3:
-                post = _api_get_post._parse_post_content(self.api, post, board, body)
+                post.update({PostField.full_content: body, PostField.has_control_code: has_control_code,
+                             PostField.is_unconfirmed: self.api.Unconfirmed})
+                if len(body.split('\n', 3)) >= 3:
+                    post = _api_get_post._parse_post_content(self.api, post, board, body)
         return json.loads(json.dumps(post, cls=AutoJsonEncoder))
+
+    def _read_selected_body(self, selected, get_numbering, fallback_attempts):
+        if self.capture_mode == 'page':
+            body = self._read_article_pages(get_numbering)
+            self.api.Unconfirmed = False
+            return body, False
+        if get_numbering is not None and self.connect_core.config.screen_height == FALLBACK_HEIGHT:
+            body = self._read_numbered_article(get_numbering)
+            numbering = get_numbering()
+            fallback_attempts.append({'height': FALLBACK_HEIGHT, 'method': 'short_terminal_from_login',
+                                      'verified': body is not None, 'numbering': numbering.diagnostics()})
+            if body is None:
+                self._return_to_list()
+                raise ArticleStalled(numbering.last_window[1] if numbering.last_window else None)
+            self.api.Unconfirmed = False
+            return body, False
+        try:
+            body, has_control_code = _api_util.get_content(self.api)
+        except exceptions.UnknownError as exc:
+            body = self._recover_stalled_article(exc, selected, get_numbering, fallback_attempts)
+            if body is None:
+                raise
+            return body, False
+        if body is None:
+            if self._is_empty_article_notice():
+                raise ArticleNoContent()
+            raise BoardNavigationError()
+        self.view = 'article'
+        return body, has_control_code

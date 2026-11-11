@@ -255,7 +255,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
                             SELECT site,board,aid,title,body,data,source_index,fetched FROM articles
                             UNION ALL
                             SELECT site,board,'!' || idx,
-                                   CASE status WHEN 'deleted' THEN '（被刪除）' ELSE '（已鎖定）' END,
+                                   CASE status WHEN 'deleted' THEN '（被刪除）' WHEN 'empty' THEN '（站上無正文）' ELSE '（已鎖定）' END,
                                    coalesce(aid,''),NULL,idx,0 FROM unavailable_articles
                         ) ORDER BY site, board COLLATE NOCASE, board,
                                    source_index IS NOT NULL, source_index ASC, fetched ASC, aid''')
