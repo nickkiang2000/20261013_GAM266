@@ -20,7 +20,7 @@ from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed,
 from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.16.0'
+APP_VERSION = 'v2.17.1'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
@@ -917,8 +917,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ('/', '/index.html'):
             html = (ROOT/'web.html').read_text(encoding='utf-8')
             return self.reply(200, html.replace('__TOKEN__', TOKEN).replace('__APP_VERSION__', APP_VERSION), 'text/html')
-        if self.path == '/help.html':
-            return self.reply(200,(ROOT/'help.html').read_text(encoding='utf-8'),'text/html')
+        if self.path in ('/ReadMe.html', '/help.html'):
+            return self.reply(200, (ROOT / 'ReadMe.html').read_text(encoding='utf-8'), 'text/html')
         if self.path == '/status':
             return self.reply(200,json.dumps({**STATE, 'rate_limits': active_rate_limits()},ensure_ascii=False))
         if self.path == '/preferences':

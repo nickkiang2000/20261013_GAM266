@@ -99,6 +99,7 @@ class BoardSession:
         self.last_sent = None
         self.pacing = False
         self.capture_mode = 'line'
+        self.bridge_events = []
         self.check_stop = None
         self.send = self.connect_core.send
         self.decode = self.connect_core._decode_screen
@@ -306,7 +307,10 @@ class BoardSession:
         targets = self._article_targets()
         if self.capture_mode == 'page' and key == command.enter * 2:
             targets.append(connect_core.TargetUnit(screens.Target.Animation, break_detect=True))
-        result = self._checked_send(key, targets)
+        if self.capture_mode == 'page' and key == command.up:
+            result = self._send_bridge_up(targets)
+        else:
+            result = self._checked_send(key, targets)
         if result == 2:
             self._require_list()
         elif result == 3:
@@ -316,6 +320,45 @@ class BoardSession:
         elif result in (0, 1):
             self.view = 'article'
         return result
+
+    def _log_bridge_screen(self, action, result):
+        screen = self._screen()
+        footer = screen.rsplit('\n', 1)[-1]
+        span = re.search(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行', footer)
+        kind = 'article' if span else 'list' if _api_util.is_article_list(self.api, screen) else 'unrecognized'
+        self.bridge_events.append({
+            'action': action, 'target': result if result >= 0 else None, 'screen_kind': kind,
+            'range': [int(span[1]), int(span[2])] if span else None,
+            'received_data': result >= 0 or not self.connect_core.last_timeout_was_silent,
+        })
+        return kind
+
+    def _send_bridge_up(self, targets):
+        before = self._screen()
+        result = self.connect_core.send(command.up, targets)
+        self._log_bridge_screen('up', result)
+        if result >= 0:
+            return result
+        if self.connect_core.last_timeout_was_silent:
+            raise exceptions.ConnectionClosed()
+        if self.check_stop:
+            self.check_stop()
+        # Keep the decoder and the pending bytes from this same response.
+        result = self.connect_core.send(None, targets, screen_timeout=1)
+        kind = self._log_bridge_screen('receive_only', result)
+        if result >= 0:
+            return result
+        if self._screen() != before:
+            if kind == 'list':
+                return 2
+            if kind == 'article':
+                if self.check_stop:
+                    self.check_stop()
+                result = self.connect_core.send(command.refresh, targets)
+                self._log_bridge_screen('redraw', result)
+                if result >= 0:
+                    return result
+        raise BoardNavigationError()
 
     def _verify_end(self, get_numbering):
         numbering = get_numbering()
@@ -356,6 +399,7 @@ class BoardSession:
         while True:
             if self.check_stop:
                 self.check_stop()
+            seen = get_numbering().seen
             result = self._send_article_key(key)
             if result == 4:
                 # Decline automatic playback so each screen advances on one key.
@@ -367,6 +411,11 @@ class BoardSession:
                 return numbered.single_screen_body
             if result == 2:
                 reason = '逐頁擷取在確認文末前回到看板'
+            elif numbered.bridge_remaining and numbered.seen > seen:
+                key = command.up
+                continue
+            elif numbered.bridge_result == 'unexpected_position':
+                reason = '補查逐頁接縫時，畫面未按預期上移'
             elif not window or numbered.width_mismatches or numbered.unnumbered:
                 reason = '逐頁擷取無法核對畫面列與站方行號'
             elif window[0] > last + 1:
@@ -421,7 +470,9 @@ class BoardSession:
             self._return_to_list()
         else:
             return
-        if (get_numbering is not None and selected.index > 0
+        # A verified return to the list is enough to defer the article in a batch.
+        # Changing terminal height here can lose that verified position.
+        if (not self.index_mode and get_numbering is not None and selected.index > 0
                 and self.connect_core.config.screen_height > FALLBACK_HEIGHT):
             self.operations['short_terminal_retries'] += 1
             attempt = {'height': FALLBACK_HEIGHT, 'method': 'short_terminal'}

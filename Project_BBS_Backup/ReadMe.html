@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BBS文章備份程式｜操作說明與紀錄</title>
+<style>
+body { margin: 2rem auto; padding: 0 1rem; max-width: 50rem; font: 1rem/1.65 system-ui,sans-serif;
+       background: #10151c; color: #e0e7ef; color-scheme: dark; }
+a { color: #a8d7ff; } h2 { margin-top: 1.7rem; } dt { font-weight: 650; } dd { margin: 0 0 .7rem 1rem; }
+.records-scroll { overflow-x: auto; } table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { border: 1px solid #526174; padding: .4rem; text-align: left; vertical-align: top; }
+</style>
+</head>
+<body>
+<header>
+  <a href="/">返回備份程式</a>
+  <h1>BBS文章備份程式</h1>
+  <nav aria-label="頁內目錄"><ol>
+    <li><a href="#product">產品說明</a></li>
+    <li><a href="#features">功能說明</a></li>
+    <li><a href="#instructions">操作教學</a></li>
+  </ol></nav>
+</header>
+<main>
+  <section id="product">
+    <h2>產品說明</h2>
+    <p>本程式把你可閱讀的 PTT／PTT2 看板文章存成離線備份，保留可擷取的正文、推文和配色。每份備份含資料庫與 <code>index.html</code>。下載後可用瀏覽器開啟索引，即使沒有連線也能閱讀已保存的文章。</p>
+  </section>
+  <section id="features">
+    <h2>功能說明</h2>
+    <dl>
+      <dt>補齊備份</dt><dd>預設選項。按 AID 沿用本機已有正文，只下載缺少的文章。</dd>
+      <dt>重新核對</dt><dd>重新讀取指定範圍的文章，確認正文、推文和配色有沒有更新。</dd>
+      <dt>自動擷取</dt><dd>單屏文章確認完整後直接保存。多頁文章用 Page Down，核對接縫和末頁。逐頁失敗且已回到看板時，對該篇逐行重讀一次。仍無法確認全文且已回到看板時，標為待查後繼續。</dd>
+      <dt>登入續傳</dt><dd>接回同一站台、版名與備份位置的未完成批次，沿用範圍、方向、下載方式和已完成進度。</dd>
+      <dt>離線內容重整</dt><dd>使用本機資料重新建立文章 HTML、索引和說明頁，可套用新版格式或補回遺失的頁面。</dd>
+      <dt>單篇測試</dt><dd>可指定 AID、逐行或逐頁，以及 24 列相容讀取。每次建立獨立的 <code>test-downloads/</code> 目錄，方便和正式備份比對。</dd>
+    </dl>
+  </section>
+  <section id="instructions">
+    <h2>操作教學</h2>
+    <ol>
+      <li>雙擊 <code>start.bat</code>，選站名，輸入版名、帳號和密碼。</li>
+      <li>填起始編號、掃描篇數和方向。起始編號填 <code>0</code> 時，從登入時站上的最新編號開始。篇數包含起始文章，實際範圍以看板當下的編號為準。</li>
+      <li>填備份根目錄。例如填 <code>D:\BBS_Backup\</code>，右側顯示依站名和版名生成的子目錄。</li>
+      <li>選下載方式，再按「登入新下載」。若同一備份已有未完成批次，使用「登入續傳」接回進度。開啟新下載會取代該備份原有的續傳設定。</li>
+      <li>作業後，從狀態區開啟離線 <code>index.html</code>。點離線頁面的「操作說明與紀錄」可查看錯漏文章。診斷 log 在程式資料夾的 <code>log/</code>，檔名依作業開始時間命名。</li>
+    </ol>
+    <p>下載時可用「停止」保留已完成進度。站方顯示限速時，請依程式提示等待。若只有一篇需要重試，可在「單篇測試」輸入 AID，選擷取方式後按「登入並測試下載」。</p>
+  </section>
+</main>
+</body></html>

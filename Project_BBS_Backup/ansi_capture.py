@@ -154,6 +154,9 @@ class NumberedArticle:
         self.page_mode = page_mode
         self.extra_first_row = False
         self.first_padding_row = None
+        self.bridge_distance = self.bridge_remaining = self.bridge_moves = 0
+        self.bridge_next_start = self.bridge_min_end = None
+        self.bridge_result = None
         self.page_line_offset = 0
         self.page_ranges = []
         self.single_screen_body = None
@@ -176,8 +179,12 @@ class NumberedArticle:
         percent = re.search(r'\(\s*(\d{1,3})%\)', status)
         self.last_percent = int(percent[1]) if percent else None
         match = LINE_RANGE.search(status)
+        bridging = self.bridge_remaining > 0
         if not match:
             self.unnumbered += 1
+            if bridging:
+                self.bridge_remaining = 0
+                self.bridge_result = 'unnumbered_screen'
             return
 
         first, last = map(int, match.groups())
@@ -188,6 +195,16 @@ class NumberedArticle:
         if at_end:
             self.end_range = span
         count = last - first + 1
+        if bridging:
+            self.bridge_moves += 1
+            if first != self.bridge_next_start or not 0 < count <= len(rows):
+                self.bridge_remaining = 0
+                self.bridge_result = 'unexpected_position'
+                return
+            self.bridge_remaining -= 1
+            self.bridge_next_start -= 1
+            if self.bridge_remaining:
+                return
         extra = rows[max(count, 0):]
         padded = (self.page_mode and not any(row.strip() for row in extra)
                   and (styled is None or not any(line.color_runs for line in styled[max(count, 0):])))
@@ -199,7 +216,8 @@ class NumberedArticle:
             else:
                 self.extra_first_row = True
                 count += 1
-        elif self.page_mode and self.seen == 2 and (self.extra_first_row or self.first_padding_row is not None):
+        elif self.page_mode and (self.seen == 2 or bridging) and (
+                self.extra_first_row or self.first_padding_row is not None):
             candidates = []
             visible = rows[:count]
             if self._confirms_first_overlap(first, visible) or (
@@ -209,11 +227,18 @@ class NumberedArticle:
             if self._confirms_first_overlap(first + 1, visible, extra_row=extra_row):
                 candidates.append(1)
             if len(candidates) != 1:
+                if not candidates and not bridging and extra_row is not None:
+                    if self._plan_blank_bridge(first, last, visible, extra_row, at_end=at_end):
+                        return
+                if bridging:
+                    self.bridge_result = 'overlap_unconfirmed'
                 self.width_mismatches += 1
                 self.width_sample.append({'screen': self.seen, 'range': span,
                                           'rows': len(rows), 'overlap_candidates': candidates})
                 return
             self.page_line_offset = candidates[0]
+            if bridging:
+                self.bridge_result = 'aligned'
             if self.page_line_offset and self.first_padding_row is not None:
                 row, runs = self.first_padding_row
                 number = len(self.rows) + 1
@@ -257,15 +282,40 @@ class NumberedArticle:
                     self.color_conflicts += 1
                     self.color_conflict_rows.add(number)
 
-    def _confirms_first_overlap(self, first, rows, *, extra_row=None):
+    def _matching_first_overlap(self, first, rows, *, extra_row=None):
         end = max(self.rows, default=0)
         candidate_end = end + (extra_row is not None)
         if not 1 <= first <= candidate_end < first + len(rows) - 1:
-            return False
+            return []
         expected = [self.rows[number] for number in range(first, end + 1)]
         if extra_row is not None:
             expected.append(extra_row)
-        return any(row.strip() for row in expected) and rows[:len(expected)] == expected
+        return expected if rows[:len(expected)] == expected else []
+
+    def _confirms_first_overlap(self, first, rows, *, extra_row=None):
+        return any(row.strip() for row in self._matching_first_overlap(first, rows, extra_row=extra_row))
+
+    def _plan_blank_bridge(self, first, last, rows, extra_row, *, at_end):
+        # Probe only the specific one-row shift whose overlap matches but has
+        # no text to anchor it. Preserve blanks and verify the wider overlap.
+        shifted_start = first + 1
+        overlap = self._matching_first_overlap(shifted_start, rows, extra_row=extra_row)
+        if not overlap or any(row.strip() for row in overlap):
+            return False
+        anchor = next((number for number in range(shifted_start - 1, 0, -1)
+                       if self.rows[number].strip()), None)
+        if anchor is None:
+            return False
+        distance = shifted_start - anchor
+        # Even rereading through the current screen would take at least this
+        # many row steps. Leave room for one forward page after moving up.
+        if first - distance < 1 or distance + 1 >= last - len(self.rows):
+            return False
+        self.bridge_distance = self.bridge_remaining = distance
+        self.bridge_next_start = first - 1
+        self.bridge_min_end = last + 1 if at_end else None
+        self.bridge_result = 'checking'
+        return True
 
     def covers(self, end):
         return (not (self.conflicts or self.width_mismatches or self.unnumbered)
@@ -284,6 +334,8 @@ class NumberedArticle:
         if not self.end_usable or not self.covers(self.end_range[1]):
             return None
         end = self.end_range[1]
+        if self.bridge_min_end is not None and end < self.bridge_min_end:
+            return None
         return '\n'.join(self.rows[number] for number in range(1, end + 1))
 
     def diagnostics(self):
@@ -306,6 +358,8 @@ class NumberedArticle:
             'width_mismatches_sample': self.width_sample,
             'extra_first_row': self.extra_first_row, 'page_line_offset': self.page_line_offset,
             'page_ranges_sample': self.page_ranges,
+            'page_bridge': {'planned_up': self.bridge_distance, 'observed_up': self.bridge_moves,
+                            'result': self.bridge_result} if self.bridge_distance else None,
             'first_conflict_line': self.first_conflict, 'first_range': self.first_range,
             'last_range': self.last_range, 'end_range': self.end_range, 'end_usable': self.end_usable,
             'unique_lines': len(self.rows), 'missing_lines': sum(end - start + 1 for start, end in gaps),
@@ -325,6 +379,8 @@ def read_colored_post(api, board, aid):
     line_cache = {}
     mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
     numbered = NumberedArticle(page_mode=mode == 'page')
+    if isinstance(api, BoardSession):
+        api.bridge_events.clear()
     capturing = False
     frame_limit_hit = False
     reached_end = False
@@ -335,7 +391,8 @@ def read_colored_post(api, board, aid):
         return {'mode': mode, 'page_key': 'Page Down' if mode == 'page' else None,
                 'page_turns': page_turns, 'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
                 'reached_end': reached_end or numbered.end_evidence is not None,
-                'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts}
+                'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts,
+                'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else []}
 
     def capture_stream(encoding, chunk):
         result = stream(encoding, chunk)

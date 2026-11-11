@@ -214,7 +214,7 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT idx,aid,attempts FROM article_issues').fetchall(),
                              [(1825, '12hJORGg', 2)])
             app.publish_archive(db, folder)
-            help_page = (folder / 'help.html').read_text(encoding='utf-8')
+            help_page = (folder / 'ReadMe.html').read_text(encoding='utf-8')
             self.assertIn('1825', help_page)
             self.assertIn('12hJORGg', help_page)
             self.assertNotIn('舊失敗', help_page)
@@ -235,7 +235,7 @@ class StorageTests(unittest.TestCase):
                           folder=d, user='test', password='dummy'))
             self.assertEqual(app.STATE['result'], 'pending')
             self.assertEqual(app.STATE['exported'], 0)
-            self.assertIn('12hJORGg', (Path(d) / 'help.html').read_text(encoding='utf-8'))
+            self.assertIn('12hJORGg', (Path(d) / 'ReadMe.html').read_text(encoding='utf-8'))
             self.assertEqual(list((Path(d) / 'articles').glob('*.html')), [])
 
     def test_html_render_failure_falls_back_and_clears_after_local_repair(self):
@@ -248,7 +248,7 @@ class StorageTests(unittest.TestCase):
             db.execute("UPDATE articles SET data='invalid JSON'")
             db.commit()
             self.assertEqual(app.publish_archive(db, folder), 1)
-            report = (folder / 'help.html').read_text(encoding='utf-8')
+            report = (folder / 'ReadMe.html').read_text(encoding='utf-8')
             self.assertIn('HTML 呈現失敗', report)
             self.assertIn('&lt;Test&gt;', report)
             link = re.search(r'href="(articles/[a-f0-9]+\.html)"', report)[1]
@@ -530,11 +530,13 @@ class StorageTests(unittest.TestCase):
             article = next((folder / 'articles').glob('*.html')).read_text(encoding='utf-8')
             self.assertIn('第一格\n第二格</pre>', article)
 
-    def test_archive_pages_are_counted_back_from_latest_article(self):
+    def test_archive_pages_follow_fixed_number_ranges_even_with_gaps(self):
         with tempfile.TemporaryDirectory() as d:
             folder = Path(d)
             db = app.database(folder)
             for index in range(45, 0, -1):
+                if index in (17, 22):
+                    continue
                 app.save_article(db, 'Test', {
                     'aid': f'aid{index}', 'title': f'Article {index}',
                     'full_content': 'Example', 'pass_format_check': True,
@@ -547,13 +549,17 @@ class StorageTests(unittest.TestCase):
             self.assertEqual([bool(hidden) for hidden, _ in pages], [True, True, False])
             numbers = [[int(number) for number in re.findall(r'Article (\d+)</a>', body)]
                        for _, body in pages]
-            self.assertEqual(numbers, [list(range(1, 6)), list(range(6, 26)), list(range(26, 46))])
+            self.assertEqual(numbers, [
+                [n for n in range(1, 21) if n != 17],
+                [n for n in range(21, 41) if n != 22],
+                list(range(41, 46)),
+            ])
 
             links = dict((int(number), path) for path, number in re.findall(
                 r'href="(articles/[^\"]+)"><span[^>]*>[^<]*</span>Article (\d+)</a>', index_page))
-            boundary = (folder / links[26]).read_text(encoding='utf-8')
-            self.assertIn(f'id="previous" href="{Path(links[25]).name}"', boundary)
-            self.assertIn(f'id="next" href="{Path(links[27]).name}"', boundary)
+            boundary = (folder / links[21]).read_text(encoding='utf-8')
+            self.assertIn(f'id="previous" href="{Path(links[20]).name}"', boundary)
+            self.assertIn(f'id="next" href="{Path(links[23]).name}"', boundary)
             latest = (folder / links[45]).read_text(encoding='utf-8')
             self.assertNotIn('id="next"', latest)
 
@@ -951,6 +957,52 @@ class BoardSessionTests(unittest.TestCase):
                 self.assertEqual(numbered.colors[2], colored)
                 self.assertEqual(numbered.extra_first_row, bool(expected_offset))
 
+    def test_page_capture_moves_up_only_far_enough_to_verify_blank_overlap(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import ArticleStalled, BoardSession, PAGE_DOWN_KEY
+        from PyPtt import command
+
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(_decode_screen=Mock(), send=Mock())))
+        for distance, moves in ((1, True), (6, True), (1, False)):
+            with self.subTest(distance=distance, moves=moves):
+                numbered = NumberedArticle(page_mode=True)
+                body = [f'正文 {i}' for i in range(1, 227)]
+                body[99-distance:99] = [''] * distance
+                position = 98
+
+                def send(key):
+                    nonlocal position
+                    if key == command.enter * 2:
+                        numbered.observe(body[:99], '瀏覽 第 1/3 頁 (40%) 第 1~98 行',
+                                         at_end=False, styled=None)
+                        return 1
+                    if key == command.up and moves:
+                        position -= 1
+                    if key == PAGE_DOWN_KEY and numbered.bridge_result == 'aligned':
+                        numbered.observe(body[-99:], '瀏覽 第 3/3 頁 (100%) 第 127~225 行',
+                                         at_end=True, styled=None)
+                        return 0
+                    numbered.observe(body[position:position+99], f'瀏覽 第 2/3 頁 (84%) 第 {position}~{position+98} 行',
+                                     at_end=False, styled=None)
+                    return 1
+
+                with patch.object(session, '_return_to_list') as back, \
+                        patch.object(session, '_send_article_key', side_effect=send) as keys:
+                    if moves:
+                        self.assertEqual(session._read_article_pages(lambda: numbered), '\n'.join(body))
+                        self.assertEqual(numbered.bridge_result, 'aligned')
+                        self.assertEqual(numbered.bridge_moves, distance)
+                        back.assert_not_called()
+                        expected = [command.enter * 2, PAGE_DOWN_KEY] + [command.up] * distance + [PAGE_DOWN_KEY]
+                    else:
+                        with self.assertRaisesRegex(ArticleStalled, '未按預期上移'):
+                            session._read_article_pages(lambda: numbered)
+                        back.assert_called_once()
+                        expected = [command.enter * 2, PAGE_DOWN_KEY, command.up]
+                    self.assertEqual([call.args[0] for call in keys.call_args_list], expected)
+
     def test_resize_reuses_drained_list_redraw_without_ctrl_l(self):
         import asyncio
         from types import SimpleNamespace
@@ -1106,6 +1158,45 @@ class BoardSessionTests(unittest.TestCase):
         self.assertEqual(events, ['receive', command.enter])
         self.assertEqual((session.board, session.view), ('Test', 'list'))
 
+    def test_bridge_up_receives_partial_response_before_considering_redraw(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from board_session import BoardNavigationError, BoardSession
+        from PyPtt import command
+
+        initial = '瀏覽 第 2/3 頁 (84%) 第 98~196 行'
+        shifted = '瀏覽 第 2/3 頁 (83%) 第 97~195 行'
+        for case in ('receive', 'redraw', 'unrecognized'):
+            with self.subTest(case=case):
+                screen = initial
+                keys = []
+
+                def send(key, targets, **kwargs):
+                    nonlocal screen
+                    keys.append(key)
+                    if key == command.up:
+                        screen = shifted if case == 'redraw' else 'partial'
+                        return -1
+                    if key is None and case != 'receive':
+                        return -1
+                    screen = shifted
+                    return 1
+
+                core = SimpleNamespace(_decode_screen=Mock(), send=send, last_timeout_was_silent=False,
+                                       get_screen_queue=lambda: [screen])
+                session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+                session.capture_mode = 'page'
+                if case == 'unrecognized':
+                    with self.assertRaises(BoardNavigationError):
+                        session._send_article_key(command.up)
+                else:
+                    self.assertEqual(session._send_article_key(command.up), 1)
+                    self.assertEqual(session.bridge_events[-1]['range'], [97, 195])
+                expected = [command.up, None] + ([command.refresh] if case == 'redraw' else [])
+                self.assertEqual(keys, expected)
+                self.assertEqual(session.bridge_events[0]['received_data'], True)
+                self.assertNotIn('partial', json.dumps(session.bridge_events))
+
     def test_recovering_known_stall_sends_one_left_and_requires_list(self):
         from types import SimpleNamespace
         from unittest.mock import Mock
@@ -1122,8 +1213,14 @@ class BoardSessionTests(unittest.TestCase):
 
         core = SimpleNamespace(_decode_screen=Mock(), send=send, get_screen_queue=lambda: frames)
         session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
-        with self.assertRaises(ArticleStalled) as caught:
-            session._recover_stalled_article(exceptions.UnknownError('get_content: stuck at line 103'))
+        from ansi_capture import NumberedArticle
+
+        session.index_mode = True
+        core.config = SimpleNamespace(screen_height=100)
+        with patch.object(session, '_read_at_fallback_height') as resize, self.assertRaises(ArticleStalled) as caught:
+            session._recover_stalled_article(exceptions.UnknownError('get_content: stuck at line 103'),
+                                            SimpleNamespace(index=1825), NumberedArticle, [])
+        resize.assert_not_called()
         self.assertEqual(caught.exception.line, 103)
         self.assertEqual(keys, [command.left])
         self.assertEqual(session.view, 'list')

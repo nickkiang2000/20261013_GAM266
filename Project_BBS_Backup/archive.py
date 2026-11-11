@@ -32,7 +32,7 @@ nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 
 PAGE_SIZE = 20
 FRAME_ROWS = 22
-HELP = Path(__file__).with_name('help.html')
+OFFLINE_README = Path(__file__).with_name('offline_readme.html')
 
 INDEX_KEYS = '''
 const boards = Array.from(document.querySelectorAll('.board'), section => ({
@@ -265,6 +265,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
     if progress:
         progress(count, total)
     sections = []
+    board_summaries = []
     for (site, board), group in groupby(rows, key=lambda row: row[:2]):
         items = list(group)
         keys = [sha256(json.dumps(row[:3]).encode()).hexdigest() for row in items]
@@ -306,7 +307,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
             if render_error:
                 colored = False
                 article = (nav + f'<h1>{escape(title)}</h1><p>原格式呈現失敗，以下保留本機正文；'
-                           '<a href="../help.html#issue-records">查看錯漏紀錄</a>。</p><pre>' +
+                           '<a href="../ReadMe.html#issue-records">查看錯漏紀錄</a>。</p><pre>' +
                            escape(body or '') + '</pre>')
                 with db:
                     issue_records.record(db, site, board, source_index, aid,
@@ -322,10 +323,17 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
                 written += changed
                 if progress:
                     progress(count, total)
-        # Anchor pages at the newest end so the first view shows the latest 20.
-        first_size = len(entries) % PAGE_SIZE or PAGE_SIZE
-        batches = [entries[:first_size]] + [entries[start:start + PAGE_SIZE]
-                                            for start in range(first_size, len(entries), PAGE_SIZE)]
+        # Keep article numbers in fixed ranges even when the archive has gaps.
+        numbered_pages = {}
+        unnumbered = []
+        for item, entry in zip(items, entries):
+            index = item[6]
+            if type(index) is int and index > 0:
+                numbered_pages.setdefault((index - 1) // PAGE_SIZE, []).append(entry)
+            else:
+                unnumbered.append(entry)
+        batches = [unnumbered[start:start + PAGE_SIZE] for start in range(0, len(unnumbered), PAGE_SIZE)]
+        batches.extend(numbered_pages[page] for page in sorted(numbered_pages))
         pages = []
         for i, batch in enumerate(batches):
             hidden = ' hidden' if i < len(batches) - 1 else ''
@@ -339,18 +347,21 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
         board_name = escape(f'{site} / {board}', quote=True)
         article_count = sum(item[5] is not None for item in items)
         skipped_count = len(items) - article_count
+        board_summaries.append(f'<li>{board_name} · {article_count} 篇正文</li>')
         board_count = f'{article_count} 篇' + (f' · {skipped_count} 筆站上狀態' if skipped_count else '')
         sections.append(f'<section class="board" data-board="{board_name}">'
                         '<div class="board-tools"><strong class="board-tab">看板</strong>'
                         f'<span class="meta">{board_name} · {board_count}</span>'
                         + pagination + '</div>' + ''.join(pages) + '</section>')
     index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
-             '<h1>BBS 離線文章</h1><span>› <span id="active-board"></span></span>'
-             '<a href="help.html">操作說明與紀錄</a></header>'
+             '<h1>BBS時光庫</h1><span>› <span id="active-board"></span></span>'
+             '<a href="ReadMe.html">操作說明與紀錄</a></header>'
              + (''.join(sections) if sections else '<p>尚無文章</p>'))
-    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8').replace('<!-- ISSUE_RECORDS -->', issue_report(db)),
-               force=force)
-    write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS), force=force)
+    readme = OFFLINE_README.read_text(encoding='utf-8')
+    boards = '<ul>' + ''.join(board_summaries) + '</ul>' if board_summaries else '<p>目前尚無離線文章。</p>'
+    readme = readme.replace('<!-- BOARD_SUMMARIES -->', boards).replace('<!-- ISSUE_RECORDS -->', issue_report(db))
+    write_page(folder / 'ReadMe.html', readme, force=force)
+    write_page(folder / 'index.html', page('BBS時光庫', index, INDEX_KEYS), force=force)
     if stats is not None:
         stats['written'] = written
     return count

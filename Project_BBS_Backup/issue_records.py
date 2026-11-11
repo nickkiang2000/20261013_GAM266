@@ -94,7 +94,9 @@ def report(db):
         reason = '站方顯示此文章無內容。' if status == 'empty' else '站方已確認不可讀，已跳過。'
         entries.append((site, board, idx, aid, label, reason, bool(saved),
                         '保留舊備份' if saved else '索引顯示站方狀態'))
-    header = ('<section id="issue-records"><h2>錯漏紀錄</h2>'
+    entries.sort(key=lambda entry: (entry[0], entry[1].casefold(), entry[1],
+                                    entry[2] is None, entry[2] or 0, entry[3] or ''))
+    header = ('<section id="issue-records"><h2>錯漏文章</h2>'
               '<p>此表反映本機已遇到的問題，不是全板完整性證明；未掃描文章不在此表。'
               '編號可能隨站上文章異動，特案查找請優先使用 AID。補抓成功會清除對應待查，'
               '核色成功會清除待核色；歷次診斷仍保留在程式 log 資料夾。</p>')
