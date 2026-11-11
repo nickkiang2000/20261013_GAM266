@@ -15,6 +15,7 @@ from websockets.exceptions import ConnectionClosed as SocketClosed
 
 MIN_COMMAND_INTERVAL = 1.0
 END_KEY = '\x1b[4~'
+PAGE_DOWN_KEY = '\x1b[6~'
 FALLBACK_HEIGHT = 24
 FALLBACK_MAX_STEPS = 128
 TAIPEI = timezone(timedelta(hours=8))
@@ -324,9 +325,10 @@ class BoardSession:
         return None
 
     def _read_article_pages(self, get_numbering):
-        """Use one right key per validated screen and stop on the captured end screen."""
+        """Read one screen per Page Down and stop on the captured end screen."""
         key = command.enter * 2
         last = 0
+        previous_start = 0
         while True:
             if self.check_stop:
                 self.check_stop()
@@ -337,6 +339,8 @@ class BoardSession:
                 continue
             numbered = get_numbering()
             window = numbered.last_window
+            if result == 0 and numbered.single_screen_body is not None:
+                return numbered.single_screen_body
             if result == 2:
                 reason = '逐頁擷取在確認文末前回到看板'
             elif not window or numbered.width_mismatches or numbered.unnumbered:
@@ -352,9 +356,11 @@ class BoardSession:
                 if body is not None:
                     return body
                 reason = '逐頁擷取已到文末，但未能核對完整正文'
+            elif previous_start and window[0] - previous_start == 1:
+                reason = 'Page Down 只前進一行，無法確認整頁位移'
             else:
-                last = window[1]
-                key = command.right
+                previous_start, last = window[:2]
+                key = PAGE_DOWN_KEY
                 continue
             self._return_to_list()
             raise ArticleStalled(window[1] if window else last or None, reason)

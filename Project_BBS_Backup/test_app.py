@@ -53,6 +53,53 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(database_file.read_bytes(), before)
             self.assertFalse((main / 'index.html').exists())
 
+    def test_page_first_reopens_same_article_once_after_safe_return(self):
+        from unittest.mock import Mock
+        from board_session import ArticleStalled
+
+        for checkpoint, view, query_aid, succeeds in (
+            (True, 'list', 'fixture1', True),
+            (True, 'list', 'wrongaid', False),
+            (True, 'article', 'fixture1', False),
+            (False, 'list', 'fixture1', False),
+        ):
+            with self.subTest(checkpoint=checkpoint, view=view, query_aid=query_aid):
+                with tempfile.TemporaryDirectory() as d, closing(app.database(Path(d))) as db, \
+                        patch.object(app, 'STATE', dict(saved=0, skipped=0)), \
+                        patch.object(app.STOP, 'is_set', return_value=False):
+                    api = Mock(capture_mode='page', view=view)
+                    api.get_post.return_value = {'index': 3, 'aid': query_aid}
+                    modes = []
+
+                    def read(api, board, aid):
+                        modes.append(api.capture_mode)
+                        if api.capture_mode == 'page':
+                            exc = ArticleStalled(99)
+                            exc.capture_diagnostics = {'mode': 'page', 'page_turns': 1}
+                            raise exc
+                        return {'aid': aid, 'full_content': '逐行正文', 'pass_format_check': True,
+                                'ansi_diagnostics': {'mode': 'line'}}
+
+                    args = (api, db, 'PTT', 'Test', 'fixture1')
+                    kwargs = dict(source_index=3, checkpoint=checkpoint)
+                    with patch('ansi_capture.read_colored_post', side_effect=read):
+                        if succeeds:
+                            self.assertEqual(app.download_article(*args, **kwargs)[0], 'saved')
+                            self.assertEqual(modes, ['page', 'line'])
+                            info = app.STATE['ansi_diagnostics']['page_fallback']
+                            self.assertEqual(info['capture']['page_turns'], 1)
+                            self.assertEqual(info['line_result'], 'read')
+                        else:
+                            with self.assertRaises((ArticleStalled, app.ArticleReadError)):
+                                app.download_article(*args, **kwargs)
+                            self.assertEqual(modes, ['page'])
+                            self.assertEqual(db.execute('SELECT count(*) FROM articles').fetchone()[0], 0)
+                    self.assertEqual(api.capture_mode, 'page')
+                    if checkpoint and view == 'list':
+                        api.get_post.assert_called_once_with('Test', index=3, query=True)
+                    else:
+                        api.get_post.assert_not_called()
+
     def test_fill_reuses_exact_aid_and_fetches_missing_article(self):
         import PyPtt
         with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
@@ -303,7 +350,7 @@ class StorageTests(unittest.TestCase):
         from PyPtt import command, screens
         from PyPtt.connect_core import TargetUnit
         from ansi_capture import read_colored_post
-        from board_session import BoardSession
+        from board_session import BoardSession, PAGE_DOWN_KEY
 
         class FakeCore:
             config = SimpleNamespace(screen_height=5)
@@ -313,8 +360,9 @@ class StorageTests(unittest.TestCase):
                 '\x1b[H\x1b[2J重疊列\n\x1b[36;44m████\x1b[m\n末段\n\n瀏覽 第 2/2 頁 (100%) 目前顯示: 第 4~6 行',
             ]
 
-            def __init__(self):
-                self.responses = iter(self.pages)
+            def __init__(self, *, pages=None, height=5):
+                self.responses = iter(self.pages if pages is None else pages)
+                self.config = SimpleNamespace(screen_height=height)
                 self.sent = []
 
             def _decode_screen(self, screen):
@@ -370,8 +418,32 @@ class StorageTests(unittest.TestCase):
         page_post = read_colored_post(session, 'Test', '1AdzogFB')
         for field in ('full_content', 'ansi_lines', 'ansi_coverage'):
             self.assertEqual(page_post[field], post[field])
-        self.assertEqual(page_core.sent, [command.enter * 2, command.right])
+        self.assertEqual(page_core.sent, [command.enter * 2, PAGE_DOWN_KEY])
         self.assertEqual(page_post['ansi_diagnostics']['page_turns'], 1)
+
+        # A single-screen status can report fewer lines than the actual
+        # display, including a meaningful final line before the padding.
+        first_screen = '\n'.join([
+            '\x1b[H\x1b[2J標題', '\x1b[1;33;41m彩色\x1b[m', '', '末行',
+            *([''] * 95), '瀏覽 第 1/1 頁 (100%) 目前顯示: 第 1~3 行',
+        ])
+        captures = []
+        for mode in ('line', 'page'):
+            test_core = FakeCore(pages=[first_screen], height=100)
+            test_session = BoardSession(SimpleNamespace(connect_core=test_core, config=test_core.config))
+            test_session.capture_mode = mode
+            test_session.board = 'Test'
+            test_session.view = 'query'
+            test_session.selected = session.selected
+            captures.append(read_colored_post(test_session, 'Test', '1AdzogFB'))
+            self.assertEqual(test_core.sent, [command.enter * 2])
+        direct, automatic = captures
+        for field in ('full_content', 'ansi_lines', 'ansi_coverage'):
+            self.assertEqual(automatic[field], direct[field])
+        self.assertEqual(automatic['full_content'].split('\n')[:4], ['標題', '彩色', '', '末行'])
+        self.assertEqual(automatic['ansi_diagnostics']['assembly'], 'single_screen')
+        self.assertEqual(automatic['ansi_diagnostics']['page_turns'], 0)
+
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
             db = app.database(folder)
@@ -750,7 +822,7 @@ class BoardSessionTests(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import Mock
         from ansi_capture import CapturedLine, NumberedArticle
-        from board_session import ArticleStalled, BoardSession
+        from board_session import ArticleStalled, BoardSession, PAGE_DOWN_KEY
         from PyPtt import command
 
         core = SimpleNamespace(_decode_screen=Mock(), send=Mock())
@@ -787,7 +859,28 @@ class BoardSessionTests(unittest.TestCase):
                         self.assertEqual(session._read_article_pages(lambda: numbered), 'first\n\nsame\nlast')
                         back.assert_not_called()
                     self.assertEqual([call.args[0] for call in keys.call_args_list],
-                                     [command.enter * 2, command.right])
+                                     [command.enter * 2, PAGE_DOWN_KEY])
+
+    def test_page_capture_reconciles_one_extra_first_row_only_with_unique_overlap(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        for tail, expected in (
+            (['C', '', 'D', 'E'], 'A\n\nB\nC\n\nD\nE'),
+            (['unexpected', '', 'D', 'E'], None),
+        ):
+            with self.subTest(tail=tail):
+                numbered = NumberedArticle(page_mode=True)
+                first = ['A', '', 'B', 'C']
+                colors = [CapturedLine(row, ()) for row in first]
+                numbered.observe(first, '瀏覽 第 1/2 頁 (50%) 第 1~3 行', at_end=False, styled=colors)
+                self.assertTrue(numbered.extra_first_row)
+                self.assertEqual(numbered.last_window[:2], (1, 4))
+                self.assertIsNone(numbered.assemble())
+                numbered.observe(tail, '瀏覽 第 2/2 頁 (100%) 第 3~6 行', at_end=True, styled=None)
+                self.assertEqual(numbered.assemble(), expected)
+                if expected:
+                    self.assertEqual(numbered.page_line_offset, 1)
+                    self.assertEqual(numbered.page_ranges[-1]['mapped'], [4, 7])
 
     def test_resize_reuses_drained_list_redraw_without_ctrl_l(self):
         import asyncio

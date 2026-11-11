@@ -26,10 +26,24 @@ button:disabled { cursor: default; }
 #run:disabled { opacity: .5; }
 #stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.board-field { grid-column: span 2; }
-.count-fields { grid-column: span 4; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
-                gap: 8px; }
-.count-fields label { grid-column: auto; }
+.form-row { display: grid; grid-column: 1 / -1; gap: 9px; align-items: start; }
+.login-fields { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.scan-fields { grid-template-columns: minmax(0, 1.22fr) minmax(0, .86fr) minmax(0, 1fr) minmax(0, 1.24fr); }
+.backup-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 3fr); }
+.form-row label { grid-column: auto; }
+.scan-fields label, .range-caption { font-size: .92rem; }
+.range-value { display: flex; align-items: center; margin-top: 3px; min-height: 35px; padding: 6px 8px;
+    border: 1px solid #59658b; border-radius: 3px; background: #151c31; color: #d9faff;
+    font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.folder-control { display: flex; margin-top: 3px; min-width: 0; }
+.folder-control input:not([type=checkbox],[type=hidden]) { flex: 1 1 0; min-width: 0; width: auto; margin: 0; }
+.folder-control:has(.folder-suffix:not([hidden])) input { border-radius: 3px 0 0 3px; }
+.folder-suffix { display: flex; align-items: center; max-width: 55%; padding: 6px 8px;
+    border: 1px solid #59658b; border-left: 0; border-radius: 0 3px 3px 0;
+    background: #151c31; color: #d9faff; overflow-wrap: anywhere; }
+.folder-suffix[hidden] { display: none; }
+#resume-capture-field { margin-top: 6px; max-width: 16rem; }
+html[data-theme="light"] :is(.range-value,.folder-suffix) { background: #e7edf4; color: #244565; border-color: #98a9bc; }
 .download-actions { display: grid; gap: 6px; }
 .download-action { display: grid; grid-template-columns: 9em minmax(0, 1fr); align-items: start;
                    gap: 8px; min-width: 0; border: 1px solid #343952; padding: 7px; }
@@ -80,7 +94,11 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     section { grid-row: 1; }
     form, section { padding: 10px; }
 }
+@media (max-width: 600px) {
+    .login-fields, .scan-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (max-width: 430px) {
+    .backup-fields { grid-template-columns: minmax(0, 1fr); }
     label { grid-column: span 3; }
     .download-actions { grid-template-columns: 1fr; }
 }
@@ -93,21 +111,30 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 <main>
 <form id="form" method="post" autocomplete="off">
 <input type="hidden" name="theme" value="dark">
-<label>站台 <select name="site"><option value="PTT2">PTT2 批踢踢兔</option><option value="PTT">PTT 批踢踢實業坊</option></select></label>
-<label>帳號<input name="user" required autocomplete="off"></label>
-<label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
-<label class="board-field">英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
-<div class="count-fields">
-    <label>掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
-    <label>新下載方式
-        <select name="backup_mode" aria-describedby="backup-mode-hint">
-            <option value="recheck">重新核對</option><option value="fill">補齊備份</option>
-        </select>
+<div class="form-row login-fields">
+    <label>站名<select name="site"><option value="PTT2">PTT2</option><option value="PTT">PTT</option></select></label>
+    <label>版名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
+    <label>帳號<input name="user" required autocomplete="off"></label>
+    <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
+</div>
+<div class="form-row scan-fields">
+    <label>起始編號（0為最新）<input name="start" id="scan-start" type="number" min="0" value="0" required></label>
+    <label>掃描篇數<input name="count" id="scan-count-input" type="number" min="1" max="10000" value="5" required></label>
+    <label>掃描方向<select name="direction" id="scan-direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
+    <div>
+        <div class="range-caption" id="range-caption">預估下載範圍</div>
+        <output class="range-value" id="range-preview" aria-labelledby="range-caption" for="scan-start scan-count-input scan-direction">登入後確認最新編號</output>
+    </div>
+</div>
+<div class="form-row backup-fields">
+    <label>下載方式<select name="backup_mode"><option value="fill">補齊備份</option><option value="recheck">重新核對</option></select></label>
+    <label>備份完整目錄（子目錄自動生成）
+        <div class="folder-control">
+            <input name="folder" required placeholder="D:\BBS_Backup\" aria-describedby="folder-suffix">
+            <span class="folder-suffix" id="folder-suffix" hidden></span>
+        </div>
     </label>
 </div>
-<p id="backup-mode-hint" class="hint wide"></p>
-<label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
-<p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
 <div class="download-actions wide">
     <div class="download-action">
         <button id="run" aria-describedby="new-summary">登入新下載</button>
@@ -115,7 +142,10 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     </div>
     <div class="download-action">
         <button type="button" id="resume" aria-describedby="resume-summary" disabled>登入續傳</button>
-        <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
+        <div>
+            <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
+            <label id="resume-capture-field" hidden>續傳擷取方式<select name="resume_capture_mode"><option value="">沿用上次設定</option><option value="line">逐行 ↓</option><option value="page">自動擷取</option></select></label>
+        </div>
     </div>
     <div class="download-action">
         <button type="button" id="export" aria-describedby="export-hint">離線內容重整</button>
@@ -125,17 +155,13 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 <p id="rate-status" class="hint wide" hidden></p>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
     <div class="advanced-fields">
-        <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
-        <label>掃描方向<select name="direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
-        <label>新下載擷取方式<select name="capture_mode"><option value="line">逐行 ↓（預設）</option><option value="page">逐頁 →</option></select></label>
-        <label id="resume-capture-field" hidden>續傳擷取方式<select name="resume_capture_mode"><option value="">沿用上次設定</option><option value="line">逐行 ↓</option><option value="page">逐頁 →</option></select></label>
+        <label>新下載擷取方式<select name="capture_mode"><option value="page">自動擷取（預設）</option><option value="line">逐行 ↓</option></select></label>
     </div>
-    <p class="hint">起始編號若寫0，則從最新一篇的編號起始。</p>
 </details>
 <details class="wide" id="test-area"><summary>單篇測試</summary>
     <div class="advanced-fields">
         <label class="half">指定文章 AID<input name="test_aid" placeholder="例如 1AdzogFB"></label>
-        <label class="half">測試擷取方式<select name="test_capture_mode"><option value="line">逐行 ↓</option><option value="page">逐頁 →</option></select></label>
+        <label class="half">測試擷取方式<select name="test_capture_mode"><option value="line">逐行 ↓</option><option value="page">逐頁（Page Down）</option></select></label>
         <label class="wide"><input name="test_short_terminal" type="checkbox"> 24 列相容讀取</label>
     </div>
     <div class="download-action test-action">
@@ -177,14 +203,14 @@ const exportProgress = document.getElementById('export-progress');
 const exportButton = document.getElementById('export');
 const testButton = document.getElementById('test-download');
 const stop = document.getElementById('stop');
-const destination = document.getElementById('destination');
+const folderSuffix = document.getElementById('folder-suffix');
 const indexLink = document.getElementById('index-link');
 const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
 const themeToggle = document.getElementById('theme-toggle');
 const desktopToggle = document.getElementById('desktop-toggle');
 const notice = document.getElementById('notice');
 const advanced = document.getElementById('advanced');
-let previousSuffix = '';
+let resolvedFolder = '';
 let preferenceTimer;
 let preferenceWrites = Promise.resolve();
 let formEdited = false;
@@ -311,31 +337,44 @@ function showAdvancedNote() {
     const {start, direction, site, board, count, folder, backup_mode, capture_mode,
         test_aid, test_capture_mode, test_short_terminal} = form.elements;
     const first = Number(start.value);
+    const amount = Number(count.value);
     const oldestFirst = direction.value === 'oldest';
-    const settings = [];
-    if (first > 0) settings.push(`起始 ${start.value}`);
-    if (oldestFirst) settings.push('舊到新');
-    setText('advanced-note', settings.length ? ' · ' + settings.join(' · ') : '');
-    let range;
-    if (first === 0 && oldestFirst) range = '從最新一篇起 · 舊到新 · 只掃最新一篇';
-    else range = `從${first > 0 ? ` ${first} ` : '最新一篇'}起 · 最多 ${count.value} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
+    const valid = start.checkValidity() && count.checkValidity()
+        && Number.isSafeInteger(first) && Number.isSafeInteger(first + amount - 1);
+    let estimate = '請確認編號與篇數';
+    let range = estimate;
+    if (valid && first === 0) {
+        estimate = '登入後確認最新編號';
+        range = oldestFirst ? '從最新一篇起 · 舊到新 · 只掃最新一篇' : `從最新一篇起 · 最多 ${amount} 篇 · 新到舊`;
+    } else if (valid) {
+        const last = oldestFirst ? first + amount - 1 : Math.max(1, first - amount + 1);
+        estimate = `${first} → ${last}`;
+        range = `${estimate} · 最多 ${Math.abs(first - last) + 1} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
+    }
+    setText('range-preview', estimate);
+    document.getElementById('range-preview').title = valid && first > 0
+        ? '實際掃描範圍以登入時的看板編號為準' : '';
+    setText('advanced-note', ` · ${captureLabel(capture_mode.value)}`);
+    const name = archiveName();
+    const actualLeaf = resolvedFolder.split(/[\\/]/).filter(Boolean).at(-1);
+    folderSuffix.hidden = !name || Boolean(resolvedFolder && actualLeaf?.toLowerCase() !== name.toLowerCase());
+    setText('folder-suffix', name);
+    const root = rootFolder(folder.value);
+    const path = resolvedFolder || (root && name ? root.replace(/[\\/]+$/, '') + '\\' + name : root);
     const warning = pending ? `。將取代未完成範圍 ${pendingRange(pending)}` : '';
-    setText('backup-mode-hint', backup_mode.value === 'fill'
-        ? '依 AID 沿用已有正文，只下載缺少的文章。'
-        : '重讀所選範圍，比對正文、推文和配色。');
-    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${backupLabel(backup_mode.value)} · ${range} · ${captureLabel(capture_mode.value)} · ${folder.value || '未填備份目錄'}${warning}`);
+    setText('new-summary', `${backupLabel(backup_mode.value)} · ${captureLabel(capture_mode.value)} · ${range} · ${path || '未填備份目錄'}${warning}`);
     const testAid = test_aid.value.trim().replace(/^#/, '');
     const height = test_short_terminal.checked ? 24 : 100;
     const testMode = test_capture_mode.value;
     const destination = testAid && board.value
         ? `test-downloads/${site.value}_${board.value}/${testAid}/${testMode}-${height}/`
         : 'test-downloads/';
-    setText('test-summary', `${captureLabel(testMode)} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
+    setText('test-summary', `${captureLabel(testMode, true)} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
     showResumeSummary();
 }
 
-function captureLabel(mode) {
-    return mode === 'page' ? '逐頁 →' : '逐行 ↓';
+function captureLabel(mode, test = false) {
+    return mode === 'page' ? (test ? '逐頁（Page Down）' : '自動擷取') : '逐行 ↓';
 }
 
 function backupLabel(mode) {
@@ -360,6 +399,7 @@ function checkPending() {
     clearTimeout(pendingTimer);
     const request = ++pendingRequest;
     pending = null;
+    resolvedFolder = '';
     showAdvancedNote();
     updateDownloadButtons();
     const {site, board, folder} = form.elements;
@@ -372,17 +412,15 @@ function checkPending() {
         try {
             const response = await fetch('/pending', {
                 method: 'POST', headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'},
-                body: JSON.stringify({site: site.value, board: board.value, folder: folder.value})
+                body: JSON.stringify({site: site.value, board: board.value, folder: rootFolder(folder.value)})
             });
             if (!response.ok) throw Error('pending');
             const result = await response.json();
             if (request !== pendingRequest) return;
-            pending = result.pending ? {...result.pending, folder: result.folder} : null;
-            if (pending) {
-                showAdvancedNote();
-            } else {
-                setText('resume-summary', '這個看板與目錄沒有未完成批次。');
-            }
+            resolvedFolder = result.folder || '';
+            pending = result.pending ? {...result.pending, folder: resolvedFolder} : null;
+            if (!pending) setText('resume-summary', '這個看板與目錄沒有未完成批次。');
+            showAdvancedNote();
             updateDownloadButtons();
         } catch {
             if (request === pendingRequest) setText('resume-summary', '無法查詢續傳，請確認備份目錄。');
@@ -403,28 +441,32 @@ themeToggle.onclick = () => {
     saveForm();
 };
 
-function normalizeDestination() {
-    const {site, board, folder} = form.elements;
-    const name = `${site.value}_${board.value}`;
-    let path = folder.value.trim().replace(/[\\/]+$/, '');
-    if (!path || !board.value || !board.checkValidity()) return;
-    const leaf = path.split(/[\\/]/).at(-1).toLowerCase();
-    if (leaf !== name.toLowerCase()) {
-        if (previousSuffix && leaf === previousSuffix) path = path.slice(0, -leaf.length - 1);
-        folder.value = `${path}\\${name}`;
+function archiveName() {
+    const {site, board} = form.elements;
+    return board.value && board.checkValidity() ? `${site.value}_${board.value}` : '';
+}
+
+function rootFolder(value) {
+    const path = value.trim();
+    const trimmed = path.replace(/[\\/]+$/, '');
+    const separator = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'));
+    const leaf = trimmed.slice(separator + 1);
+    if (separator >= 0 && leaf.toLowerCase() === archiveName().toLowerCase()) {
+        return trimmed.slice(0, separator + 1);
     }
-    previousSuffix = name.toLowerCase();
+    return path;
 }
 
 function saveForm() {
     clearTimeout(preferenceTimer);
     const data = Object.fromEntries(preferenceFields.map(key => [key, form.elements[key].value]));
+    data.folder = rootFolder(data.folder);
     preferenceWrites = preferenceWrites.then(() => fetch('/preferences', {
         method: 'POST', keepalive: true,
         headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'}, body: JSON.stringify(data)
     })).then(response => {
         if (!response.ok) throw Error('preferences');
-    }).catch(() => { destination.textContent = '本次欄位設定未能寫入本機。'; });
+    }).catch(() => { showNotice('無法儲存欄位設定', '請確認本機程式仍在執行。'); });
 }
 
 form.addEventListener('input', event => {
@@ -440,8 +482,7 @@ form.addEventListener('input', event => {
 });
 form.addEventListener('change', event => {
     if (['site', 'board', 'folder'].includes(event.target.name)) {
-        normalizeDestination();
-        showAdvancedNote();
+        if (event.target.name === 'folder') form.elements.folder.value = rootFolder(form.elements.folder.value);
         checkPending();
         saveForm();
     }
@@ -451,7 +492,7 @@ fetch('/preferences').then(response => response.json()).then(values => {
     for (const name of preferenceFields) {
         if (typeof values[name] === 'string') form.elements[name].value = values[name];
     }
-    previousSuffix = `${form.elements.site.value}_${form.elements.board.value}`.toLowerCase();
+    form.elements.folder.value = rootFolder(form.elements.folder.value);
     applyTheme(values.theme);
     if (!form.elements.direction.value) form.elements.direction.value = 'newest';
     showAdvancedNote();
@@ -474,10 +515,7 @@ async function send(path, data) {
                 : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
             checkPending();
         } else if (path !== '/stop') {
-            const result = await response.json();
             if (data.mode !== 'test') {
-                if (result.folder) form.elements.folder.value = result.folder;
-                showAdvancedNote();
                 checkPending();
                 saveForm();
             }
@@ -490,8 +528,8 @@ async function send(path, data) {
 
 form.addEventListener('submit', event => {
     event.preventDefault();
-    normalizeDestination();
     const data = Object.fromEntries(new FormData(form));
+    data.folder = rootFolder(data.folder);
     form.elements.password.value = '';
     for (const key of ['test_aid', 'test_capture_mode', 'test_short_terminal']) delete data[key];
     showAdvancedNote();
@@ -501,8 +539,7 @@ form.addEventListener('submit', event => {
 resume.onclick = () => {
     const {site, board, folder, user, password} = form.elements;
     if (![board, folder, user, password].every(field => field.reportValidity())) return;
-    normalizeDestination();
-    send('/start', {mode: 'resume', site: site.value, board: board.value, folder: folder.value,
+    send('/start', {mode: 'resume', site: site.value, board: board.value, folder: rootFolder(folder.value),
         user: user.value, password: password.value, capture_mode: form.elements.resume_capture_mode.value});
     password.value = '';
 };
@@ -530,8 +567,7 @@ form.elements.test_aid.addEventListener('keydown', event => {
 exportButton.onclick = () => {
     const {folder, site, board} = form.elements;
     if (folder.reportValidity() && board.reportValidity()) {
-        normalizeDestination();
-        send('/export', {folder: folder.value, site: site.value, board: board.value});
+        send('/export', {folder: rootFolder(folder.value), site: site.value, board: board.value});
     }
 };
 stop.onclick = () => send('/stop', {});

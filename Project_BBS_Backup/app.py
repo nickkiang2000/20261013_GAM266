@@ -20,7 +20,7 @@ from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed,
 from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.12.1'
+APP_VERSION = 'v2.15.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
@@ -36,7 +36,7 @@ ARTICLE_TABLE = '''CREATE TABLE IF NOT EXISTS articles(
     fetched REAL, source_index INTEGER, PRIMARY KEY(site,board,aid))'''
 SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2'}
 DIRECTIONS = {'newest': '新到舊', 'oldest': '舊到新'}
-CAPTURE_MODES = {'line': '逐行', 'page': '逐頁'}
+CAPTURE_MODES = {'line': '逐行', 'page': '自動擷取'}
 BACKUP_MODES = {'recheck': '重新核對', 'fill': '補齊備份'}
 BEFORE_READ_SECONDS = 2
 BETWEEN_ITEMS_SECONDS = 3
@@ -366,7 +366,35 @@ def complete_capture(post):
 def download_article(api, db, site, board, aid, *, source_index=None, existing=None, checkpoint=False):
     from ansi_capture import read_colored_post
 
-    post = read_colored_post(api, board, aid)
+    read_started = time.monotonic()
+    try:
+        post = read_colored_post(api, board, aid)
+    except ArticleStalled as exc:
+        # Only formal page-first jobs retry, and only after a verified return to the list.
+        if (not checkpoint or source_index is None or getattr(api, 'capture_mode', None) != 'page'
+                or getattr(api, 'view', None) != 'list'):
+            raise
+        failed_page = {'reason': str(exc), 'capture': getattr(exc, 'capture_diagnostics', {}),
+                       'page_seconds': round(time.monotonic() - read_started, 3)}
+        if STOP.is_set():
+            raise DownloadStopped() from exc
+        STATE['message'] = f'編號 {source_index} 逐頁未通過，正在改用逐行重讀'
+        retry_started = time.monotonic()
+        try:
+            api.capture_mode = 'line'
+            current = api.get_post(board, index=source_index, query=True)
+            if current.get('index') != source_index or current.get('aid') != aid or current.get('is_lock'):
+                raise ArticleReadError('改用逐行前無法確認仍為同一篇可讀文章')
+            post = read_colored_post(api, board, aid)
+        except Exception as retry_error:
+            failed_page.update(line_result='failed', line_seconds=round(time.monotonic() - retry_started, 3))
+            retry_error.capture_diagnostics = dict(getattr(retry_error, 'capture_diagnostics', {}),
+                                                   page_fallback=failed_page)
+            raise
+        finally:
+            api.capture_mode = 'page'
+        failed_page.update(line_result='read', line_seconds=round(time.monotonic() - retry_started, 3))
+        post.setdefault('ansi_diagnostics', {})['page_fallback'] = failed_page
     STATE['ansi_diagnostics'] = post.get('ansi_diagnostics', {})
     if existing and existing.get('full_content'):
         previous_rows = existing['full_content'].split('\n')
@@ -945,13 +973,13 @@ class Handler(BaseHTTPRequestHandler):
                 capture_mode = data.get('capture_mode', '')
                 if capture_mode not in ('', 'line', 'page'):
                     raise ValueError()
-                data['capture_mode'] = capture_mode or None
+                data['capture_mode'] = capture_mode or ('page' if mode == 'new' else None)
                 if mode == 'test':
                     folder = test_destination(site, board, aid, capture_mode, data['short_terminal'])
                 data['folder'] = str(folder)
                 data['all_articles'] = mode == 'new' and data.get('all_articles') == 'on'
                 if mode == 'new':
-                    data['backup_mode'] = data.get('backup_mode', 'recheck')
+                    data['backup_mode'] = data.get('backup_mode', 'fill')
                     if data['backup_mode'] not in BACKUP_MODES:
                         raise ValueError()
                     data['direction'] = data.get('direction', 'newest')

@@ -9,6 +9,7 @@ from PyPtt import command, screens
 
 SGR = re.compile(r'\x1b\[([0-9;]*)m')
 LINE_RANGE = re.compile(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行')
+SINGLE_SCREEN_END = re.compile(r'^\s*瀏覽\s*第\s*1\s*/\s*1\s*頁\s*\(\s*100%\s*\)')
 MAX_FRAME_BYTES = 256_000
 MAX_FRAMES = 4096
 
@@ -151,6 +152,10 @@ class NumberedArticle:
 
     def __init__(self, *, page_mode=False):
         self.page_mode = page_mode
+        self.extra_first_row = False
+        self.page_line_offset = 0
+        self.page_ranges = []
+        self.single_screen_body = None
         self.rows = {}
         self.colors = {}
         self.color_conflict_rows = set()
@@ -185,13 +190,40 @@ class NumberedArticle:
         extra = rows[max(count, 0):]
         padded = (self.page_mode and not any(row.strip() for row in extra)
                   and (styled is None or not any(line.color_runs for line in styled[max(count, 0):])))
-        if first < 1 or not 0 < count <= len(rows) or (any(extra) and not padded):
+        # Some first screens contain one more display row than the reported span.
+        # Keep it provisionally, then require a unique overlap on the next screen.
+        if (self.page_mode and self.seen == 1 and not at_end and first == 1
+                and count > 0 and len(extra) == 1 and not padded):
+            self.extra_first_row = True
+            count += 1
+        elif self.page_mode and self.extra_first_row and self.seen == 2:
+            candidates = [offset for offset in (0, 1)
+                          if self._confirms_first_overlap(first + offset, rows[:count])]
+            if len(candidates) != 1:
+                self.width_mismatches += 1
+                self.width_sample.append({'screen': self.seen, 'range': span,
+                                          'rows': len(rows), 'overlap_candidates': candidates})
+                return
+            self.page_line_offset = candidates[0]
+        if first < 1 or not 0 < count <= len(rows) or (any(rows[count:]) and not padded):
             self.width_mismatches += 1
+            # Match the SDK's first-and-final screen extraction. The status
+            # confirms one screen from line 1; the row count can include padding.
+            if (self.page_mode and self.seen == 1 and at_end and first == 1
+                    and 0 < count <= len(rows) and SINGLE_SCREEN_END.match(status)
+                    and any(row.strip() for row in rows)):
+                self.single_screen_body = '\n'.join(rows)
             if len(self.width_sample) < 12:
                 self.width_sample.append({'screen': self.seen, 'range': span, 'rows': len(rows),
                                           'blank_rows': sum(not row.strip() for row in rows)})
             return
+        first += self.page_line_offset
+        last = first + count - 1
+        if self.page_mode and len(self.page_ranges) < 12:
+            self.page_ranges.append({'reported': span, 'mapped': [first, last],
+                                     'rows': len(rows), 'percent': self.last_percent})
         if at_end:
+            self.end_range = [first, last]
             self.end_usable = True
         self.last_window = (first, last, tuple(rows[:count]))
 
@@ -207,6 +239,14 @@ class NumberedArticle:
                 if self.colors.setdefault(number, runs) != runs:
                     self.color_conflicts += 1
                     self.color_conflict_rows.add(number)
+
+    def _confirms_first_overlap(self, first, rows):
+        end = max(self.rows, default=0)
+        if not 1 <= first <= end < first + len(rows) - 1:
+            return False
+        overlap = rows[:end - first + 1]
+        return (any(row.strip() for row in overlap)
+                and all(self.rows[first + index] == row for index, row in enumerate(overlap)))
 
     def covers(self, end):
         return (not (self.conflicts or self.width_mismatches or self.unnumbered)
@@ -245,6 +285,8 @@ class NumberedArticle:
             'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
             'last_percent': self.last_percent,
             'width_mismatches_sample': self.width_sample,
+            'extra_first_row': self.extra_first_row, 'page_line_offset': self.page_line_offset,
+            'page_ranges_sample': self.page_ranges,
             'first_conflict_line': self.first_conflict, 'first_range': self.first_range,
             'last_range': self.last_range, 'end_range': self.end_range, 'end_usable': self.end_usable,
             'unique_lines': len(self.rows), 'missing_lines': sum(end - start + 1 for start, end in gaps),
@@ -254,7 +296,7 @@ class NumberedArticle:
 
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
-    from board_session import BoardSession
+    from board_session import BoardSession, PAGE_DOWN_KEY
 
     core = api.connect_core
     send = core.send
@@ -271,7 +313,8 @@ def read_colored_post(api, board, aid):
     fallback_attempts = []
 
     def diagnostics():
-        return {'mode': mode, 'page_turns': page_turns, 'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
+        return {'mode': mode, 'page_key': 'Page Down' if mode == 'page' else None,
+                'page_turns': page_turns, 'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
                 'reached_end': reached_end or numbered.end_evidence is not None,
                 'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts}
 
@@ -302,7 +345,7 @@ def read_colored_post(api, board, aid):
             numbered = NumberedArticle(page_mode=mode == 'page')
             reached_end = frame_limit_hit = False
             page_turns = 0
-        if mode == 'page' and article_screen and message == command.right:
+        if mode == 'page' and article_screen and message == PAGE_DOWN_KEY:
             page_turns += 1
         capturing = article_screen and numbered.seen < MAX_FRAMES
         frame_limit_hit |= article_screen and not capturing
@@ -370,8 +413,11 @@ def read_colored_post(api, board, aid):
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}
+        assembly = 'numbered' if reconstructed is not None else 'sdk'
+        if numbered.single_screen_body is not None:
+            assembly = 'single_screen'
         capture.update(
-            assembly='numbered' if reconstructed is not None else 'sdk',
+            assembly=assembly,
             sdk_lines=len(sdk_rows), selected_lines=len(selected_rows),
             sdk_blank_lines=sum(not line.strip() for line in sdk_rows),
             selected_blank_lines=sum(not line.strip() for line in selected_rows),
