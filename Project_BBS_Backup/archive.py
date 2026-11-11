@@ -167,10 +167,18 @@ def page(title, body, script, *, ansi=False):
 <body{body_class}>{body}<script>{script}</script></body></html>'''
 
 
-def write_page(path, content):
+def write_page(path, content, *, force=False):
+    data = content.encode('utf-8')
+    if not force:
+        try:
+            if path.read_bytes().replace(b'\r\n', b'\n') == data:
+                return False
+        except FileNotFoundError:
+            pass
     temp = path.with_suffix('.html.tmp')
-    temp.write_text(content, encoding='utf-8')
+    temp.write_bytes(data)
     temp.replace(path)
+    return True
 
 
 def article_body(body, color_lines, *, start_line=0):
@@ -240,7 +248,7 @@ def color_article(site, board, title, post, body, nav):
             + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0))
 
 
-def export_html(db, folder, progress=None):
+def export_html(db, folder, progress=None, *, force=False, stats=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
     rows = db.execute('''SELECT * FROM (
@@ -253,6 +261,7 @@ def export_html(db, folder, progress=None):
                                    source_index IS NOT NULL, source_index ASC, fetched ASC, aid''')
     total = db.execute('SELECT count(*) FROM articles').fetchone()[0]
     count = 0
+    written = 0
     if progress:
         progress(count, total)
     sections = []
@@ -302,13 +311,15 @@ def export_html(db, folder, progress=None):
                 with db:
                     issue_records.record(db, site, board, source_index, aid,
                                          '原格式呈現失敗，已改用純文字 HTML：' + render_error, kind='html')
-            write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored))
+            changed = write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored),
+                                 force=force)
             if data is not None and not render_error:
                 with db:
                     db.execute('DELETE FROM article_issues WHERE site=? AND board=? AND issue_key=?',
                                (site, board, 'html:' + aid))
             if data is not None:
                 count += 1
+                written += changed
                 if progress:
                     progress(count, total)
         # Anchor pages at the newest end so the first view shows the latest 20.
@@ -337,6 +348,9 @@ def export_html(db, folder, progress=None):
              '<h1>BBS 離線文章</h1><span>› <span id="active-board"></span></span>'
              '<a href="help.html">操作說明與紀錄</a></header>'
              + (''.join(sections) if sections else '<p>尚無文章</p>'))
-    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8').replace('<!-- ISSUE_RECORDS -->', issue_report(db)))
-    write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS))
+    write_page(folder / 'help.html', HELP.read_text(encoding='utf-8').replace('<!-- ISSUE_RECORDS -->', issue_report(db)),
+               force=force)
+    write_page(folder / 'index.html', page('BBS 離線文章', index, INDEX_KEYS), force=force)
+    if stats is not None:
+        stats['written'] = written
     return count

@@ -26,13 +26,15 @@ button:disabled { cursor: default; }
 #run:disabled { opacity: .5; }
 #stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.count-fields { display: flex; gap: 6px; align-items: end; }
-.count-fields label { flex: 1; }
-.count-fields button { white-space: nowrap; }
-#all-articles[aria-pressed="true"] { outline: 2px solid #6c9bce; }
-.download-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-.download-action { min-width: 0; border: 1px solid #343952; padding: 7px; }
-.download-action p { margin-top: 5px; }
+.board-field { grid-column: span 2; }
+.count-fields { grid-column: span 4; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr);
+                gap: 8px; }
+.count-fields label { grid-column: auto; }
+.download-actions { display: grid; gap: 6px; }
+.download-action { display: grid; grid-template-columns: 9em minmax(0, 1fr); align-items: start;
+                   gap: 8px; min-width: 0; border: 1px solid #343952; padding: 7px; }
+.download-action p { margin: 2px 0; }
+.test-action { margin-top: 8px; }
 .hint { margin: 0; color: #aab0c4; font-size: .84rem; }
 .status-header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
                  padding: 4px 8px; background: #000088; }
@@ -94,37 +96,52 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 <label>站台 <select name="site"><option value="PTT2">PTT2 批踢踢兔</option><option value="PTT">PTT 批踢踢實業坊</option></select></label>
 <label>帳號<input name="user" required autocomplete="off"></label>
 <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
-<label class="half">英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
-<div class="half count-fields">
+<label class="board-field">英文板名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
+<div class="count-fields">
     <label>掃描篇數<input name="count" type="number" min="1" max="10000" value="5" required></label>
-    <button type="button" id="all-articles" aria-pressed="false">下載全部文章</button>
+    <label>新下載方式
+        <select name="backup_mode" aria-describedby="backup-mode-hint">
+            <option value="recheck">重新核對</option><option value="fill">補齊備份</option>
+        </select>
+    </label>
 </div>
+<p id="backup-mode-hint" class="hint wide"></p>
 <label class="wide">備份完整目錄<input name="folder" required placeholder="可先填 D:\BBS_Backup\"></label>
 <p class="hint wide destination" id="destination">可先輸入根目錄，程式會補上站台_板名。</p>
 <div class="download-actions wide">
     <div class="download-action">
-        <button id="run" aria-describedby="new-summary">登入開啟新下載</button>
+        <button id="run" aria-describedby="new-summary">登入新下載</button>
         <p id="new-summary" class="hint destination"></p>
     </div>
     <div class="download-action">
         <button type="button" id="resume" aria-describedby="resume-summary" disabled>登入續傳</button>
         <p id="resume-summary" class="hint destination">選擇看板與備份目錄後查詢續傳。</p>
     </div>
-</div>
-<div class="actions wide">
-    <button type="button" id="export">離線內容重整</button>
+    <div class="download-action">
+        <button type="button" id="export" aria-describedby="export-hint">離線內容重整</button>
+        <p id="export-hint" class="hint">用本機資料重建全部 HTML，無須登入。</p>
+    </div>
 </div>
 <p id="rate-status" class="hint wide" hidden></p>
 <details class="wide" id="advanced"><summary>進階設定<span id="advanced-note"></span></summary>
     <div class="advanced-fields">
-        <label>指定文章 AID<input name="aid" placeholder="例如 1AdzogFB" pattern="#?[A-Za-z0-9_\-]{8}"></label>
         <label>起始編號<input name="start" type="number" min="0" value="0" required></label>
         <label>掃描方向<select name="direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
         <label>新下載擷取方式<select name="capture_mode"><option value="line">逐行 ↓（預設）</option><option value="page">逐頁 →</option></select></label>
         <label id="resume-capture-field" hidden>續傳擷取方式<select name="resume_capture_mode"><option value="">沿用上次設定</option><option value="line">逐行 ↓</option><option value="page">逐頁 →</option></select></label>
-        <label class="wide"><input name="short_terminal" type="checkbox" disabled> 24 列相容讀取（指定文章）</label>
     </div>
     <p class="hint">起始編號若寫0，則從最新一篇的編號起始。</p>
+</details>
+<details class="wide" id="test-area"><summary>單篇測試</summary>
+    <div class="advanced-fields">
+        <label class="half">指定文章 AID<input name="test_aid" placeholder="例如 1AdzogFB"></label>
+        <label class="half">測試擷取方式<select name="test_capture_mode"><option value="line">逐行 ↓</option><option value="page">逐頁 →</option></select></label>
+        <label class="wide"><input name="test_short_terminal" type="checkbox"> 24 列相容讀取</label>
+    </div>
+    <div class="download-action test-action">
+        <button type="button" id="test-download" aria-describedby="test-summary">登入並測試下載</button>
+        <p id="test-summary" class="hint destination"></p>
+    </div>
 </details>
 </form>
 <section><div class="status-header"><h2>下載狀態</h2><button type="button" id="stop" disabled>停止</button></div>
@@ -158,13 +175,13 @@ const resume = document.getElementById('resume');
 const progress = document.getElementById('progress');
 const exportProgress = document.getElementById('export-progress');
 const exportButton = document.getElementById('export');
+const testButton = document.getElementById('test-download');
 const stop = document.getElementById('stop');
 const destination = document.getElementById('destination');
 const indexLink = document.getElementById('index-link');
 const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
 const themeToggle = document.getElementById('theme-toggle');
 const desktopToggle = document.getElementById('desktop-toggle');
-const allButton = document.getElementById('all-articles');
 const notice = document.getElementById('notice');
 const advanced = document.getElementById('advanced');
 let previousSuffix = '';
@@ -182,7 +199,6 @@ let refreshApplied = 0;
 let connectionLost = false;
 let rateLimits = {};
 let lastWaitNotice = '';
-let allArticles = false;
 
 function selectedRateLimit() {
     return rateLimits[form.elements.site.value];
@@ -193,6 +209,7 @@ function updateDownloadButtons() {
     start.disabled = running || Boolean(limit);
     resume.disabled = running || !pending || Boolean(limit);
     exportButton.disabled = running;
+    testButton.disabled = running || Boolean(limit);
     const status = document.getElementById('rate-status');
     status.hidden = !limit;
     if (limit) {
@@ -247,6 +264,7 @@ function showResult(state) {
     const summary = [];
     if (state.batch_total) summary.push(`網站掃描 ${state.scanned}／${state.batch_total}`);
     if (state.updated) summary.push(`已更新 ${state.updated} 篇`);
+    if (state.reused_local) summary.push(`沿用本機 ${state.reused_local} 篇`);
     if (state.ansi_review) summary.push(`待核色 ${state.ansi_review} 篇`);
     if (state.unresolved) summary.push(`待查 ${state.unresolved} 筆`);
     if (state.unavailable) summary.push(`刪除或鎖定 ${state.unavailable} 筆`);
@@ -290,33 +308,29 @@ window.addEventListener('focus', updateDesktopToggle);
 updateDesktopToggle();
 
 function showAdvancedNote() {
-    const {aid, start, direction, site, board, count, folder, short_terminal, capture_mode} = form.elements;
+    const {start, direction, site, board, count, folder, backup_mode, capture_mode,
+        test_aid, test_capture_mode, test_short_terminal} = form.elements;
     const first = Number(start.value);
     const oldestFirst = direction.value === 'oldest';
-    aid.disabled = first > 0 || allArticles;
-    const single = !aid.disabled && Boolean(aid.value.trim());
-    start.disabled = count.disabled = single || allArticles;
-    direction.disabled = single;
-    short_terminal.disabled = !single;
-    if (!single) short_terminal.checked = false;
-    allButton.disabled = single;
-    allButton.setAttribute('aria-pressed', String(allArticles));
-    setText(allButton, allArticles ? '已選全部文章' : '下載全部文章');
     const settings = [];
-    if (single) settings.push(`單篇 #${aid.value.replace(/^#/, '')}`);
-    else if (allArticles) settings.push('全部文章');
-    else {
-        if (first > 0) settings.push(`起始 ${start.value}`);
-        if (oldestFirst) settings.push('舊到新');
-    }
+    if (first > 0) settings.push(`起始 ${start.value}`);
+    if (oldestFirst) settings.push('舊到新');
     setText('advanced-note', settings.length ? ' · ' + settings.join(' · ') : '');
     let range;
-    if (single) range = `單篇 #${aid.value.replace(/^#/, '')}${short_terminal.checked ? ' · 24 列相容讀取' : ''}`;
-    else if (allArticles) range = `全部一般文章 · ${oldestFirst ? '舊到新' : '新到舊'}`;
-    else if (first === 0 && oldestFirst) range = '從最新一篇起 · 舊到新 · 只掃最新一篇';
+    if (first === 0 && oldestFirst) range = '從最新一篇起 · 舊到新 · 只掃最新一篇';
     else range = `從${first > 0 ? ` ${first} ` : '最新一篇'}起 · 最多 ${count.value} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
-    const warning = pending && !single ? ' · 會取代未完成的批次設定' : '';
-    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${range} · ${captureLabel(capture_mode.value)} · ${folder.value || '未填備份目錄'}${warning}`);
+    const warning = pending ? `。將取代未完成範圍 ${pendingRange(pending)}` : '';
+    setText('backup-mode-hint', backup_mode.value === 'fill'
+        ? '依 AID 沿用已有正文，只下載缺少的文章。'
+        : '重讀所選範圍，比對正文、推文和配色。');
+    setText('new-summary', `本次設定：${site.value}／${board.value || '未填看板'} · ${backupLabel(backup_mode.value)} · ${range} · ${captureLabel(capture_mode.value)} · ${folder.value || '未填備份目錄'}${warning}`);
+    const testAid = test_aid.value.trim().replace(/^#/, '');
+    const height = test_short_terminal.checked ? 24 : 100;
+    const testMode = test_capture_mode.value;
+    const destination = testAid && board.value
+        ? `test-downloads/${site.value}_${board.value}/${testAid}/${testMode}-${height}/`
+        : 'test-downloads/';
+    setText('test-summary', `${captureLabel(testMode)} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
     showResumeSummary();
 }
 
@@ -324,19 +338,22 @@ function captureLabel(mode) {
     return mode === 'page' ? '逐頁 →' : '逐行 ↓';
 }
 
+function backupLabel(mode) {
+    return mode === 'fill' ? '補齊備份' : '重新核對';
+}
+
+function pendingRange({first, last, direction}) {
+    return direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
+}
+
 function showResumeSummary() {
     document.getElementById('resume-capture-field').hidden = !pending;
     if (!pending) return;
-    const {first, last, direction, reusable, capture_mode} = pending;
-    const range = direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
+    const {reusable, capture_mode, backup_mode} = pending;
     const mode = form.elements.resume_capture_mode.value || capture_mode;
-    setText('resume-summary', `上次未完成：${range} · 已有 ${reusable} 篇可沿用 · 本次${captureLabel(mode)} · ${pending.folder}`);
+    setText('resume-summary', `上次未完成：${pendingRange(pending)} · ${backupLabel(backup_mode)} · 已有 ${reusable} 篇可沿用 · 本次${captureLabel(mode)} · ${pending.folder}`);
 }
 
-allButton.onclick = () => {
-    allArticles = !allArticles;
-    showAdvancedNote();
-};
 advanced.addEventListener('invalid', () => { advanced.open = true; }, true);
 
 function checkPending() {
@@ -458,10 +475,12 @@ async function send(path, data) {
             checkPending();
         } else if (path !== '/stop') {
             const result = await response.json();
-            if (result.folder) form.elements.folder.value = result.folder;
-            showAdvancedNote();
-            checkPending();
-            saveForm();
+            if (data.mode !== 'test') {
+                if (result.folder) form.elements.folder.value = result.folder;
+                showAdvancedNote();
+                checkPending();
+                saveForm();
+            }
         }
         await pollStatus();
     } catch {
@@ -474,10 +493,10 @@ form.addEventListener('submit', event => {
     normalizeDestination();
     const data = Object.fromEntries(new FormData(form));
     form.elements.password.value = '';
-    form.elements.aid.value = '';
+    for (const key of ['test_aid', 'test_capture_mode', 'test_short_terminal']) delete data[key];
     showAdvancedNote();
     saveForm();
-    send('/start', {...data, mode: 'new', all_articles: allArticles ? 'on' : ''});
+    send('/start', {...data, mode: 'new'});
 });
 resume.onclick = () => {
     const {site, board, folder, user, password} = form.elements;
@@ -487,6 +506,27 @@ resume.onclick = () => {
         user: user.value, password: password.value, capture_mode: form.elements.resume_capture_mode.value});
     password.value = '';
 };
+testButton.onclick = () => {
+    const {site, board, user, password, test_aid, test_capture_mode, test_short_terminal} = form.elements;
+    if (![board, user, password].every(field => field.reportValidity())) return;
+    const aid = test_aid.value.trim().replace(/^#/, '');
+    if (!/^[A-Za-z0-9_-]{8}$/.test(aid)) {
+        showNotice('請輸入文章 AID', '請在單篇測試區填寫 8 碼文章代碼。');
+        test_aid.focus();
+        return;
+    }
+    send('/start', {mode: 'test', site: site.value, board: board.value, user: user.value, password: password.value,
+        aid, capture_mode: test_capture_mode.value, short_terminal: test_short_terminal.checked ? 'on' : ''});
+    password.value = '';
+    test_aid.value = '';
+    showAdvancedNote();
+};
+form.elements.test_aid.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        testButton.click();
+    }
+});
 exportButton.onclick = () => {
     const {folder, site, board} = form.elements;
     if (folder.reportValidity() && board.reportValidity()) {
@@ -538,7 +578,7 @@ async function refresh() {
         }
     }
     setText('scan-count', scan);
-    setText('range-count', range);
+    setText('range-count', [range, state.reused_local ? `沿用本機 ${state.reused_local} 篇` : ''].filter(Boolean).join(' · '));
     setText('local-count', state.local_count ?? '—');
     setText('unchanged-count', state.skipped ?? 0);
     setText('updated-count', state.updated ?? 0);
@@ -570,15 +610,15 @@ async function refresh() {
     exportProgress.max = state.export_total || 1;
     exportProgress.value = state.exported || 0;
     setText('export-count', state.index_path
-        ? `離線頁面已更新，共 ${state.exported} 篇`
+        ? `離線 HTML 共 ${state.exported} 篇 · 本次寫入 ${state.html_written ?? state.exported} 篇`
         : state.phase === 'export' || state.export_total
-            ? `已建立 ${state.exported}／${state.export_total} 篇 HTML`
+            ? `已處理 ${state.exported}／${state.export_total} 篇 HTML`
             : '等待下載結束');
     setText('index-path', !state.index_url && state.folder ? `實際備份位置：${state.folder}` : '');
     indexLink.hidden = !state.index_url;
     if (state.index_url) {
         indexLink.href = state.index_url;
-        setText(indexLink, state.index_path);
+        setText(indexLink, state.operation === 'test' ? `開啟測試結果 · ${state.index_path}` : state.index_path);
     }
     let timing = state.elapsed ? `已用時 ${Math.floor(state.elapsed / 60)} 分 ${state.elapsed % 60} 秒` : '';
     if (state.seconds_per_article) {

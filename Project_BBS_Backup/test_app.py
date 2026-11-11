@@ -14,6 +14,96 @@ class StorageTests(unittest.TestCase):
         self.enterContext(patch('local_state.LOG_DIRECTORY', Path(temporary) / 'log'))
         self.enterContext(patch.object(app, 'BoardSession', side_effect=lambda api: api))
 
+    def test_test_download_endpoint_uses_fresh_folder_and_leaves_main_archive_unchanged(self):
+        import io
+        from types import SimpleNamespace
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(app, 'ROOT', Path(d)), \
+                patch.object(app, 'STATE', {'running': False}), patch.object(app, 'active_rate_limits', return_value={}), \
+                patch.object(PyPtt, 'API') as factory, \
+                patch.object(app.threading, 'Thread', side_effect=lambda target, args, **kw:
+                             SimpleNamespace(start=lambda: target(*args))), \
+                patch('ansi_capture.read_colored_post', return_value={
+                    'aid': 'fixture1', 'full_content': '測試正文', 'pass_format_check': True,
+                }):
+            main = Path(d) / 'PTT_Test'
+            with closing(app.database(main)) as db, db:
+                db.execute("""INSERT INTO batch_ranges (site,board,first_index,last_index)
+                              VALUES ('PTT','Test',1,10)""")
+            database_file = main / 'articles.sqlite3'
+            before = database_file.read_bytes()
+            body = json.dumps(dict(mode='test', site='PTT', board='Test', aid='fixture1',
+                                   user='test', password='dummy', short_terminal='on',
+                                   capture_mode='page', folder=str(main))).encode()
+            request = object.__new__(app.Handler)
+            request.path = '/start'
+            request.server = SimpleNamespace(server_port=18761)
+            request.headers = {'Origin': 'http://127.0.0.1:18761', 'X-Token': app.TOKEN,
+                               'Content-Length': str(len(body))}
+            request.rfile = io.BytesIO(body)
+            replies = []
+            request.reply = lambda status, content: replies.append((status, json.loads(content)))
+            request.do_POST()
+            self.assertEqual(replies[0][0], 200)
+            folder = Path(replies[0][1]['folder'])
+            self.assertEqual(folder.parent, Path(d) / 'test-downloads/PTT_Test/fixture1/page-24')
+            self.assertEqual(len(list((folder / 'articles').glob('*.html'))), 1)
+            self.assertEqual(factory.call_args.kwargs['screen_height'], 24)
+            self.assertEqual(database_file.read_bytes(), before)
+            self.assertFalse((main / 'index.html').exists())
+
+    def test_fill_reuses_exact_aid_and_fetches_missing_article(self):
+        import PyPtt
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0, timed_samples=0)), \
+                patch.object(app.STOP, 'wait', return_value=False), \
+                patch('ansi_capture.read_colored_post', return_value={
+                    'aid': 'fixture2', 'full_content': '新文章', 'pass_format_check': True,
+                }) as read:
+            folder = Path(d)
+            with closing(app.database(folder)) as db:
+                app.save_article(db, 'Test', {'aid': 'fixture1', 'full_content': '既有文章',
+                                             'pass_format_check': True}, site='PTT', source_index=99)
+            api = factory.return_value
+            api.get_newest_index.return_value = 2
+            api.get_post.side_effect = lambda board, index, query: {'index': index, 'aid': f'fixture{index}'}
+            app.work(dict(site='PTT', board='Test', start=1, count=2, direction='oldest',
+                          backup_mode='fill', folder=d, user='test', password='dummy'))
+            read.assert_called_once_with(api, 'Test', 'fixture2')
+            self.assertEqual((app.STATE['reused_local'], app.STATE['saved'], app.STATE.get('skipped', 0)), (1, 1, 0))
+            with closing(app.database(folder)) as db:
+                self.assertEqual(db.execute('SELECT source_index,body FROM articles ORDER BY source_index').fetchall(),
+                                 [(1, '既有文章'), (2, '新文章')])
+
+    def test_incremental_html_rewrites_neighbors_and_repairs_missing_page(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            stats = {}
+            with closing(app.database(folder)) as db:
+                def save(index):
+                    app.save_article(db, 'Test', {'aid': f'fixture{index}', 'title': f'第 {index} 篇',
+                                                 'full_content': '正文', 'pass_format_check': True},
+                                     source_index=index)
+
+                for index in (1, 3, 4):
+                    save(index)
+                app.export_html(db, folder, stats=stats)
+                mtimes = {p: p.stat().st_mtime_ns for p in folder.rglob('*.html')}
+                app.export_html(db, folder, stats=stats)
+                self.assertEqual(stats['written'], 0)
+                self.assertEqual({p: p.stat().st_mtime_ns for p in mtimes}, mtimes)
+                save(2)
+                self.assertEqual(app.export_html(db, folder, stats=stats), 4)
+                self.assertEqual(stats['written'], 3)
+                missing = next((folder / 'articles').glob('*.html'))
+                missing.unlink()
+                app.export_html(db, folder, stats=stats)
+                self.assertEqual(stats['written'], 1)
+                self.assertTrue(missing.is_file())
+                app.export_html(db, folder, force=True, stats=stats)
+                self.assertEqual(stats['written'], 4)
+
     def test_issue_history_migrates_only_missing_articles_and_resolves_after_retry(self):
         import issue_records
 
