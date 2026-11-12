@@ -4,6 +4,7 @@ from hashlib import sha256
 from html import escape
 from itertools import groupby
 import json
+import re
 from issue_records import report as issue_report
 import issue_records
 from pathlib import Path
@@ -24,6 +25,8 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #080c11; paddi
       font: 1rem/1.55 Consolas, "Microsoft JhengHei", monospace; }
 pre.frame-view { max-height: calc(var(--frame-rows) * 1lh); padding-block: 0; overflow: auto; white-space: pre; }
 pre.frame-view::after { content: ''; display: block; height: var(--frame-padding); }
+pre a, .color-reference a .ansi-run { color: #4da3ff; }
+pre a { text-decoration: underline; text-underline-offset: .1em; }
 nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 .pagination { align-items: center; gap: .75rem; }
 .pagination button { font: inherit; padding: .25rem .65rem; }
@@ -33,6 +36,8 @@ nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 PAGE_SIZE = 20
 FRAME_ROWS = 22
 OFFLINE_README = Path(__file__).with_name('offline_readme.html')
+OFFLINE_SEARCH = Path(__file__).with_name('offline_search.js')
+URL_PATTERN = re.compile(r"""https?://[^\s<>"'\x00-\x1f，。！？；：、（）【】《》「」『』]+""", re.I)
 
 INDEX_KEYS = '''
 const boards = Array.from(document.querySelectorAll('.board'), section => ({
@@ -93,7 +98,7 @@ for (const board of boards) {
 }
 
 function restoreSelection() {
-    const returning = document.getElementById(location.hash.slice(1));
+    const returning = document.getElementById(location.hash.slice(1).split('/')[0]);
     const board = boards.find(candidate => candidate.entries.includes(returning));
     if (board) select(board, board.entries.indexOf(returning));
     else if (boards.length) select(boards[0], boards[0].entries.length - 1);
@@ -102,7 +107,8 @@ restoreSelection();
 window.addEventListener('hashchange', restoreSelection);
 
 document.addEventListener('keydown', event => {
-    if (event.altKey || event.ctrlKey || event.metaKey || !activeBoard) return;
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey ||
+        event.isComposing || !activeBoard || document.getElementById('search-dialog').open) return;
     const board = activeBoard;
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();
@@ -118,6 +124,12 @@ document.addEventListener('keydown', event => {
     } else if (event.key === 'ArrowRight') {
         event.preventDefault();
         board.entries[board.position].click();
+    } else if (event.key === '[' || event.key === ']') {
+        event.preventDefault();
+        const current = board.entries[board.position];
+        const target = event.key === '[' ? current.dataset.subjectOlder : current.dataset.subjectNewer;
+        const position = board.entries.findIndex(entry => entry.id === target);
+        if (position >= 0) select(board, position);
     }
 });
 '''
@@ -126,6 +138,12 @@ ARTICLE_KEYS = '''
 const articleText = document.querySelector('pre');
 const frameButton = document.getElementById('frame-view');
 const frameRows = Number(articleText.style.getPropertyValue('--frame-rows'));
+let movedDown = false;
+const articleViewport = () => articleText.classList.contains('frame-view')
+    ? articleText : document.scrollingElement;
+const trackScroll = () => { if (articleViewport().scrollTop > 1) movedDown = true; };
+articleText.addEventListener('scroll', trackScroll);
+window.addEventListener('scroll', trackScroll);
 frameButton.addEventListener('click', () => {
     const enabled = articleText.classList.toggle('frame-view');
     frameButton.setAttribute('aria-pressed', String(enabled));
@@ -134,19 +152,41 @@ frameButton.addEventListener('click', () => {
     document.scrollingElement.scrollTop = 0;
 });
 document.addEventListener('keydown', event => {
-    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.isComposing) return;
+    const key = event.key;
+    const shortcut = {h: 'help', H: 'help', '[': 'subject-older', ']': 'subject-newer'}[key];
+    if (shortcut) {
+        const link = document.getElementById(shortcut);
+        if (link) {
+            event.preventDefault();
+            link.click();
+        }
+        return;
+    }
+    const mode = {'?': 'all', '/': 'title', a: 'author', '#': 'aid', S: 'subject', '!': 'exclude'}[key];
+    if (mode) {
+        event.preventDefault();
+        location.href = document.getElementById('back').href + '/' + mode;
+        return;
+    }
     if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
         event.preventDefault();
-        const viewport = articleText.classList.contains('frame-view') ? articleText : document.scrollingElement;
+        const viewport = articleViewport();
         const remaining = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
         const pageForward = event.key === 'ArrowRight';
         if (remaining > 1) {
             const lineHeight = parseFloat(getComputedStyle(articleText).lineHeight);
             const distance = pageForward ? lineHeight * frameRows : lineHeight;
+            movedDown = true;
             viewport.scrollTop += Math.min(distance, remaining);
         } else {
             document.getElementById(pageForward ? 'back' : 'next')?.click();
         }
+        return;
+    }
+    if (event.key === 'ArrowUp' && (movedDown || articleViewport().scrollTop > 1)) {
+        event.preventDefault();
+        articleViewport().scrollTop -= parseFloat(getComputedStyle(articleText).lineHeight);
         return;
     }
     const id = {Escape: 'back', ArrowLeft: 'back', ArrowUp: 'previous'}[event.key];
@@ -159,12 +199,12 @@ document.addEventListener('keydown', event => {
 '''
 
 
-def page(title, body, script, *, ansi=False):
+def page(title, body, script, *, ansi=False, extra_scripts=''):
     body_class = ' class="ansi-article"' if ansi else ''
     return f'''<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title><style>{STYLE}</style></head>
-<body{body_class}>{body}<script>{script}</script></body></html>'''
+<body{body_class}>{body}{extra_scripts}<script>{script}</script></body></html>'''
 
 
 def write_page(path, content, *, force=False):
@@ -175,10 +215,41 @@ def write_page(path, content, *, force=False):
                 return False
         except FileNotFoundError:
             pass
-    temp = path.with_suffix('.html.tmp')
+    temp = path.with_suffix(path.suffix + '.tmp')
     temp.write_bytes(data)
     temp.replace(path)
     return True
+
+
+def linkified_line(line, runs=()):
+    def render_slice(start, stop):
+        if not runs:
+            return escape(line[start:stop])
+        return ''.join(render_run(line[max(start, left):min(stop, right)], classes)
+                       for left, right, classes in offsets if start < right and left < stop)
+
+    if not URL_PATTERN.search(line):
+        return ''.join(render_run(value, classes) for value, classes in runs) if runs else escape(line)
+    offsets = []
+    offset = 0
+    for value, classes in runs:
+        offsets.append((offset, offset + len(value), classes))
+        offset += len(value)
+    parts = []
+    cursor = 0
+    for match in URL_PATTERN.finditer(line):
+        url = match[0].rstrip('.,!?;:')
+        for left, right in (('(', ')'), ('[', ']'), ('{', '}')):
+            while url.endswith(right) and url.count(right) > url.count(left):
+                url = url[:-1]
+        if len(url.partition('://')[2]) == 0:
+            continue
+        stop = match.start() + len(url)
+        parts.append(render_slice(cursor, match.start()))
+        parts.append(f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+                     + render_slice(match.start(), stop) + '</a>')
+        cursor = stop
+    return ''.join(parts) + render_slice(cursor, len(line))
 
 
 def article_body(body, color_lines, *, start_line=0):
@@ -193,15 +264,15 @@ def article_body(body, color_lines, *, start_line=0):
     # Keep a short final frame aligned to the article's page boundary.
     frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-(end - start_line)) % FRAME_ROWS}lh"'
     if color_lines is None:
-        return f'<pre{frame_style}>\n' + escape('\n'.join(lines[:end])) + '</pre>'
+        return f'<pre{frame_style}>\n' + '\n'.join(map(linkified_line, lines[:end])) + '</pre>'
     rendered = []
     for index in range(start_line, end):
         line = lines[index]
         runs = color_lines.get(str(index), [])
         if runs and ''.join(text for text, _ in runs) == line:
-            rendered.append(''.join(render_run(text, classes) for text, classes in runs))
+            rendered.append(linkified_line(line, runs))
         else:
-            rendered.append(escape(line))
+            rendered.append(linkified_line(line))
     return f'<style>{ANSI_STYLE}</style><pre class="color-reference"{frame_style}>\n' + '\n'.join(rendered) + '</pre>'
 
 
@@ -231,7 +302,38 @@ html:has(.index-top) { background: #000; }
 .board-tools .page-label { padding: 0 .25rem; }
 .board .entries { margin: .15rem 0; }
 .board .entries a { padding: .1rem .65rem; font-size: .92rem; line-height: 1.35; }
+#search-dialog { box-sizing: border-box; width: min(43rem, 92vw); max-height: 80vh; border: 1px solid #676767;
+    background: #10151c; color: #e0e7ef; padding: 1rem; }
+#search-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
+#search-dialog::backdrop { background: #000a; }
+#search-dialog header { display: flex; justify-content: space-between; align-items: center; gap: .5rem; }
+#search-close { font: inherit; line-height: 1; padding: .3rem .55rem; }
+#search-dialog form { display: flex; flex-wrap: wrap; gap: .35rem; align-items: center; }
+#search-dialog header, #search-form, #search-status { flex-shrink: 0; }
+#search-dialog input { flex: 1 1 14rem; min-width: 0; }
+#search-scroll { min-height: 0; overflow-y: auto; padding: .15rem; }
+#search-results { list-style: none; padding: 0; margin: 0; }
+#search-results li { padding: .3rem .55rem; }
+#search-results li:has(a[aria-current="true"]) { background: #253a50; outline: 1px solid #8ac7ff; outline-offset: -1px; }
+#search-dialog li span { display: block; overflow-wrap: anywhere; }
 '''
+
+SEARCH_DIALOG = '''
+<dialog id="search-dialog" aria-labelledby="search-label">
+<header><label id="search-label" for="search-query">搜尋全板</label>
+<button id="search-close" type="button" aria-label="關閉搜尋" title="關閉搜尋">×</button></header>
+<form id="search-form"><input id="search-query" type="search" autocomplete="off">
+<button type="submit">搜尋</button></form>
+<p id="search-status" class="meta" aria-live="polite"></p>
+<div id="search-scroll">
+<ul id="search-results"></ul><button id="search-more" type="button" hidden>顯示更多</button>
+</div>
+</dialog>
+'''
+
+
+def subject_key(title):
+    return re.sub(r'^(?:\s*re\s*:\s*)+', '', title, flags=re.I).strip().lower()
 
 
 def color_article(site, board, title, post, body, nav):
@@ -248,7 +350,7 @@ def color_article(site, board, title, post, body, nav):
             + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0))
 
 
-def export_html(db, folder, progress=None, *, force=False, stats=None):
+def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
     rows = db.execute('''SELECT * FROM (
@@ -266,9 +368,18 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
         progress(count, total)
     sections = []
     board_summaries = []
+    search_boards = {}
     for (site, board), group in groupby(rows, key=lambda row: row[:2]):
         items = list(group)
         keys = [sha256(json.dumps(row[:3]).encode()).hexdigest() for row in items]
+        search_rows = search_boards[f'{site} / {board}'] = []
+        subjects = {}
+        for i, item in enumerate(items):
+            if item[3] and item[5] is not None:
+                subjects.setdefault(subject_key(item[3]), []).append(i)
+        subject_links = {i: (group[pos - 1] if pos else None,
+                             group[pos + 1] if pos + 1 < len(group) else None)
+                         for group in subjects.values() for pos, i in enumerate(group)}
         entries = []
         for i, (_, _, aid, title, body, data, source_index, _) in enumerate(items):
             key = keys[i]
@@ -283,8 +394,26 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
                 post = {}
                 render_error = type(exc).__name__
             author = post.get('author') or ''
+            if data is not None:
+                comments = post.get('comments')
+                extra_comments = []
+                if isinstance(comments, list):
+                    for comment in comments:
+                        if isinstance(comment, dict):
+                            comment = comment.get('content')
+                        if isinstance(comment, str) and comment and comment not in (body or ''):
+                            extra_comments.append(comment)
+                search_rows.append({
+                    'key': key, 'index': source_index, 'aid': aid, 'title': title,
+                    'author': str(author), 'subject': subject_key(title),
+                    'body': '\n'.join([(body or '').rstrip(), *extra_comments]).replace('\x08', ''),
+                })
             label += f'{author} · ' if author else ''
-            entries.append(f'<li><a id="a-{key}" href="articles/{key}.html">'
+            neighbors = tuple(keys[target] if target is not None else None
+                              for target in subject_links.get(i, (None, None)))
+            subject_attrs = ''.join(f' data-subject-{direction}="a-{neighbor}"'
+                                    for direction, neighbor in zip(('older', 'newer'), neighbors) if neighbor)
+            entries.append(f'<li><a id="a-{key}" href="articles/{key}.html"{subject_attrs}>'
                            f'<span class="meta">{escape(label)}</span>{escape(title)}</a></li>')
             links = [f'<a id="back" href="../index.html#a-{key}">返回列表</a>']
             if i > 0:
@@ -292,6 +421,10 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
             if i + 1 < len(keys):
                 links.append(f'<a id="next" href="{keys[i+1]}.html">下一篇 ↓</a>')
             links.append(f'<button id="frame-view" type="button" aria-pressed="false">{FRAME_ROWS} 行視窗</button>')
+            links.append('<a id="help" href="../ReadMe.html#keyboard" hidden>操作教學</a>')
+            for link_id, neighbor in zip(('subject-older', 'subject-newer'), neighbors):
+                if neighbor:
+                    links.append(f'<a id="{link_id}" href="../index.html#a-{neighbor}" hidden>同主題</a>')
             nav = '<nav>' + ''.join(links) + '</nav>'
             colored = bool(post.get('ansi_lines') or post.get('headerless'))
             try:
@@ -307,8 +440,8 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
             if render_error:
                 colored = False
                 article = (nav + f'<h1>{escape(title)}</h1><p>原格式呈現失敗，以下保留本機正文；'
-                           '<a href="../ReadMe.html#issue-records">查看錯漏紀錄</a>。</p><pre>' +
-                           escape(body or '') + '</pre>')
+                           '<a href="../ReadMe.html#issue-records">查看錯漏紀錄</a>。</p>' +
+                           article_body(body or '', None))
                 with db:
                     issue_records.record(db, site, board, source_index, aid,
                                          '原格式呈現失敗，已改用純文字 HTML：' + render_error, kind='html')
@@ -355,13 +488,18 @@ def export_html(db, folder, progress=None, *, force=False, stats=None):
                         + pagination + '</div>' + ''.join(pages) + '</section>')
     index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
              '<h1>BBS時光庫</h1><span>› <span id="active-board"></span></span>'
+             '<button id="open-search" type="button">全板搜尋 ?</button>'
              '<a href="ReadMe.html">操作說明與紀錄</a></header>'
-             + (''.join(sections) if sections else '<p>尚無文章</p>'))
+             + (''.join(sections) if sections else '<p>尚無文章</p>') + SEARCH_DIALOG)
     readme = OFFLINE_README.read_text(encoding='utf-8')
     boards = '<ul>' + ''.join(board_summaries) + '</ul>' if board_summaries else '<p>目前尚無離線文章。</p>'
-    readme = readme.replace('<!-- BOARD_SUMMARIES -->', boards).replace('<!-- ISSUE_RECORDS -->', issue_report(db))
+    readme = readme.replace('<!-- BOARD_SUMMARIES -->', boards).replace(
+        '<!-- ISSUE_RECORDS -->', issue_report(db, issue_evidence))
     write_page(folder / 'ReadMe.html', readme, force=force)
-    write_page(folder / 'index.html', page('BBS時光庫', index, INDEX_KEYS), force=force)
+    search_data = json.dumps(search_boards, ensure_ascii=False, separators=(',', ':'))
+    write_page(folder / 'search-data.js', 'window.bbsSearchData = ' + search_data + ';\n', force=force)
+    index_keys = INDEX_KEYS + '\n' + OFFLINE_SEARCH.read_text(encoding='utf-8')
+    write_page(folder / 'index.html', page('BBS時光庫', index, index_keys), force=force)
     if stats is not None:
         stats['written'] = written
     return count

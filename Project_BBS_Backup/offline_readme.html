@@ -3,19 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BBS時光庫｜操作說明與紀錄</title>
+<title>BBS時光庫－操作說明與紀錄</title>
 <style>
 body { margin: 2rem auto; padding: 0 1rem; max-width: 50rem; font: 1rem/1.65 system-ui,sans-serif;
        background: #10151c; color: #e0e7ef; color-scheme: dark; }
-a { color: #a8d7ff; } h2 { margin-top: 1.7rem; } dt { font-weight: 650; } dd { margin: 0 0 .7rem 1rem; }
+a { color: #a8d7ff; } h2 { margin-top: 1.7rem; }
 .records-scroll { overflow-x: auto; } table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 th, td { border: 1px solid #526174; padding: .4rem; text-align: left; vertical-align: top; }
+.shortcuts { width: 100%; }
+.shortcuts th { width: 12ch; background: #182332; }
+kbd { white-space: nowrap; }
 </style>
 </head>
 <body>
 <header>
   <a href="index.html">返回 BBS時光庫</a>
-  <h1>BBS時光庫</h1>
+  <h1>BBS時光庫－操作說明與紀錄</h1>
   <nav aria-label="頁內目錄"><ol>
     <li><a href="#about">資料庫簡介</a></li>
     <li><a href="#keyboard">操作教學（鍵盤操作）</a></li>
@@ -30,10 +33,37 @@ th, td { border: 1px solid #526174; padding: .4rem; text-align: left; vertical-a
   </section>
   <section id="keyboard">
     <h2>操作教學（鍵盤操作）</h2>
-    <dl>
-      <dt>文章列表</dt><dd>↑／↓ 選文，Enter 或 → 開啟。Page Up／Page Down 翻頁，Home／End 前往最舊／最新一篇。列表按編號 1～20、21～40 等固定範圍分頁，空範圍略過。開啟時選在最新一篇。</dd>
-      <dt>文章內</dt><dd>↓ 往下捲一行，讀到底後再按會開啟較新一篇。→ 往下移動 22 行，讀到底後再按會回到列表。↑ 開啟較舊一篇，← 或 Esc 返回列表原位置。可開啟「22 行視窗」逐頁閱讀。</dd>
-    </dl>
+    <h3 id="list-keys">文章列表</h3>
+    <p>開啟時選在最新一篇。列表按編號 1～20、21～40 等固定範圍分頁，空範圍略過。</p>
+    <table class="shortcuts" aria-labelledby="list-keys"><tbody>
+      <tr><th scope="row"><kbd>↑</kbd>／<kbd>↓</kbd></th><td>選取文章。</td></tr>
+      <tr><th scope="row"><kbd>Enter</kbd>／<kbd>→</kbd></th><td>開啟選取的文章。</td></tr>
+      <tr><th scope="row"><kbd>Page Up</kbd>／<kbd>Page Down</kbd></th><td>翻到上一頁或下一頁。</td></tr>
+      <tr><th scope="row"><kbd>Home</kbd>／<kbd>End</kbd></th><td>選取最舊或最新一篇。</td></tr>
+      <tr><th scope="row"><kbd>[</kbd>／<kbd>]</kbd></th><td>選取同主題較舊或較新的一篇。可連續按鍵跨頁選文。</td></tr>
+    </tbody></table>
+    <h3 id="article-keys">文章內</h3>
+    <table class="shortcuts" aria-labelledby="article-keys"><tbody>
+      <tr><th scope="row"><kbd>↑</kbd></th><td>剛開文時開啟較舊一篇。往下閱讀後逐行往上，回到頂端就停住。</td></tr>
+      <tr><th scope="row"><kbd>↓</kbd></th><td>往下捲一行。到底後再按會開啟較新一篇。</td></tr>
+      <tr><th scope="row"><kbd>→</kbd></th><td>往下移動 22 行。到底後再按會回列表。可開啟「22 行視窗」逐頁閱讀。</td></tr>
+      <tr><th scope="row"><kbd>←</kbd>／<kbd>Esc</kbd></th><td>回到列表原位置。</td></tr>
+      <tr><th scope="row"><kbd>[</kbd>／<kbd>]</kbd></th><td>回列表並選取同主題較舊或較新的一篇。</td></tr>
+    </tbody></table>
+    <h3 id="search-keys">搜尋與說明</h3>
+    <table class="shortcuts" aria-labelledby="search-keys"><tbody>
+      <tr><th scope="row"><kbd>?</kbd></th><td>搜尋全板標題、正文及推文。</td></tr>
+      <tr><th scope="row"><kbd>/</kbd></th><td>搜尋全板文章標題。</td></tr>
+      <tr><th scope="row"><kbd>a</kbd></th><td>搜尋作者帳號。</td></tr>
+      <tr><th scope="row"><kbd>#</kbd></th><td>搜尋文章代碼 AID。</td></tr>
+      <tr><th scope="row"><kbd>S</kbd></th><td>列出同標題文章，忽略開頭的 Re:。</td></tr>
+      <tr><th scope="row"><kbd>!</kbd></th><td>從上次搜尋結果排除關鍵字。</td></tr>
+      <tr><th scope="row"><kbd>↑</kbd>／<kbd>↓</kbd></th><td>在搜尋視窗選取結果。</td></tr>
+      <tr><th scope="row"><kbd>Enter</kbd></th><td>在搜尋框送出查詢，或開啟已選取的結果。</td></tr>
+      <tr><th scope="row"><kbd>Esc</kbd></th><td>關閉搜尋視窗。也可點右上角 ×。</td></tr>
+      <tr><th scope="row"><kbd>Ctrl+F</kbd></th><td>用瀏覽器搜尋目前頁面。</td></tr>
+      <tr><th scope="row"><kbd>h</kbd>／<kbd>H</kbd></th><td>開啟本段操作說明。</td></tr>
+    </tbody></table>
   </section>
   <!-- ISSUE_RECORDS -->
 </main>

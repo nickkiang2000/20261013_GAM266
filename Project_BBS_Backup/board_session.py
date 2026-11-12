@@ -25,6 +25,10 @@ class BoardNavigationError(RuntimeError):
     """The terminal did not reach a state in which it is safe to keep sending keys."""
 
 
+class BridgeNavigationError(BoardNavigationError):
+    """A page seam check lost its position before it could return to the list."""
+
+
 class StationRateLimit(RuntimeError):
     def __init__(self, details):
         super().__init__('站方限制切換看板、搜尋或讀取文章')
@@ -323,9 +327,15 @@ class BoardSession:
 
     def _log_bridge_screen(self, action, result):
         screen = self._screen()
-        footer = screen.rsplit('\n', 1)[-1]
+        footer = screen.rstrip('\n').rsplit('\n', 1)[-1]
         span = re.search(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行', footer)
-        kind = 'article' if span else 'list' if _api_util.is_article_list(self.api, screen) else 'unrecognized'
+        reader_footer = re.match(r'^\s*瀏覽\s+第\s*\d+\s*/\s*\d+\s*頁\s*\(\s*\d+\s*%\s*\)', footer)
+        if _api_util.is_article_list(self.api, screen):
+            kind = 'list'
+        elif span or (reader_footer and re.search(r'目前顯示|←[^\n]{0,10}離開', footer)):
+            kind = 'article'
+        else:
+            kind = 'unrecognized'
         self.bridge_events.append({
             'action': action, 'target': result if result >= 0 else None, 'screen_kind': kind,
             'range': [int(span[1]), int(span[2])] if span else None,
@@ -351,14 +361,27 @@ class BoardSession:
         if self._screen() != before:
             if kind == 'list':
                 return 2
-            if kind == 'article':
+            if kind == 'article' and self.bridge_events[-1]['range']:
                 if self.check_stop:
                     self.check_stop()
                 result = self.connect_core.send(command.refresh, targets)
-                self._log_bridge_screen('redraw', result)
+                kind = self._log_bridge_screen('redraw', result)
                 if result >= 0:
                     return result
-        raise BoardNavigationError()
+                if kind == 'list' and not self.connect_core.last_timeout_was_silent:
+                    return 2
+            if kind == 'article' and self._screen() != before:
+                if self.check_stop:
+                    self.check_stop()
+                try:
+                    result = self._checked_send(command.left, self._list_targets())
+                    self._log_bridge_screen('return_left', result)
+                    self._require_list()
+                except BoardNavigationError as exc:
+                    self._log_bridge_screen('return_left_failed', -1)
+                    raise BridgeNavigationError() from exc
+                raise ArticleStalled(None, '逐頁接縫補查無法核對行號')
+        raise BridgeNavigationError()
 
     def _verify_end(self, get_numbering):
         numbering = get_numbering()

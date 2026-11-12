@@ -143,6 +143,30 @@ class StorageTests(unittest.TestCase):
                     else:
                         api.get_post.assert_not_called()
 
+    def test_unrecognized_bridge_persists_line_retry_until_article_is_saved(self):
+        from unittest.mock import Mock
+        from board_session import BridgeNavigationError
+
+        with tempfile.TemporaryDirectory() as d, patch.object(app, 'STATE', dict(saved=0, skipped=0)):
+            folder = Path(d)
+            api = Mock(capture_mode='page', view='query')
+            retry = dict(source_index=49, checkpoint=True)
+            with closing(app.database(folder)) as db, \
+                    patch('ansi_capture.read_colored_post', side_effect=BridgeNavigationError()):
+                with self.assertRaises(BridgeNavigationError) as error:
+                    app.download_article(api, db, 'PTT2', 'Test', 'fixture1', **retry)
+                self.assertTrue(error.exception.capture_diagnostics['line_retry_on_resume'])
+
+            def read(session, board, aid):
+                self.assertEqual(session.capture_mode, 'line')
+                return {'aid': aid, 'full_content': '正文', 'pass_format_check': True}
+
+            with closing(app.database(folder)) as db, patch('ansi_capture.read_colored_post', side_effect=read):
+                self.assertEqual(app.download_article(api, db, 'PTT2', 'Test', 'fixture1', **retry)[0], 'saved')
+                self.assertEqual(db.execute('SELECT count(*) FROM batch_line_retries').fetchone()[0], 0)
+            self.assertEqual(api.capture_mode, 'page')
+            api.get_post.assert_not_called()
+
     def test_fill_reuses_exact_aid_and_fetches_missing_article(self):
         import PyPtt
         with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
@@ -165,6 +189,28 @@ class StorageTests(unittest.TestCase):
             with closing(app.database(folder)) as db:
                 self.assertEqual(db.execute('SELECT source_index,body FROM articles ORDER BY source_index').fetchall(),
                                  [(1, '既有文章'), (2, '新文章')])
+
+    def test_offline_search_contains_body_and_structured_comments(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            with closing(app.database(folder)) as db:
+                url = 'https://example.com/?a=1&b=2'
+                app.save_article(db, 'Example', {
+                    'aid': '12345678', 'title': 'Re: 測試主題', 'author': 'Writer (作者)',
+                    'full_content': url + '。\n正文測試', 'pass_format_check': True,
+                    'ansi_lines': {'0': [[url[:10], ['f2']], [url[10:] + '。', ['f3']]]},
+                    'comments': [{'content': '推文測試'}],
+                }, site='PTT', source_index=1)
+                app.export_html(db, folder)
+            data = (folder / 'search-data.js').read_text(encoding='utf-8')
+            rows = json.loads(data.removeprefix('window.bbsSearchData = ').removesuffix(';\n'))
+            row, = rows['PTT / Example']
+            self.assertEqual(row['subject'], '測試主題')
+            self.assertIn('正文測試\n推文測試', row['body'])
+            article = (folder / 'articles' / (row['key'] + '.html')).read_text(encoding='utf-8')
+            self.assertIn('href="https://example.com/?a=1&amp;b=2"', article)
+            self.assertIn('class="ansi-run f2"', article)
+            self.assertIn('class="ansi-run f3"', article)
 
     def test_incremental_html_rewrites_neighbors_and_repairs_missing_page(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1166,7 +1212,7 @@ class BoardSessionTests(unittest.TestCase):
 
         initial = '瀏覽 第 2/3 頁 (84%) 第 98~196 行'
         shifted = '瀏覽 第 2/3 頁 (83%) 第 97~195 行'
-        for case in ('receive', 'redraw', 'unrecognized'):
+        for case in ('receive', 'redraw', 'unrecognized', 'reader_footer'):
             with self.subTest(case=case):
                 screen = initial
                 keys = []
@@ -1175,10 +1221,14 @@ class BoardSessionTests(unittest.TestCase):
                     nonlocal screen
                     keys.append(key)
                     if key == command.up:
-                        screen = shifted if case == 'redraw' else 'partial'
+                        screen = {'redraw': shifted, 'reader_footer': '瀏覽 第 2/3 頁 (83%) ←[q]離開'}.get(
+                            case, 'partial')
                         return -1
                     if key is None and case != 'receive':
                         return -1
+                    if key == command.left:
+                        screen = 'board list'
+                        return 0
                     screen = shifted
                     return 1
 
@@ -1189,10 +1239,19 @@ class BoardSessionTests(unittest.TestCase):
                 if case == 'unrecognized':
                     with self.assertRaises(BoardNavigationError):
                         session._send_article_key(command.up)
+                elif case == 'reader_footer':
+                    from board_session import ArticleStalled
+                    with patch('board_session._api_util.is_article_list', side_effect=lambda api, text: text == 'board list'):
+                        with self.assertRaises(ArticleStalled):
+                            session._send_article_key(command.up)
+                    self.assertEqual(session.view, 'list')
+                    self.assertEqual(session.bridge_events[-1]['action'], 'return_left')
                 else:
                     self.assertEqual(session._send_article_key(command.up), 1)
                     self.assertEqual(session.bridge_events[-1]['range'], [97, 195])
                 expected = [command.up, None] + ([command.refresh] if case == 'redraw' else [])
+                if case == 'reader_footer':
+                    expected.append(command.left)
                 self.assertEqual(keys, expected)
                 self.assertEqual(session.bridge_events[0]['received_data'], True)
                 self.assertNotIn('partial', json.dumps(session.bridge_events))

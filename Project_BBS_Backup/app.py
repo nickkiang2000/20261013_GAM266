@@ -15,12 +15,12 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from archive import export_html
 import issue_records
-from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, FALLBACK_HEIGHT, MIN_COMMAND_INTERVAL,
-                           StationRateLimit, TAIPEI, detect_rate_limit)
-from local_state import JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
+from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, BridgeNavigationError,
+                           FALLBACK_HEIGHT, MIN_COMMAND_INTERVAL, StationRateLimit, TAIPEI, detect_rate_limit)
+from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.17.1'
+APP_VERSION = 'v2.18.2'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
@@ -38,8 +38,8 @@ SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2'}
 DIRECTIONS = {'newest': '新到舊', 'oldest': '舊到新'}
 CAPTURE_MODES = {'line': '逐行', 'page': '自動擷取'}
 BACKUP_MODES = {'recheck': '重新核對', 'fill': '補齊備份'}
-BEFORE_READ_SECONDS = 2
-BETWEEN_ITEMS_SECONDS = 3
+BEFORE_READ_SECONDS = 1
+BETWEEN_ITEMS_SECONDS = 1
 ITEMS_BEFORE_REST = 25
 REST_SECONDS = 20
 BOARD_RECHECK_SECONDS = 180
@@ -89,6 +89,8 @@ def database(folder):
             if 'backup_mode' not in batch_columns:
                 db.execute("ALTER TABLE batch_ranges ADD COLUMN backup_mode TEXT NOT NULL DEFAULT 'recheck'")
             db.execute('''CREATE TABLE IF NOT EXISTS batch_verified(
+                          site TEXT, board TEXT, aid TEXT, PRIMARY KEY(site,board,aid))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS batch_line_retries(
                           site TEXT, board TEXT, aid TEXT, PRIMARY KEY(site,board,aid))''')
             db.execute('''CREATE TABLE IF NOT EXISTS batch_unavailable(
                           site TEXT, board TEXT, idx INTEGER, aid TEXT, status TEXT,
@@ -250,6 +252,7 @@ def board_screen_diagnostic(api):
 def note_unavailable(db, site, board, index, aid, status, *, checkpoint=False):
     with db:
         issue_records.resolve(db, site, board, index, aid)
+        db.execute('DELETE FROM batch_line_retries WHERE site=? AND board=? AND aid=?', (site, board, aid))
         if index is not None:
             db.execute('INSERT OR REPLACE INTO unavailable_articles VALUES(?,?,?,?,?)',
                        (site, board, index, aid, status))
@@ -316,7 +319,9 @@ def publish_archive(db, folder, job=None, *, force=False):
     STATE['phase'] = 'export'
     publish_color_checks(db, folder)
     stats = {}
-    count = export_html(db, folder, progress=export_progress, force=force, stats=stats)
+    evidence = issue_records.log_evidence(db, job.path.parent if job else LOG_DIRECTORY)
+    count = export_html(db, folder, progress=export_progress, force=force, stats=stats,
+                        issue_evidence=evidence)
     STATE['html_written'] = stats['written']
     if job:
         for site, board, index, aid, reason, attempts in db.execute(
@@ -368,12 +373,25 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     from ansi_capture import read_colored_post
 
     read_started = time.monotonic()
+    retry_key = (site, board, aid)
+    page_first = checkpoint and source_index is not None and getattr(api, 'capture_mode', None) == 'page'
+    resume_line = page_first and db.execute(
+        'SELECT 1 FROM batch_line_retries WHERE site=? AND board=? AND aid=?', retry_key).fetchone() is not None
+    if resume_line:
+        STATE['message'] = f'編號 {source_index} 上次逐頁接縫中斷，本次直接逐行讀取'
+        api.capture_mode = 'line'
     try:
         post = read_colored_post(api, board, aid)
+    except BridgeNavigationError as exc:
+        if page_first:
+            with db:
+                db.execute('INSERT OR IGNORE INTO batch_line_retries VALUES(?,?,?)', retry_key)
+            exc.capture_diagnostics = dict(getattr(exc, 'capture_diagnostics', {}),
+                                           line_retry_on_resume=True)
+        raise
     except ArticleStalled as exc:
         # Only formal page-first jobs retry, and only after a verified return to the list.
-        if (not checkpoint or source_index is None or getattr(api, 'capture_mode', None) != 'page'
-                or getattr(api, 'view', None) != 'list'):
+        if not page_first or resume_line or getattr(api, 'view', None) != 'list':
             raise
         failed_page = {'reason': str(exc), 'capture': getattr(exc, 'capture_diagnostics', {}),
                        'page_seconds': round(time.monotonic() - read_started, 3)}
@@ -396,6 +414,16 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             api.capture_mode = 'page'
         failed_page.update(line_result='read', line_seconds=round(time.monotonic() - retry_started, 3))
         post.setdefault('ansi_diagnostics', {})['page_fallback'] = failed_page
+    except Exception as exc:
+        if resume_line:
+            exc.capture_diagnostics = dict(getattr(exc, 'capture_diagnostics', {}),
+                                           line_retry_on_resume=True)
+        raise
+    finally:
+        if resume_line:
+            api.capture_mode = 'page'
+    if resume_line:
+        post.setdefault('ansi_diagnostics', {})['line_retry_on_resume'] = True
     STATE['ansi_diagnostics'] = post.get('ansi_diagnostics', {})
     if existing and existing.get('full_content'):
         previous_rows = existing['full_content'].split('\n')
@@ -440,6 +468,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     total = coverage.get('total') or post['full_content'].count('\n') + 1
     with db:
         issue_records.resolve(db, site, board, source_index, aid)
+        db.execute('DELETE FROM batch_line_retries WHERE site=? AND board=? AND aid=?', retry_key)
         if unchanged or keep_previous:
             db.execute('UPDATE articles SET source_index=coalesce(?,source_index) WHERE site=? AND board=? AND aid=?',
                        (source_index, site, board, aid))
@@ -724,6 +753,8 @@ def work(config):
                 with db:
                     if backup_mode == 'recheck':
                         issue_records.resolve(db, site, board, idx, aid)
+                    elif query_index == idx:
+                        issue_records.resolve_index_query(db, site, board, idx)
                     db.execute('UPDATE articles SET source_index=? WHERE site=? AND board=? AND aid=?',
                                (idx, site, board, aid))
                     db.execute('INSERT OR IGNORE INTO batch_verified VALUES(?,?,?)', (site, board, aid))
@@ -815,6 +846,7 @@ def work(config):
         detail = str(exc) if isinstance(exc, ArticleReadError) else {
             'ConnectionClosed': '等網路恢復後，重新登入同一看板即可接續。',
             'BoardNavigationError': '終端位置無法確認，已停止送鍵。原批次可稍後續傳。',
+            'BridgeNavigationError': '逐頁接縫後終端位置無法確認，已停止送鍵。登入續傳會對這篇改用逐行。',
             'BoardTemporarilyClosed': '看板仍暫時關閉，已保留進度。',
             'TwoFactorAuthRequired': '此版尚未支援輸入二階段驗證碼。',
         }.get(name, '請查看程式 log 資料夾內的診斷紀錄。')
@@ -923,12 +955,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200,json.dumps({**STATE, 'rate_limits': active_rate_limits()},ensure_ascii=False))
         if self.path == '/preferences':
             return self.reply(200,json.dumps(load_preferences(),ensure_ascii=False))
-        reader = re.fullmatch(r'/reader/([A-Za-z0-9_-]+)/(index\.html|help\.html|articles/[0-9a-f]{64}\.html)', self.path)
+        reader = re.fullmatch(
+            r'/reader/([A-Za-z0-9_-]+)/(index\.html|ReadMe\.html|help\.html|search-data\.js|articles/[0-9a-f]{64}\.html)',
+            self.path)
         if reader and reader[1] in READERS:
             folder = READERS[reader[1]]
             path = (folder / reader[2]).resolve()
             if path.is_relative_to(folder) and path.is_file():
-                return self.reply(200, path.read_text(encoding='utf-8'), 'text/html')
+                kind = 'text/javascript' if path.suffix == '.js' else 'text/html'
+                return self.reply(200, path.read_text(encoding='utf-8'), kind)
         self.reply(404,'{}')
     def do_POST(self):
         expected=f'http://127.0.0.1:{self.server.server_port}'
