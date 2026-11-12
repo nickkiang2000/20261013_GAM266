@@ -41,7 +41,20 @@
     ["Angola", "place", "安哥拉"],
     ["Taiwan Relations Act", "law", "台灣關係法", "台湾关系法"],
     ["JD Vance", "person", "J. D. Vance", "J.D. Vance", "J·D·范斯", "J·D·万斯"],
-    ["Marco Rubio", "person", "馬可·魯比歐", "马可·鲁比奥"]
+    ["Marco Rubio", "person", "馬可·魯比歐", "马可·鲁比奥", "盧比歐", "卢比奥"],
+    ["Vladimir Putin", "person", "普丁", "普京"],
+    ["Donald Trump", "person", "川普", "特朗普"],
+    ["Ukraine", "place", "烏克蘭", "乌克兰"],
+    ["Central Asia", "place", "中亞", "中亚"],
+    ["Chinese Communist Party", "organization", "中國共產黨", "中国共产党", "中共"],
+    ["Beijing", "place", "北京"],
+    ["European Union", "organization", "歐盟", "欧盟", "EU"],
+    ["National Taiwan University", "institution", "國立臺灣大學", "国立台湾大学", "臺灣大學", "台灣大學", "台湾大学", "NTU"],
+    ["樊家忠", "person", "Fan Chia-Chung", "Fan Jiazhong"],
+    ["Venezuela", "place", "委內瑞拉", "委内瑞拉"],
+    ["Philippines", "place", "菲律賓", "菲律宾"],
+    ["Quadrilateral Security Dialogue", "organization", "四方安全對話", "四方安全对话", "四方安全通話", "四方安全通话", "Quad"],
+    ["Belt and Road Initiative", "initiative", "一帶一路", "一带一路", "BRI"]
   ].map(([label, type, ...aliases]) => ({ label, type, aliases: [label, ...aliases] }));
   const ALIAS_LOOKUP = new Map();
   const COMPACT_ALIAS_LOOKUP = new Map();

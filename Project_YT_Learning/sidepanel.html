@@ -8,18 +8,23 @@
 </head>
 <body>
   <header>
-    <div class="brand">YouTube Knowledge & Investment Immersion</div>
     <div id="videoTitle" class="muted">等待 YouTube 影片…</div>
-    <div id="status" class="status">等待影片資訊</div>
+    <div class="captionMeta">
+      <span id="status" class="status">等待影片資訊</span>
+      <span id="transcriptSourceLabel" class="transcriptSource">等待字幕</span>
+    </div>
   </header>
   <main>
-    <div id="transcriptSourceLabel" class="transcriptSource">目前分析字幕：等待擷取</div>
     <section class="knowledgeSection">
       <div class="knowledgeHeading"><h2>知識專有名詞</h2><span class="liveLegend"><i></i>影片目前提及</span></div>
       <div id="termStatus" class="hint">等待逐字稿</div>
       <div id="termList" class="terms empty">尚無專有名詞</div>
       <button id="moreTermsBtn" class="secondary moreTerms" hidden>想了解更多</button>
     </section>
+    <details>
+      <summary>投資學習・台美股</summary>
+      <div id="tickerResults" class="hint">展開後比對目前字幕</div>
+    </details>
     <details>
       <summary>工具與除錯</summary>
       <div class="toolbar bottomTools">
@@ -38,6 +43,7 @@
   </main>
   <script src="transcript-utils.js"></script>
   <script src="term-extractor.js"></script>
+  <script src="tickers.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 </html>

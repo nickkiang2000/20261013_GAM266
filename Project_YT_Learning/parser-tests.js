@@ -82,4 +82,8 @@ const translatedTerms=termContext.YTKITermExtractor.extractTerms({language:'zh-H
   {start:0,end:20,text:'台灣關係 法由JD Vance和Marco Rubio討論，西亞也是重點。',sourceSegmentIds:['zh-1']}
 ]});
 for(const expected of ['台灣關係法','JD Vance','Marco Rubio','西亞'])if(!translatedTerms.some(term=>term.term===expected))throw new Error('Translated entity normalization missing: '+expected);
+const geopoliticsTerms=termContext.YTKITermExtractor.extractTerms({language:'zh-Hant',analysisSegments:[
+  {start:0,end:30,text:'普丁、川普、烏克蘭與盧比歐談到中亞、中共、北京、歐盟、台灣大學、樊家忠、委內瑞拉、菲律賓、四方安全通話與一帶一路。',sourceSegmentIds:['geo-1']}
+]});
+for(const expected of ['普丁','川普','烏克蘭','盧比歐','中亞','中共','北京','歐盟','台灣大學','樊家忠','委內瑞拉','菲律賓','四方安全通話','一帶一路'])if(!geopoliticsTerms.some(term=>term.term===expected))throw new Error('Geopolitics entity extraction missing: '+expected);
 console.log("Parser tests passed.");

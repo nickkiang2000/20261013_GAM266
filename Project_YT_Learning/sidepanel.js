@@ -284,7 +284,7 @@ function refineOccurrencesFromRawCues(terms, rawSegments) {
 async function ensureLocalKnowledgeTerms() {
   const transcript = activeData?.transcript;
   if (!activeVideoId || !transcript?.segments?.length) return;
-  if (activeData.knowledgeTerms?.method === "rule_based_v7_normalized_entities" &&
+  if (activeData.knowledgeTerms?.method === "rule_based_v8_categorized_entities" &&
       activeData.knowledgeTerms.sourceTranscriptSha256 === (transcript.contentSha256 || null)) return;
   const utils = globalThis.YTKITranscriptUtils, extractor = globalThis.YTKITermExtractor;
   // Grouped text finds entities split across adjacent caption cues. After
@@ -299,7 +299,7 @@ async function ensureLocalKnowledgeTerms() {
   const key = PREFIX + activeVideoId;
   const current = (await chrome.storage.local.get(key))[key] || activeData;
   current.knowledgeTerms = {
-    version: 7, method: "rule_based_v7_normalized_entities", generatedAt: new Date().toISOString(),
+    version: 8, method: "rule_based_v8_categorized_entities", generatedAt: new Date().toISOString(),
     sourceTranscriptSha256: current.transcript?.contentSha256 || null,
     language, nativeLanguage:"zh", wikipediaLanguage: wikipediaLanguage(language), candidateCount: terms.length,
     defaultDisplayCount:60, terms
@@ -310,7 +310,7 @@ async function ensureLocalKnowledgeTerms() {
 async function preloadKnowledgeDetails() {
   const result=activeData?.knowledgeTerms;
   if(!activeVideoId||!result?.terms?.length)return;
-  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v7`;
+  const keyId=`${activeVideoId}:${result.sourceTranscriptSha256||"none"}:v8`;
   if(preloadKey===keyId)return;
   const pending=result.terms.map((term,index)=>({term,index})).filter(item=>item.term.wikipedia?.status==="not_queried");
   if(!pending.length){preloadKey=keyId;return}
@@ -363,17 +363,6 @@ function renderKnowledgeTerms() {
   }
   target.className="terms";
   const detailSlot=document.createElement("div");detailSlot.className="termDetailSlot";
-  const cloud=document.createElement("div");cloud.className="termCloud";
-  const displayLimit=showAllTerms?result.terms.length:60;
-  result.terms.slice(0,displayLimit).forEach((term,index)=>{
-    const tag=document.createElement("button");tag.className="termTag";tag.dataset.termIndex=String(index);
-    const weight=Math.max(0,Math.min(1,(Number(term.score)||70)/100));
-    tag.style.fontSize=`${(11+weight*3).toFixed(1)}px`;
-    tag.textContent=term.term;tag.title=`${term.type}・出現 ${term.frequency} 次`;
-    if(expandedTerms.has(`${activeVideoId}:${index}`))tag.classList.add("selected");
-    if(playingTermIndexes.has(index))tag.classList.add("playing");
-    cloud.append(tag);
-  });
   const selectedIndex=result.terms.findIndex((_,index)=>expandedTerms.has(`${activeVideoId}:${index}`));
   if(selectedIndex>=0){
     const term=result.terms[selectedIndex],detail=document.createElement("article");detail.className="termCard termDetail";
@@ -394,10 +383,25 @@ function renderKnowledgeTerms() {
     const placeholder=document.createElement("div");placeholder.className="termDetailPlaceholder";
     placeholder.textContent="點選下方專有名詞，或播放影片以查看目前提及的詞條。";detailSlot.append(placeholder);
   }
-  target.append(detailSlot,cloud);
+  const cloud = document.createElement("div");
+  cloud.className = "termCloud";
+  const limit = showAllTerms ? result.terms.length : 60;
+  result.terms.forEach((term, index) => {
+    const selected = index === selectedIndex;
+    const playing = playingTermIndexes.has(index);
+    if (index >= limit && !selected && !playing) return;
+    const tag = document.createElement("button");
+    tag.className = "termTag";
+    tag.dataset.termIndex = String(index);
+    tag.textContent = term.term;
+    tag.classList.toggle("selected", selected);
+    tag.classList.toggle("playing", playing);
+    cloud.append(tag);
+  });
+  target.append(detailSlot, cloud);
   const resolved=result.terms.filter(term=>term.wikipedia?.status && term.wikipedia.status!=="not_queried").length;
   $("termStatus").textContent=`已找出 ${result.terms.length} 個候選；已預載 ${resolved} 個詞條`;
-  $("moreTermsBtn").hidden=displayLimit>=result.terms.length;
+  $("moreTermsBtn").hidden = limit >= result.terms.length;
 }
 
 async function getActiveTabInfo() {
@@ -409,11 +413,88 @@ async function getActiveTabInfo() {
   });
 }
 
+let tickerRenderKey;
+async function renderTickers(data) {
+  const target = $("tickerResults");
+  const transcript = data?.transcript;
+  const key = JSON.stringify([data?.video?.videoId, transcript?.contentSha256, transcript?.capturedAt]);
+  if (key === tickerRenderKey) return;
+  tickerRenderKey = key;
+  target.textContent = "正在比對台美股資料…";
+  try {
+    const tickers = globalThis.YTKITickers;
+    const snapshot = await tickers.getSnapshot();
+    if (key !== tickerRenderKey) return;
+    const matches = tickers.match(snapshot, transcript?.segments || []);
+    target.textContent = matches.length ? "" : "目前字幕沒有符合條件的股票。";
+    if (!matches.length) return;
+    const cloud = document.createElement("div");
+    cloud.className = "termCloud";
+    const detail = document.createElement("div");
+    target.append(cloud, detail);
+    for (const row of matches) {
+      const item = document.createElement("article");
+      item.className = "termCard";
+      const summary = document.createElement("strong");
+      summary.textContent = `${row.market} ${row.symbol} · ${row.name}`;
+      const description = document.createElement("p");
+      description.textContent = row.description || "可從下方官方資料查看公司業務。";
+      const links = document.createElement("div");
+      links.className = "termLinks";
+      function addLink(label, value) {
+        if (typeof value !== "string" || !value.trim()) return;
+        try {
+          const raw = value.trim();
+          const url = new URL(/^[\w+.-]+:/.test(raw) ? raw : `https://${raw}`);
+          if (!["https:", "http:"].includes(url.protocol) || !url.hostname.includes(".") || url.username || url.password) return;
+          const link = document.createElement("a");
+          link.href = url.href;
+          link.target = "_blank";
+          link.rel = "noopener noreferrer";
+          link.textContent = label;
+          links.append(link);
+        } catch (_) {}
+      }
+      const isTaiwan = ["TWSE", "TPEx"].includes(row.market) && /^\d{4}$/.test(row.symbol);
+      addLink("公司網站", row.website || (isTaiwan && row.url !== "https://mops.twse.com.tw/" ? row.url : null));
+      addLink("官方公司簡介", row.profileUrl);
+      if (isTaiwan) {
+        addLink("MOPS 個股資料", `https://mops.twse.com.tw/mops/#/web/t146sb05?companyId=${row.symbol}`);
+      } else {
+        addLink("SEC 個股申報", row.url);
+      }
+      const evidence = document.createElement("p");
+      evidence.textContent = `字幕命中：${row.terms.join("、")}`;
+      item.append(summary, description, links, evidence);
+      const tag = document.createElement("button");
+      tag.className = "termTag";
+      tag.textContent = `${row.symbol} · ${row.name}`;
+      tag.setAttribute("aria-pressed", "false");
+      tag.addEventListener("click", () => {
+        const wasSelected = tag.classList.contains("selected");
+        for (const button of cloud.children) {
+          button.classList.remove("selected");
+          button.setAttribute("aria-pressed", "false");
+        }
+        detail.replaceChildren();
+        if (wasSelected) return;
+        tag.classList.add("selected");
+        tag.setAttribute("aria-pressed", "true");
+        detail.append(item);
+      });
+      cloud.append(tag);
+    }
+  } catch (_) {
+    if (key === tickerRenderKey) target.textContent = "暫時無法讀取股票資料。";
+  }
+}
+
 async function loadData() {
   const generation=++loadGeneration;
   const info = await getActiveTabInfo();
   if(generation!==loadGeneration)return;
   if (!info?.videoId) {
+    void renderTickers(null);
     $("videoTitle").textContent = "請先開啟 YouTube 影片";
     $("status").textContent = "未偵測到 YouTube 影片";
     return;
@@ -431,20 +512,21 @@ async function loadData() {
     transcript:{sourceType:"none",completeness:"not_captured",segments:[]}, liveObservations:[]
   };
   const transcript=activeData.transcript||{};
+  void renderTickers(activeData);
   const effective=transcript.language||"未知語言", original=transcript.originalLanguage||effective;
   const typeLabel=transcript.trackType==="ASR"?"（自動生成）":transcript.trackType==="manual"?"（創作者字幕）":"";
   $("transcriptSourceLabel").textContent=transcript.translationLanguage&&transcript.translationLanguage!==original
-    ? `目前處理逐字稿：${languageLabel(original)}${typeLabel} → ${languageLabel(transcript.translationLanguage)}（YouTube 翻譯）`
-    : `目前處理逐字稿：${languageLabel(effective)}${typeLabel}`;
+    ? `${languageLabel(original)}${typeLabel} → ${languageLabel(transcript.translationLanguage)}`
+    : transcript.segments?.length ? `${languageLabel(effective)}${typeLabel}` : "等待逐字稿";
   $("diagnostics").textContent = activeData.captureDiagnostics?.latest
     ? JSON.stringify(activeData.captureDiagnostics.latest, null, 2)
     : "尚無診斷資料";
   renderKnowledgeTerms();
   ensureLocalKnowledgeTerms().catch(error => { $("termStatus").textContent=`本機分析失敗：${String(error?.message||error)}`; });
-  if(activeData.knowledgeTerms?.method==="rule_based_v7_normalized_entities")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
+  if(activeData.knowledgeTerms?.method==="rule_based_v8_categorized_entities")preloadKnowledgeDetails().catch(error=>{$("termStatus").textContent=`詞條預載失敗：${String(error?.message||error)}`});
   const status = activeData.transcript?.completeness || "等待自動擷取";
   if (activeData.lastCapture?.detail) {
-    $("status").textContent = `${activeData.lastCapture.status}：${activeData.lastCapture.detail}`;
+    showCaptureStatus(activeData.lastCapture.status, activeData.lastCapture.detail);
   } else {
     const count = activeData.transcript?.segments?.length || 0;
     const coverage = activeData.transcript?.coverage;
@@ -456,7 +538,7 @@ async function loadData() {
       captured_from_rendered_panel_reaches_video_end: `已完整擷取 ${count} 段（YouTube 逐字稿面板）${suffix}`,
       captured_from_rendered_panel_may_be_partial: `已擷取 ${count} 段，但可能不完整${suffix}`
     };
-    $("status").textContent = display[status] || status;
+    showCaptureStatus(status, display[status] || status);
   }
 }
 
@@ -541,10 +623,18 @@ chrome.storage.onChanged.addListener((changes,area) => {
 });
 chrome.runtime.onMessage.addListener(msg => {
   if (msg?.type === "YT_AUTO_CAPTURE_STATUS" && msg.videoId === activeVideoId) {
-    $("status").textContent = msg.status + (msg.detail ? `：${msg.detail}` : "");
+    showCaptureStatus(msg.status, msg.detail);
     setTimeout(loadData,400);
   }
 });
+function showCaptureStatus(status, detail) {
+  const node = $("status");
+  node.title = detail || status;
+  if (/partial/.test(status)) node.textContent = "部分字幕";
+  else if (/complete|reaches_video_end/.test(status)) node.textContent = "已擷取";
+  else if (/error|unavailable|not_loaded|empty/.test(status)) node.textContent = "擷取未完成";
+  else node.textContent = "字幕檢查中";
+}
 function scheduleTabReload(){
   clearTimeout(tabReloadTimer);
   tabReloadTimer=setTimeout(()=>{
@@ -584,7 +674,6 @@ async function syncPlaybackTerm(){
   playingTermIndexes=nextSet;
   if(active.length){
     const index=active.sort((a,b)=>Math.abs(now-a.start)-Math.abs(now-b.start))[0].index;
-    if(index>=60)showAllTerms=true;
     expandedTerms.clear();expandedTerms.add(`${activeVideoId}:${index}`)
     for(const item of active)ensurePriorityTermDetail(item.index).catch(()=>{});
   }
