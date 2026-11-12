@@ -14,10 +14,11 @@ from websockets.exceptions import ConnectionClosed as SocketClosed
 
 
 MIN_COMMAND_INTERVAL = 1.0
+LINE_DOWN_INTERVAL = 0.5
 END_KEY = '\x1b[4~'
 PAGE_DOWN_KEY = '\x1b[6~'
 FALLBACK_HEIGHT = 24
-FALLBACK_MAX_STEPS = 128
+FALLBACK_MAX_STEPS = 512
 TAIPEI = timezone(timedelta(hours=8))
 
 
@@ -103,6 +104,7 @@ class BoardSession:
         self.last_sent = None
         self.pacing = False
         self.capture_mode = 'line'
+        self.prefer_line_at_uncertain_seam = False
         self.bridge_events = []
         self.check_stop = None
         self.send = self.connect_core.send
@@ -132,8 +134,11 @@ class BoardSession:
         if self.pacing and message is None:
             self.operations['receive_only_waits'] += 1
         if self.pacing and message:
+            article_step = any(t.get_detect_target() == screens.Target.PostEnd for t in targets)
+            interval = (LINE_DOWN_INTERVAL if self.capture_mode == 'line' and message == command.down
+                        and article_step else MIN_COMMAND_INTERVAL)
             if self.last_sent is not None:
-                remaining = MIN_COMMAND_INTERVAL - (time.monotonic() - self.last_sent)
+                remaining = interval - (time.monotonic() - self.last_sent)
                 if remaining > 0:
                     time.sleep(remaining)
             self.last_sent = time.monotonic()
@@ -144,7 +149,7 @@ class BoardSession:
                 self.operations.update(('board_entries', 'board_searches'))
             elif message == command.enter * 2:
                 self.operations['article_opens'] += 1
-            elif any(t.get_detect_target() == screens.Target.PostEnd for t in targets):
+            elif article_step:
                 self.operations['article_steps'] += 1
         return self.send(message, targets, *args, **kwargs)
 
@@ -168,6 +173,17 @@ class BoardSession:
             raise BoardNavigationError()
         self.view = 'list'
         self.selected = None
+
+    def confirm_list(self, board):
+        screen = self._screen()
+        heading = '\n'.join(screen.splitlines()[:3])
+        board_label = rf'看板\s*[《〈\[【]\s*{re.escape(board)}\s*[》〉\]】]'
+        if self.board != board or not re.search(board_label, heading, re.I):
+            return False
+        if not _api_util.is_article_list(self.api, screen):
+            return False
+        self._require_list()
+        return True
 
     def _enter(self, board):
         if self.board is not None:
@@ -408,9 +424,14 @@ class BoardSession:
             if (result == 2 or step == FALLBACK_MAX_STEPS or previous is None
                     or not numbering.covers(previous[1]) or numbering.color_conflicts):
                 break
+            if self.check_stop:
+                self.check_stop()
+            was_wrapping = numbering.pending_wrap is not None
             result = self._send_article_key(command.down)
             current_window = numbering.last_window
             if result == 1 and current_window and current_window[1] <= previous[1]:
+                if current_window[0] > previous[0] and (was_wrapping or numbering.pending_wrap):
+                    continue
                 return self._verify_end(get_numbering)
         return None
 
@@ -423,7 +444,12 @@ class BoardSession:
             if self.check_stop:
                 self.check_stop()
             seen = get_numbering().seen
-            result = self._send_article_key(key)
+            try:
+                result = self._send_article_key(key)
+            except BoardNavigationError as exc:
+                if key == command.enter * 2 and seen == 0:
+                    exc.open_screen_unrecognized = True
+                raise
             if result == 4:
                 # Decline automatic playback so each screen advances on one key.
                 key = 'n'
@@ -435,8 +461,19 @@ class BoardSession:
             if result == 2:
                 reason = '逐頁擷取在確認文末前回到看板'
             elif numbered.bridge_remaining and numbered.seen > seen:
-                key = command.up
-                continue
+                if not self.prefer_line_at_uncertain_seam:
+                    key = command.up
+                    continue
+                if self.view != 'article':
+                    raise BridgeNavigationError()
+                if self.check_stop:
+                    self.check_stop()
+                try:
+                    self._return_to_list()
+                except (BoardNavigationError, exceptions.ConnectionClosed) as exc:
+                    raise BridgeNavigationError() from exc
+                self._log_bridge_screen('return_left_before_bridge', 2)
+                raise ArticleStalled(last or None, '逐頁接縫無法直接核對')
             elif numbered.bridge_result == 'unexpected_position':
                 reason = '補查逐頁接縫時，畫面未按預期上移'
             elif not window or numbered.width_mismatches or numbered.unnumbered:
@@ -605,6 +642,12 @@ class BoardSession:
                                       'verified': body is not None, 'numbering': numbering.diagnostics()})
             if body is None:
                 self._return_to_list()
+                if numbering.wrap_failure == 'overlap_not_verified':
+                    raise ArticleStalled(numbering.last_range[1] if numbering.last_range else None,
+                                         '24 列讀取無法核對折行後的重疊正文')
+                if numbering.width_mismatches:
+                    raise ArticleStalled(numbering.last_range[1] if numbering.last_range else None,
+                                         '24 列讀取無法核對畫面折行與文章行號')
                 raise ArticleStalled(numbering.last_window[1] if numbering.last_window else None)
             self.api.Unconfirmed = False
             return body, False

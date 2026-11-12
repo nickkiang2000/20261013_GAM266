@@ -160,7 +160,7 @@ def report(db, evidence=None):
             SELECT site,board,idx,aid,reason,first_seen,last_seen,attempts,issue_key
             FROM article_issues ORDER BY site,board,idx,aid'''):
         if aid:
-            saved = db.execute('SELECT aid FROM articles WHERE site=? AND board=? AND aid=?',
+            saved = db.execute('SELECT aid,data FROM articles WHERE site=? AND board=? AND aid=?',
                                (site, board, aid)).fetchone()
         else:
             candidates = db.execute('SELECT aid FROM articles WHERE site=? AND board=? AND source_index=? LIMIT 2',
@@ -168,7 +168,12 @@ def report(db, evidence=None):
             saved = candidates[0] if len(candidates) == 1 else None
             if saved and verified.get((site, board, idx, saved[0]), 0) > int(last):
                 continue
+        manual = False
         if saved and aid and not key.startswith('html:'):
+            try:
+                manual = bool(json.loads(saved[1]).get('manual_ansi'))
+            except (TypeError, ValueError, AttributeError):
+                pass
             if matching_test(db, samples, site, board, aid, last):
                 continue
             if (site, board, aid) in colors:
@@ -176,7 +181,8 @@ def report(db, evidence=None):
                 continue
         entries.append((site, board, idx, aid,
                         'HTML 呈現失敗' if key.startswith('html:') else
-                        ('讀取待查，保留已存文章' if saved else '未能下載／確認全文'),
+                        ('人工備份，自動讀取待查' if manual else
+                         '讀取待查，保留已存文章' if saved else '未能下載／確認全文'),
                         reason, saved[0] if saved else None,
                         f'{attempts} 次；最近 {datetime.fromtimestamp(last):%Y-%m-%d %H:%M:%S}' +
                         ('；連結依本地編號提供，原紀錄未取得 AID' if saved and not aid else '')))

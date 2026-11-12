@@ -12,6 +12,7 @@ LINE_RANGE = re.compile(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行')
 SINGLE_SCREEN_END = re.compile(r'^\s*瀏覽\s*第\s*1\s*/\s*1\s*頁\s*\(\s*100%\s*\)')
 MAX_FRAME_BYTES = 256_000
 MAX_FRAMES = 4096
+WRAP_MARKER_COLUMNS = (79, 80)
 
 
 class StyledLine(str):
@@ -53,6 +54,71 @@ class CapturedLine(str):
         line = super().__new__(cls, text)
         line.color_runs = runs
         return line
+
+
+def is_screen_padding(line):
+    return not line.strip() and not any(
+        token.startswith('b') for _, style in line.color_runs for token in style)
+
+
+def fold_numbered_rows(rows, styled, first, count, known_markers):
+    """Use a distinct bright-white right-edge marker to join display rows."""
+    if styled is None or count <= 0 or len(styled) != len(rows):
+        return None
+    logical = []
+    text = ''
+    runs = []
+    markers = {}
+    reused = 0
+    for i, row in enumerate(rows):
+        colors = styled[i].color_runs or (((row, ()),) if row else ())
+        last = row.rstrip(' ')
+        fragment = last[:-1] if last.endswith('\\') else last
+        key = (first + len(logical), len(text), fragment)
+        if key in known_markers:
+            # A scrolling redraw can omit the marker or repaint it without
+            # its SGR. Reuse only a fragment already seen at this source line
+            # and offset, then check the assembled frame against its overlap.
+            marker_colors = known_markers[key]
+            reused += 1
+        elif (last.endswith('\\') and screens._cell_len(last.replace('\x08', '')) in WRAP_MARKER_COLUMNS
+              and len(colors) >= 2 and colors[-1][0].rstrip(' ') == '\\'
+              and set(colors[-1][1]) == {'f7', 'hl'}):
+            marker_colors = colors[:-1]
+        else:
+            marker_colors = None
+        if marker_colors is not None:
+            text += fragment
+            runs.extend(marker_colors)
+            markers[key] = marker_colors
+        elif text and all(is_screen_padding(line) for line in styled[i:]):
+            # The line continues below the screen. Its prefix is useful for
+            # verifying the next frame but is not a complete source line.
+            break
+        else:
+            if text:
+                combined = tuple(runs) + colors
+                logical.append(CapturedLine(text + row, combined if any(style for _, style in combined) else ()))
+            else:
+                logical.append(styled[i])
+            text = ''
+            runs = []
+    pending = CapturedLine(text, tuple(runs)) if text else None
+    if not markers:
+        return None
+    # Drop only trailing unpainted screen padding beyond the advertised range.
+    complete = count - (pending is not None)
+    if len(logical) < complete or any(not is_screen_padding(line) for line in logical[complete:]):
+        return None
+    if pending is not None and len(logical) > complete:
+        # The physical screen may have padding immediately before an
+        # unfinished line. Keep its marker on the normalized source line.
+        pending_number = first + len(logical)
+        markers = {
+            (first + complete if number == pending_number else number, offset, fragment): colors
+            for (number, offset, fragment), colors in markers.items()
+        }
+    return logical[:complete], pending, markers, reused
 
 
 class ColorScreen(screens._VT100Engine):
@@ -150,8 +216,17 @@ def match_colors(body, frames):
 class NumberedArticle:
     """Reassemble physical rows only when the terminal numbering proves their positions."""
 
-    def __init__(self, *, page_mode=False):
+    def __init__(self, *, page_mode=False, allow_wrapping=False):
         self.page_mode = page_mode
+        self.allow_wrapping = allow_wrapping
+        self.pending_wrap = None
+        self.wrap_markers = {}
+        self.wrapped_screens = 0
+        self.wrap_joins = 0
+        self.wrap_markers_reused = 0
+        self.wrap_failure = None
+        self.wrap_alignments = []
+        self.wrap_window_checks = []
         self.extra_first_row = False
         self.first_padding_row = None
         self.bridge_distance = self.bridge_remaining = self.bridge_moves = 0
@@ -195,6 +270,52 @@ class NumberedArticle:
         if at_end:
             self.end_range = span
         count = last - first + 1
+        if self.allow_wrapping:
+            folded = fold_numbered_rows(rows, styled, first, count, self.wrap_markers)
+            if folded is None and styled is not None and self.wrap_markers:
+                folded = self._align_wrapped_overlap(first, count, styled)
+            if folded is not None:
+                if self.wrap_markers and self.pending_wrap is None:
+                    nominal = self._check_wrapped_window(first, folded[0])
+                    if nominal['conflicting_rows']:
+                        verified = self._recover_wrapped_window(
+                            first, count, rows, styled, folded, nominal, at_end=at_end)
+                        if verified is None:
+                            self.wrap_failure = 'overlap_not_verified'
+                            self.conflicts += len(nominal['conflicting_rows'])
+                            self.first_conflict = first + nominal['conflicting_rows'][0] - 1
+                            return
+                        first, folded = verified
+                        last = first + len(folded[0]) - 1 + (folded[1] is not None)
+                rows, pending, markers, reused = folded
+                styled = rows
+                if pending is not None and at_end:
+                    self.wrap_failure = 'continuation_missing_at_end'
+                    self.width_mismatches += 1
+                    return
+                if self.pending_wrap is not None:
+                    pending_number, prefix = self.pending_wrap
+                    offset = pending_number - first
+                    observed = rows[offset] if 0 <= offset < len(rows) else pending if pending_number == last else None
+                    prefix_colors = [style for value, style in prefix.color_runs for _ in value]
+                    observed_colors = ([style for value, style in observed.color_runs for _ in value]
+                                       or [()] * len(observed)) if observed is not None else []
+                    if (observed is None or not observed.startswith(prefix)
+                            or observed_colors[:len(prefix_colors)] != prefix_colors):
+                        self.wrap_failure = 'continuation_did_not_match'
+                        self.width_mismatches += 1
+                        return
+                self.pending_wrap = (last, pending) if pending is not None else None
+                self.wrap_markers.update(markers)
+                self.wrapped_screens += 1
+                self.wrap_joins += len(markers)
+                self.wrap_markers_reused += reused
+                count = len(rows)
+            elif self.pending_wrap is not None:
+                self.wrap_failure = 'continuation_not_observed'
+                self.width_mismatches += 1
+                self.record_width_sample(span, rows, styled)
+                return
         if bridging:
             self.bridge_moves += 1
             if first != self.bridge_next_start or not 0 < count <= len(rows):
@@ -255,9 +376,7 @@ class NumberedArticle:
                     and 0 < count <= len(rows) and SINGLE_SCREEN_END.match(status)
                     and any(row.strip() for row in rows)):
                 self.single_screen_body = '\n'.join(rows)
-            if len(self.width_sample) < 12:
-                self.width_sample.append({'screen': self.seen, 'range': span, 'rows': len(rows),
-                                          'blank_rows': sum(not row.strip() for row in rows)})
+            self.record_width_sample(span, rows, styled)
             return
         first += self.page_line_offset
         last = first + count - 1
@@ -281,6 +400,144 @@ class NumberedArticle:
                 if self.colors.setdefault(number, runs) != runs:
                     self.color_conflicts += 1
                     self.color_conflict_rows.add(number)
+
+    def _check_wrapped_window(self, first, rows):
+        anchors = set()
+        conflicts = []
+        text_conflicts = []
+        overlap = 0
+        for index, row in enumerate(rows, first):
+            if index not in self.rows:
+                continue
+            overlap += 1
+            if self.rows[index] != row or self.colors.get(index) != row.color_runs:
+                screen_row = index - first + 1
+                conflicts.append(screen_row)
+                if self.rows[index] != row:
+                    text_conflicts.append(screen_row)
+            elif row.strip():
+                anchors.add(str(row))
+        return {'first': first, 'overlap': overlap, 'distinct_text_anchors': len(anchors),
+                'conflicting_rows': conflicts, 'text_conflicting_rows': text_conflicts}
+
+    def _recover_wrapped_window(self, first, count, rows, styled, folded, nominal, *, at_end):
+        candidates = [nominal]
+        verified = []
+        folded_rows, pending, markers, reused = folded
+        # A blank at the top can occupy a row for an already verified line
+        # while the wrap marker and the rest of the overlap stay in place.
+        leading_padding = is_screen_padding(folded_rows[0])
+        if nominal['conflicting_rows'] == [1] and leading_padding and first in self.rows:
+            remaining = folded_rows[1:]
+            evidence = self._check_wrapped_window(first + 1, remaining)
+            evidence['method'] = 'leading_padding'
+            candidates.append(evidence)
+            if (not evidence['conflicting_rows'] and evidence['distinct_text_anchors'] >= 2
+                    and any(marker in self.wrap_markers for marker in markers)):
+                verified.append((first + 1, (remaining, pending, markers, reused)))
+        for start in (first - 1, first + 1):
+            if start < 1:
+                continue
+            same_end_count = first + count - start
+            attempts = [('keep_reported_end', self._align_wrapped_overlap(start, same_end_count, styled))]
+            if not at_end:
+                attempts.append(('shift_range', fold_numbered_rows(rows, styled, start, count, self.wrap_markers)))
+            for method, folded in attempts:
+                if folded is None:
+                    continue
+                evidence = self._check_wrapped_window(start, folded[0])
+                evidence['method'] = method
+                candidates.append(evidence)
+                if (not evidence['conflicting_rows'] and evidence['distinct_text_anchors'] >= 2
+                        and any(marker in self.wrap_markers for marker in folded[2])):
+                    if not any(
+                            start == previous_start and folded[1:] == previous[1:]
+                            and [(row, row.color_runs) for row in folded[0]]
+                            == [(row, row.color_runs) for row in previous[0]]
+                            for previous_start, previous in verified):
+                        verified.append((start, folded))
+        selection = verified[0] if len(verified) == 1 else None
+        if len(self.wrap_window_checks) >= 12:
+            self.wrap_window_checks.pop(0)
+        self.wrap_window_checks.append({
+            'screen': self.seen, 'reported_range': [first, first + count - 1],
+            'leading_row_blank': not folded_rows[0].strip(), 'leading_row_padding': leading_padding,
+            'candidates': candidates, 'selected_start': selection[0] if selection else None,
+        })
+        return selection
+
+    def _align_wrapped_overlap(self, first, count, styled):
+        """Confirm a one-row shift before an already identified wrap."""
+        for number, offset, fragment in self.wrap_markers:
+            expected = number - first
+            if offset or not 0 < expected < count or expected + 2 >= len(styled):
+                continue
+            marker_row = styled[expected + 1].rstrip(' ')
+            if marker_row not in (fragment, fragment + '\\'):
+                continue
+            lines = range(first, number)
+            if any(line not in self.rows or line not in self.colors for line in lines):
+                continue
+            previous = [(self.rows[line], self.colors[line]) for line in lines]
+            if not any(text.strip() for text, _ in previous):
+                continue
+            before_marker = styled[:expected + 1]
+            observed = [(line, line.color_runs) for line in before_marker]
+            candidates = [i for i in range(len(observed))
+                          if observed[:i] + observed[i + 1:] == previous]
+            removable = [i for i in candidates if is_screen_padding(before_marker[i]) or (
+                i == 0 and first - 1 in self.colors
+                and observed[i] == (self.rows[first - 1], self.colors[first - 1]))]
+            # Removing either of two identical padding rows yields the same
+            # verified overlap. Require the content and colors to be identical.
+            folded = None
+            if removable:
+                index = removable[0]
+                corrected = styled[:index] + styled[index + 1:]
+                folded = fold_numbered_rows(corrected, corrected, first, count, self.wrap_markers)
+            if len(self.wrap_alignments) < 12:
+                self.wrap_alignments.append({
+                    'screen': self.seen, 'source_line': number,
+                    'mapped_start': first,
+                    'expected_marker_row': expected + 1, 'observed_marker_row': expected + 2,
+                    'matching_drop_rows': [i + 1 for i in candidates],
+                    'padding_or_preceding_rows': [i + 1 for i in removable],
+                    'first_text_mismatch_row': next(
+                        (i + 1 for i, ((text, _), (old, _)) in enumerate(zip(observed, previous))
+                         if text != old), None),
+                    'observed_rows_before_marker': [
+                        {'row': i + 1, 'blank': not line.strip(), 'padding': is_screen_padding(line)}
+                        for i, line in enumerate(before_marker)],
+                    'aligned': folded is not None,
+                })
+            if folded is not None:
+                return folded
+        return None
+
+    def record_width_sample(self, span, rows, styled):
+        if len(self.width_sample) >= 12:
+            return
+        sample = {'screen': self.seen, 'range': span, 'rows': len(rows),
+                  'blank_rows': sum(not row.strip() for row in rows)}
+        if self.allow_wrapping:
+            sample['styles_available'] = styled is not None
+            sample['backslash_rows_at_right_edge'] = [
+                {'row': offset + 1, 'last_style': styled[offset].color_runs[-1][1]
+                 if styled is not None and styled[offset].color_runs else ()}
+                for offset, row in enumerate(rows)
+                if (last_text := row.rstrip(' ')).endswith('\\')
+                and screens._cell_len(last_text.replace('\x08', '')) in WRAP_MARKER_COLUMNS]
+            if self.pending_wrap:
+                pending_number, prefix = self.pending_wrap
+                sample['pending_line_expected_screen_row'] = pending_number - span[0] + 1
+                sample['pending_prefix_rows'] = [offset + 1 for offset, row in enumerate(rows)
+                                                 if row.rstrip(' ') in (prefix, prefix + '\\')]
+                sample['pending_marker_source_lines'] = sorted({
+                    number for number, offset, fragment in self.wrap_markers
+                    if offset == 0 and prefix.startswith(fragment)})
+                sample['previous_overlap_rows'] = sum(
+                    line in self.rows and line in self.colors for line in range(span[0], pending_number))
+        self.width_sample.append(sample)
 
     def _matching_first_overlap(self, first, rows, *, extra_row=None):
         end = max(self.rows, default=0)
@@ -323,7 +580,8 @@ class NumberedArticle:
                 and max(self.rows, default=0) == end)
 
     def confirm_end(self, window):
-        if window is None or window != self.last_window or self.color_conflicts or not self.covers(window[1]):
+        if (self.pending_wrap is not None or window is None or window != self.last_window
+                or self.color_conflicts or not self.covers(window[1])):
             return None
         self.end_range = list(window[:2])
         self.end_usable = True
@@ -331,7 +589,7 @@ class NumberedArticle:
         return self.assemble()
 
     def assemble(self):
-        if not self.end_usable or not self.covers(self.end_range[1]):
+        if self.pending_wrap is not None or not self.end_usable or not self.covers(self.end_range[1]):
             return None
         end = self.end_range[1]
         if self.bridge_min_end is not None and end < self.bridge_min_end:
@@ -354,6 +612,12 @@ class NumberedArticle:
             'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
             'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
+            'wrapped_screens': self.wrapped_screens, 'wrap_joins': self.wrap_joins,
+            'wrap_markers_reused': self.wrap_markers_reused,
+            'wrap_alignments': self.wrap_alignments,
+            'wrap_window_checks': self.wrap_window_checks,
+            'pending_wrap_line': self.pending_wrap[0] if self.pending_wrap else None,
+            'wrap_failure': self.wrap_failure,
             'last_percent': self.last_percent,
             'width_mismatches_sample': self.width_sample,
             'extra_first_row': self.extra_first_row, 'page_line_offset': self.page_line_offset,
@@ -369,7 +633,7 @@ class NumberedArticle:
 
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
-    from board_session import BoardSession, PAGE_DOWN_KEY
+    from board_session import BoardSession, FALLBACK_HEIGHT, PAGE_DOWN_KEY
 
     core = api.connect_core
     send = core.send
@@ -378,7 +642,11 @@ def read_colored_post(api, board, aid):
     frames = []
     line_cache = {}
     mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
-    numbered = NumberedArticle(page_mode=mode == 'page')
+    def new_numbering():
+        return NumberedArticle(page_mode=mode == 'page', allow_wrapping=(
+            mode == 'line' and core.config.screen_height == FALLBACK_HEIGHT))
+
+    numbered = new_numbering()
     if isinstance(api, BoardSession):
         api.bridge_events.clear()
     capturing = False
@@ -418,7 +686,7 @@ def read_colored_post(api, board, aid):
             # Keep completion and colors tied to the attempt it actually returns.
             frames.clear()
             line_cache.clear()
-            numbered = NumberedArticle(page_mode=mode == 'page')
+            numbered = new_numbering()
             reached_end = frame_limit_hit = False
             page_turns = 0
         if mode == 'page' and article_screen and message == PAGE_DOWN_KEY:
@@ -465,6 +733,8 @@ def read_colored_post(api, board, aid):
             post = api.get_post(board, aid=aid)
     except Exception as exc:
         exc.capture_diagnostics = diagnostics()
+        if getattr(exc, 'open_screen_unrecognized', False):
+            exc.capture_diagnostics['open_screen_unrecognized'] = True
         raise
     finally:
         core.send = send

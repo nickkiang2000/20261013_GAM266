@@ -167,6 +167,42 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(api.capture_mode, 'page')
             api.get_post.assert_not_called()
 
+    def test_manual_repair_preview_is_bound_to_selected_board_and_file(self):
+        import base64
+        import issue_records
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for site, board in (('PTT', 'Test'), ('PTT2', 'Test'), ('PTT2', 'Other')):
+                with closing(app.database(root / f'{site}_{board}')) as db, db:
+                    issue_records.record(db, site, board, 7, 'article1', '待查')
+            matches = app.repair_targets(root, 'article1')
+            self.assertEqual(len(matches), 3)
+            first = next(item for item in matches if item['site'] == 'PTT')
+            other_site = next(item for item in matches if item['site'] == 'PTT2' and item['board'] == 'Test')
+            other_board = next(item for item in matches if item['board'] == 'Other')
+            data = base64.b64encode('作者  Tester  看板 Test\n標題  測試\n\x1b[32m正文\x1b[m'.encode()).decode()
+            payload = {**first, 'root': str(root), 'file': data}
+            preview = app.repair_article(payload, commit=False)
+            self.assertEqual(preview['title'], '測試')
+            self.assertFalse((Path(first['folder']) / 'index.html').exists())
+            with self.assertRaisesRegex(ValueError, '看板'):
+                app.repair_article({**payload, **other_board}, commit=False)
+            with self.assertRaisesRegex(ValueError, '目的地已變更'):
+                app.repair_article({**payload, **other_site, 'ticket': preview['ticket']}, commit=True)
+            changed = base64.b64encode(base64.b64decode(data) + b'changed').decode()
+            with self.assertRaisesRegex(ValueError, '檔案或目的地已變更'):
+                app.repair_article({**payload, 'file': changed, 'ticket': preview['ticket']}, commit=True)
+            with patch.object(app, 'STATE', {'running': False}), patch.object(app, 'READERS', {}):
+                result = app.repair_article({**payload, 'ticket': preview['ticket']}, commit=True)
+            self.assertTrue(result['index_url'].endswith('/index.html'))
+            folder = Path(first['folder'])
+            self.assertIn('人工備份', (folder / 'index.html').read_text(encoding='utf-8'))
+            self.assertEqual((folder / preview['original']).read_bytes(), base64.b64decode(data))
+            self.assertFalse((Path(other_site['folder']) / 'index.html').exists())
+            self.assertIn('人工備份，自動讀取待查', (folder / 'ReadMe.html').read_text(encoding='utf-8'))
+            self.assertEqual(app.repair_targets(root, 'article1'), [other_board, other_site])
+
     def test_fill_reuses_exact_aid_and_fetches_missing_article(self):
         import PyPtt
         with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
@@ -557,6 +593,108 @@ class StorageTests(unittest.TestCase):
         self.assertIsNone(article.assemble())
         self.assertEqual(article.diagnostics()['first_conflict_line'], 2)
 
+    def test_24_row_capture_joins_wrapped_line_that_continues_on_next_screen(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import CapturedLine, NumberedArticle
+        from board_session import BoardSession
+        from PyPtt import command
+
+        prefix = '字' * 38 + '開'
+        wrapped = CapturedLine(prefix + chr(92), ((prefix, ('f3',)), (chr(92), ('f7', 'hl'))))
+        marker_missing = CapturedLine(prefix, ((prefix, ('f3',)),))
+        marker_repainted = CapturedLine(prefix + chr(92), ((prefix + chr(92), ('f3',)),))
+        continuation = CapturedLine('機被鎖定。', (('機被鎖定。', ('f2',)),))
+        plain = [CapturedLine(f'原文第 {number} 行', ()) for number in range(1, 23)]
+        blank = CapturedLine('', ())
+        plain[8] = blank
+        plain[9] = CapturedLine(' ', ((' ', ('b2',)),))
+        last = CapturedLine(r'C:\literal\path', ())
+        tail = [last, *(CapturedLine(f'原文第 {number} 行', ()) for number in range(25, 45))]
+        frames = iter([
+            (1, 22, 10, [*plain, blank]),
+            (2, 23, 11, [*plain[1:], blank, wrapped]),
+            (3, 23, 12, [*plain[2:9], blank, *plain[9:], marker_missing, continuation]),
+            (4, 24, 13, [*plain[3:], marker_repainted, continuation, last, blank]),
+            (5, 26, 14, [*plain[5:], blank, wrapped, continuation, *tail[:3]]),
+            (7, 28, 15, [*plain[6:], wrapped, continuation, *tail[:5]]),
+            (22, 43, 21, [blank, wrapped, continuation, *tail[:-1]]),
+            (23, 44, 100, [wrapped, continuation, *tail]),
+        ])
+        numbered = NumberedArticle(allow_wrapping=True)
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(
+            _decode_screen=Mock(), send=Mock()), cursor='>'))
+
+        def send(_key):
+            first, end, percent, rows = next(frames)
+            done = percent == 100
+            numbered.observe(rows, f'瀏覽 第 1/8 頁 ({percent}%) 第 {first}~{end} 行',
+                             at_end=done, styled=rows)
+            if percent == 11:
+                self.assertEqual(numbered.diagnostics()['pending_wrap_line'], 23)
+                self.assertIn((23, 0, prefix), numbered.wrap_markers)
+            return 0 if done else 1
+
+        with patch.object(session, '_send_article_key', side_effect=send) as keys:
+            body = session._read_numbered_article(lambda: numbered)
+        self.assertEqual([call.args[0] for call in keys.call_args_list], [command.enter * 2, *[command.down] * 7])
+        self.assertEqual(body.split('\n'), [*plain, prefix + continuation, *tail])
+        self.assertEqual(numbered.colors[23], ((prefix, ('f3',)), ('機被鎖定。', ('f2',))))
+        self.assertEqual(numbered.width_mismatches, 0)
+        self.assertEqual(numbered.diagnostics()['wrapped_screens'], 7)
+        self.assertEqual(numbered.diagnostics()['wrap_markers_reused'], 6)
+        check, leading_check = numbered.diagnostics()['wrap_window_checks']
+        self.assertEqual(check['reported_range'], [5, 26])
+        self.assertEqual(check['selected_start'], 6)
+        self.assertEqual(leading_check['reported_range'], [22, 43])
+        self.assertEqual(leading_check['selected_start'], 23)
+        self.assertTrue(leading_check['leading_row_padding'])
+        self.assertEqual(numbered.rows[22], plain[21])
+        alignment = numbered.diagnostics()['wrap_alignments'][0]
+        self.assertEqual((alignment['expected_marker_row'], alignment['observed_marker_row']), (21, 22))
+        self.assertTrue(alignment['aligned'])
+        self.assertEqual(numbered.colors[10], ((' ', ('b2',)),))
+
+    def test_24_row_capture_preserves_literal_backslash_and_rejects_unconfirmed_wrap(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        prefix = '字' * 39
+        literal = CapturedLine(prefix + chr(92), ((prefix + chr(92), ('f7', 'hl')),))
+        wrapped = CapturedLine(literal, ((prefix, ()), (chr(92), ('f7', 'hl'))))
+        article = NumberedArticle(allow_wrapping=True)
+        article.observe([literal], '瀏覽 第 1/1 頁 (100%) 第 1~1 行', at_end=True, styled=[literal])
+        self.assertEqual(article.assemble(), literal)
+
+        article = NumberedArticle(allow_wrapping=True)
+        rows = [CapturedLine('正文', ()), wrapped, CapturedLine('', ())]
+        article.observe(rows, '瀏覽 第 1/2 頁 (50%) 第 1~2 行', at_end=False, styled=rows)
+        self.assertEqual(article.diagnostics()['pending_wrap_line'], 2)
+        rows = [CapturedLine('無法核對的下一屏', ())]
+        article.observe(rows, '瀏覽 第 2/2 頁 (100%) 第 2~2 行', at_end=True, styled=rows)
+        self.assertIsNone(article.assemble())
+        self.assertEqual(article.width_mismatches, 1)
+        self.assertEqual(article.width_sample[-1]['pending_prefix_rows'], [])
+
+    def test_24_row_capture_keeps_unverified_extra_rows_pending(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        prefix = '字' * 39
+        marker = CapturedLine(prefix + chr(92), ((prefix, ()), (chr(92), ('f7', 'hl'))))
+        first, second = [CapturedLine(text, ()) for text in ('第一行', '第二行')]
+        blank = CapturedLine('', ())
+        for extra in (CapturedLine('未見過的正文', ()), CapturedLine(' ', ((' ', ('b2',)),))):
+            with self.subTest(extra=repr(extra)):
+                article = NumberedArticle(allow_wrapping=True)
+                rows = [first, second, marker, blank]
+                article.observe(rows, '瀏覽 第 1/2 頁 (50%) 第 1~3 行', at_end=False, styled=rows)
+                rows = [second, extra, marker, CapturedLine('續行', ())]
+                article.observe(rows, '瀏覽 第 1/2 頁 (60%) 第 2~3 行', at_end=False, styled=rows)
+                self.assertIsNone(article.assemble())
+                self.assertEqual(article.width_mismatches, 1)
+                alignment, = article.diagnostics()['wrap_alignments']
+                self.assertEqual(alignment['matching_drop_rows'], [2])
+                self.assertFalse(alignment['aligned'])
+
     def test_headerless_article_requires_confirmed_end(self):
         post = {'aid': '1DTwb0l7', 'title': 'Animation', 'full_content': '第一格\n第二格',
                 'pass_format_check': False, 'ansi_coverage': {'matched': 1, 'total': 2, 'colored': 0}}
@@ -918,6 +1056,57 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(next(row['stalled_line'] for row in rows if row.get('outcome') == 'unreadable'), 103)
             api.login.assert_called_once()
 
+    def test_resume_defers_only_repeated_open_failures_with_the_same_aid(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app.STOP, 'wait', return_value=False), \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0, timed_samples=0)), \
+                patch('ansi_capture.read_colored_post') as capture:
+            folder = Path(d)
+            with closing(app.database(folder)) as db, db:
+                db.execute("""INSERT INTO batch_ranges(site,board,first_index,last_index,direction,capture_mode,backup_mode)
+                              VALUES('PTT','Test',509,512,'oldest','page','fill')""")
+                reason = f'{app.OPEN_SCREEN_PHASE} · BoardNavigationError：測試'
+                for index, aid, attempts in ((509, 'Test0509', 1), (510, 'Test0510', 2), (511, 'WrongAID', 2)):
+                    for _ in range(attempts):
+                        app.record_failure(db, 'PTT', 'Test', index, reason, article=True, aid=aid)
+                self.assertEqual(app.pending_open_failures(db, 'PTT', 'Test'),
+                                 {(510, 'Test0510'), (511, 'WrongAID')})
+            api = factory.return_value
+            api.get_newest_index.return_value = 512
+            api.get_post.side_effect = lambda board, index, query: {'index': index, 'aid': f'Test{index:04d}'}
+            capture.side_effect = lambda api, board, aid: {
+                'aid': aid, 'full_content': '正文', 'pass_format_check': True,
+                'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0}}
+            app.work(dict(site='PTT', board='Test', mode='resume', folder=d, user='test', password='dummy'))
+            self.assertEqual([call.args[2] for call in capture.call_args_list],
+                             ['Test0509', 'Test0511', 'Test0512'])
+            self.assertEqual((app.STATE['result'], app.STATE['scanned'], app.STATE['unresolved']), ('done', 4, 1))
+            self.assertIsNone(app.find_pending_range(folder, 'PTT', 'Test'))
+            self.assertIn('Test0510', (folder / 'ReadMe.html').read_text(encoding='utf-8'))
+
+    def test_shorter_interval_applies_only_to_article_line_down(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from PyPtt import command, connect_core, screens
+        from board_session import BoardSession, PAGE_DOWN_KEY
+
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(_decode_screen=Mock(), send=Mock())))
+        session.pacing = True
+        article = [connect_core.TargetUnit(screens.Target.PostEnd)]
+        board = [connect_core.TargetUnit(screens.Target.InBoard)]
+        for mode, key, targets, wait in (
+                ('line', command.down, article, .25), ('line', command.down, board, .75),
+                ('page', PAGE_DOWN_KEY, article, .75), ('line', command.enter * 2, article, .75)):
+            with self.subTest(mode=mode, key=key, targets=targets):
+                session.capture_mode = mode
+                session.last_sent = 10.0
+                with patch('board_session.time.monotonic', return_value=10.25), \
+                        patch('board_session.time.sleep') as sleep:
+                    session._send(key, targets)
+                sleep.assert_called_once_with(wait)
+
 class BoardSessionTests(unittest.TestCase):
     def test_page_capture_checks_continuity_and_stops_at_captured_end(self):
         from types import SimpleNamespace
@@ -1011,8 +1200,10 @@ class BoardSessionTests(unittest.TestCase):
         from PyPtt import command
 
         session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(_decode_screen=Mock(), send=Mock())))
-        for distance, moves in ((1, True), (6, True), (1, False)):
-            with self.subTest(distance=distance, moves=moves):
+        for distance, moves, formal in ((1, True, False), (6, True, False), (1, False, False), (1, False, True)):
+            with self.subTest(distance=distance, moves=moves, formal=formal):
+                session.prefer_line_at_uncertain_seam = formal
+                session.view = 'article'
                 numbered = NumberedArticle(page_mode=True)
                 body = [f'正文 {i}' for i in range(1, 227)]
                 body[99-distance:99] = [''] * distance
@@ -1035,8 +1226,15 @@ class BoardSessionTests(unittest.TestCase):
                     return 1
 
                 with patch.object(session, '_return_to_list') as back, \
+                        patch.object(session, '_log_bridge_screen') as log, \
                         patch.object(session, '_send_article_key', side_effect=send) as keys:
-                    if moves:
+                    if formal:
+                        with self.assertRaisesRegex(ArticleStalled, '接縫無法直接核對'):
+                            session._read_article_pages(lambda: numbered)
+                        back.assert_called_once()
+                        log.assert_called_once_with('return_left_before_bridge', 2)
+                        expected = [command.enter * 2, PAGE_DOWN_KEY]
+                    elif moves:
                         self.assertEqual(session._read_article_pages(lambda: numbered), '\n'.join(body))
                         self.assertEqual(numbered.bridge_result, 'aligned')
                         self.assertEqual(numbered.bridge_moves, distance)

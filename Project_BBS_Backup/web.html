@@ -48,6 +48,12 @@ html[data-theme="light"] :is(.range-value,.folder-suffix) { background: #e7edf4;
                    gap: 8px; min-width: 0; border: 1px solid #343952; padding: 7px; }
 .download-action p { margin: 2px 0; }
 .test-action { margin-top: 8px; }
+.repair-section { margin-top: 10px; border-top: 1px solid #59658b; padding-top: 8px; }
+.repair-search, .repair-upload { display: grid; align-items: end; gap: 8px; margin-top: 6px; }
+.repair-search { grid-template-columns: minmax(0, 1fr) auto minmax(0, 2fr); }
+.repair-upload { grid-template-columns: minmax(0, 1fr) auto auto; }
+.repair-search label, .repair-upload label { grid-column: auto; min-width: 0; }
+#repair-preview-text { white-space: pre-line; }
 .hint { margin: 0; color: #aab0c4; font-size: .84rem; }
 .status-header { display: flex; justify-content: space-between; align-items: center; gap: 8px;
                  padding: 4px 8px; background: #000088; }
@@ -95,6 +101,8 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 }
 @media (max-width: 600px) {
     .login-fields, .scan-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .repair-search { grid-template-columns: minmax(0, 1fr) auto; }
+    .repair-search label:last-child { grid-column: 1 / -1; }
 }
 @media (max-width: 430px) {
     .backup-fields { grid-template-columns: minmax(0, 1fr); }
@@ -149,15 +157,30 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     </div>
 </div>
 <p id="rate-status" class="hint wide" hidden></p>
-<details class="wide" id="test-area"><summary>單篇測試</summary>
+<details class="wide" id="test-area"><summary>單篇測試修正</summary>
     <div class="advanced-fields">
         <label class="half">指定文章 AID<input name="test_aid" placeholder="例如 1AdzogFB"></label>
         <label class="half">測試擷取方式<select name="test_capture_mode"><option value="line">逐行 ↓</option><option value="page">逐頁（Page Down）</option></select></label>
-        <label class="wide"><input name="test_short_terminal" type="checkbox"> 24 列相容讀取</label>
+        <label class="wide"><input name="test_short_terminal" type="checkbox"> 模擬一般 BBS 的 24 列畫面（相容讀取）</label>
     </div>
     <div class="download-action test-action">
         <button type="button" id="test-download" aria-describedby="test-summary">登入並測試下載</button>
         <p id="test-summary" class="hint destination"></p>
+    </div>
+    <div class="repair-section">
+        <strong>匯入人工 ANSI 備份</strong>
+        <div class="repair-search">
+            <label>搜尋備份根目錄<input id="repair-root" name="repair_root" placeholder="使用首頁的備份根目錄"></label>
+            <button type="button" id="repair-find">查找待查文章</button>
+            <label>待查文章<select id="repair-target" disabled><option value="">請先查找待查文章</option></select></label>
+        </div>
+        <div class="repair-upload">
+            <label>本機 ANSI 檔<input id="repair-file" type="file" accept=".ans"></label>
+            <button type="button" id="repair-preview" disabled>預覽</button>
+            <button type="button" id="repair-confirm" disabled>匯入</button>
+        </div>
+        <p id="repair-preview-text" class="destination" role="status"></p>
+        <a id="repair-index" target="_blank" rel="noopener" hidden>開啟更新後的離線索引</a>
     </div>
 </details>
 </form>
@@ -196,10 +219,25 @@ const testButton = document.getElementById('test-download');
 const stop = document.getElementById('stop');
 const folderSuffix = document.getElementById('folder-suffix');
 const indexLink = document.getElementById('index-link');
-const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction'];
+const preferenceFields = ['site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction', 'repair_root'];
 const themeToggle = document.getElementById('theme-toggle');
 const desktopToggle = document.getElementById('desktop-toggle');
 const notice = document.getElementById('notice');
+const repairRoot = document.getElementById('repair-root');
+const repairTarget = document.getElementById('repair-target');
+const repairFile = document.getElementById('repair-file');
+const repairPreview = document.getElementById('repair-preview');
+const repairConfirm = document.getElementById('repair-confirm');
+const repairIndex = document.getElementById('repair-index');
+let repairTargets = [];
+let repairSearchRoot = '';
+let repairDraft = null;
+let repairRevision = 0;
+let repairBusy = false;
+const noticeQueue = [];
+let noticeTimer;
+let issueNoticeTask = '';
+let issueNoticeCount = 0;
 let resolvedFolder = '';
 let preferenceTimer;
 let preferenceWrites = Promise.resolve();
@@ -226,6 +264,7 @@ function updateDownloadButtons() {
     resume.disabled = running || !pending || Boolean(limit);
     exportButton.disabled = running;
     testButton.disabled = running || Boolean(limit);
+    updateRepairButtons();
     const status = document.getElementById('rate-status');
     status.hidden = !limit;
     if (limit) {
@@ -255,6 +294,7 @@ function setText(element, value) {
 function showNotice(title, message, id) {
     setText('notice-title', title);
     setText('notice-message', message);
+    notice.dataset.id = id || '';
     notice.hidden = false;
     if (!id || !desktopEnabled || !window.Notification || Notification.permission !== 'granted') return;
     if (getSetting('localStorage', 'bbs-desktop-last') === id) return;
@@ -265,6 +305,41 @@ function showNotice(title, message, id) {
     } catch {
         // The page notice also covers browsers that cannot show system alerts.
     }
+}
+
+function showQueuedNotice() {
+    if (noticeTimer !== undefined || !noticeQueue.length) return;
+    const next = noticeQueue.shift();
+    showNotice(next.title, next.message, next.id);
+    if (next.article) {
+        noticeTimer = setTimeout(() => {
+            if (notice.dataset.id === next.id) notice.hidden = true;
+            noticeTimer = undefined;
+            showQueuedNotice();
+        }, 4500);
+    }
+}
+
+function queueIssueNotices(state) {
+    if (!state.task_id) return;
+    const key = `bbs-issue-count-${state.task_id}`;
+    const issues = state.issues || [];
+    if (issueNoticeTask !== state.task_id) {
+        issueNoticeTask = state.task_id;
+        issueNoticeCount = Number(getSetting('sessionStorage', key) || 0);
+    }
+    for (let i = issueNoticeCount; i < issues.length; i++) {
+        const issue = issues[i];
+        if (!issue.notify) continue;
+        const label = [state.site, state.board, issue.index == null ? '' : `第 ${issue.index} 篇`,
+            issue.aid ? `AID ${issue.aid}` : ''].filter(Boolean).join(' · ');
+        const detail = [issue.stage, issue.message, issue.continues ? '繼續下載下一篇' : ''].filter(Boolean).join(' · ');
+        noticeQueue.push({title: '文章待查', message: [label, detail].filter(Boolean).join('\n'),
+            id: `${state.task_id}-issue-${i + 1}`, article: true});
+    }
+    issueNoticeCount = Math.max(issueNoticeCount, issues.length);
+    setSetting('sessionStorage', key, String(issueNoticeCount));
+    showQueuedNotice();
 }
 
 function showResult(state) {
@@ -285,8 +360,9 @@ function showResult(state) {
     if (state.unresolved) summary.push(`待查 ${state.unresolved} 筆`);
     if (state.unavailable) summary.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
     if (state.index_path) summary.push(`離線 HTML ${state.exported} 篇`);
-    showNotice(titles[state.result] || '備份狀態更新',
-        [state.message, summary.join(' · ')].filter(Boolean).join('\n'), state.task_id);
+    noticeQueue.push({title: titles[state.result] || '備份狀態更新',
+        message: [state.message, summary.join(' · ')].filter(Boolean).join('\n'), id: state.task_id});
+    showQueuedNotice();
 }
 
 function updateDesktopToggle() {
@@ -319,7 +395,12 @@ desktopToggle.onclick = async () => {
         updateDesktopToggle();
     }
 };
-document.getElementById('close-notice').onclick = () => { notice.hidden = true; };
+document.getElementById('close-notice').onclick = () => {
+    notice.hidden = true;
+    clearTimeout(noticeTimer);
+    noticeTimer = undefined;
+    showQueuedNotice();
+};
 window.addEventListener('focus', updateDesktopToggle);
 updateDesktopToggle();
 
@@ -507,12 +588,139 @@ async function send(path, data) {
     }
 }
 
+function updateRepairButtons() {
+    document.getElementById('repair-find').disabled = repairBusy;
+    repairTarget.disabled = repairBusy || !repairTargets.length;
+    repairRoot.disabled = repairFile.disabled = repairBusy;
+    repairPreview.disabled = repairBusy || !repairTarget.value || !repairFile.files.length;
+    repairConfirm.disabled = repairBusy || running || !repairDraft;
+}
+
+function clearRepairPreview() {
+    repairRevision++;
+    repairDraft = null;
+    repairIndex.hidden = true;
+    setText('repair-preview-text', '');
+    updateRepairButtons();
+}
+
+function clearRepairTargets() {
+    repairTargets = [];
+    repairSearchRoot = '';
+    repairTarget.replaceChildren(new Option('請先查找待查文章', ''));
+    clearRepairPreview();
+}
+
+async function repairRequest(path, data) {
+    const response = await fetch(path, {method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-Token': '__TOKEN__'}, body: JSON.stringify(data)});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '請確認備份目錄和檔案，或重新整理頁面。');
+    return result;
+}
+
+function repairLabel(target) {
+    return `${target.site}／${target.board}／第 ${target.index} 篇 · AID ${target.aid}`;
+}
+
+function renderRepairTargets() {
+    const counts = new Map();
+    for (const target of repairTargets) {
+        const label = repairLabel(target);
+        counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    repairTarget.replaceChildren(new Option(repairTargets.length ? '請選擇一筆待查文章' : '沒有待匯入的文章', ''),
+        ...repairTargets.map((target, index) => {
+            const label = repairLabel(target);
+            const folderName = target.folder.split(/[\\/]/).filter(Boolean).at(-1);
+            return new Option(counts.get(label) > 1 ? `${label} · ${folderName}` : label, String(index));
+        }));
+}
+
+async function runRepair(action) {
+    if (repairBusy) return;
+    repairBusy = true;
+    updateRepairButtons();
+    try {
+        await action();
+    } catch (error) {
+        setText('repair-preview-text', error.message || '無法連線到本機程式。');
+    } finally {
+        repairBusy = false;
+        updateRepairButtons();
+    }
+}
+
+document.getElementById('repair-find').onclick = () => runRepair(async () => {
+    clearRepairTargets();
+    const revision = repairRevision;
+    const root = repairRoot.value.trim() || rootFolder(form.elements.folder.value);
+    const result = await repairRequest('/repair-targets', {root});
+    if (revision !== repairRevision) return;
+    repairRoot.value = root;
+    formEdited = true;
+    saveForm();
+    repairSearchRoot = root;
+    repairTargets = result.targets;
+    renderRepairTargets();
+    setText('repair-preview-text', repairTargets.length ? '' : '找不到符合條件的待查紀錄。');
+});
+repairRoot.addEventListener('input', clearRepairTargets);
+repairRoot.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.isComposing) {
+        event.preventDefault();
+        document.getElementById('repair-find').click();
+    }
+});
+repairTarget.onchange = repairFile.onchange = clearRepairPreview;
+form.elements.folder.addEventListener('input', () => {
+    if (!repairRoot.value.trim()) clearRepairTargets();
+});
+repairPreview.onclick = () => runRepair(async () => {
+    clearRepairPreview();
+    const revision = repairRevision;
+    const target = repairTargets[Number(repairTarget.value)];
+    const file = repairFile.files[0];
+    if (!target || !file || !file.name.toLowerCase().endsWith('.ans') || file.size > 4 * 1024 * 1024) {
+        throw new Error('請選擇一筆待查文章及 4 MB 以下的 .ans 檔。');
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 32768)
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
+    const payload = {...target, root: repairSearchRoot, file: btoa(binary)};
+    const result = await repairRequest('/repair-preview', payload);
+    if (revision !== repairRevision) return;
+    repairDraft = {...payload, ticket: result.ticket};
+    const encoding = result.decode_replacements ? `\n${result.decode_replacements} 處無法解碼，原始檔會保留。` : '';
+    setText('repair-preview-text', `${file.name} · ${result.title}\n匯入 ${repairLabel(target)}\n${result.folder}${encoding}`);
+});
+repairConfirm.onclick = () => runRepair(async () => {
+    if (!repairDraft) return;
+    const draft = repairDraft;
+    const revision = repairRevision;
+    const result = await repairRequest('/repair-import', draft);
+    if (revision !== repairRevision) return;
+    repairTargets = repairTargets.filter(target => !(target.folder === draft.folder && target.site === draft.site
+        && target.board === draft.board && target.index === draft.index && target.aid === draft.aid));
+    renderRepairTargets();
+    clearRepairPreview();
+    repairFile.value = '';
+    if (result.index_url) {
+        repairIndex.href = result.index_url;
+        repairIndex.hidden = false;
+    }
+    const message = result.index_url ? '已匯入人工備份並更新離線索引。'
+        : '人工備份已存檔。離線索引未能更新，請執行「離線內容重整」。';
+    setText('repair-preview-text', `${message}\n${result.folder}`);
+});
+
 form.addEventListener('submit', event => {
     event.preventDefault();
     const data = Object.fromEntries(new FormData(form));
     data.folder = rootFolder(data.folder);
     form.elements.password.value = '';
-    for (const key of ['test_aid', 'test_capture_mode', 'test_short_terminal']) delete data[key];
+    for (const key of ['test_aid', 'test_capture_mode', 'test_short_terminal', 'repair_root']) delete data[key];
     updateFormSummary();
     saveForm();
     send('/start', {...data, mode: 'new'});
@@ -529,7 +737,7 @@ testButton.onclick = () => {
     if (![board, user, password].every(field => field.reportValidity())) return;
     const aid = test_aid.value.trim().replace(/^#/, '');
     if (!/^[A-Za-z0-9_-]{8}$/.test(aid)) {
-        showNotice('請輸入文章 AID', '請在單篇測試區填寫 8 碼文章代碼。');
+        showNotice('請輸入文章 AID', '請在單篇測試修正區填寫 8 碼文章代碼。');
         test_aid.focus();
         return;
     }
@@ -572,6 +780,7 @@ async function refresh() {
         }
     }
     if (finished) checkPending();
+    queueIssueNotices(state);
     showResult(state);
     updateDownloadButtons();
     stop.disabled = !running || state.phase === 'export' || state.operation === 'export';
@@ -606,17 +815,17 @@ async function refresh() {
     if (state.unavailable) review.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
     if (state.kept_previous) review.push(`保留舊備份 ${state.kept_previous} 篇`);
     if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
-    document.getElementById('issue-details').hidden = !review.length;
-    setText('review-count', ['處理明細', ...review].join(' · '));
     const issues = document.getElementById('issues');
     const issueList = state.issues || [];
+    document.getElementById('issue-details').hidden = !review.length && !issueList.length;
+    setText('review-count', ['處理明細', ...review].join(' · '));
     const signature = JSON.stringify(issueList);
     if (signature !== issueSignature) {
         const rows = document.createDocumentFragment();
         for (const issue of issueList) {
             const row = document.createElement('li');
             const label = [issue.index, issue.aid].filter(value => value != null).join(' / ');
-            row.textContent = label ? `${label}：${issue.message}` : issue.message;
+            row.textContent = [label, issue.stage, issue.message].filter(Boolean).join(' · ');
             rows.append(row);
         }
         issues.replaceChildren(rows);

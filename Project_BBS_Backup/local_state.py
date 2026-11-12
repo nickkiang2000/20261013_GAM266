@@ -8,7 +8,7 @@ import secrets
 import traceback
 
 
-PREFERENCE_FIELDS = ('site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction')
+PREFERENCE_FIELDS = ('site', 'user', 'board', 'start', 'count', 'folder', 'theme', 'direction', 'repair_root')
 LOCAL_DIRECTORY = Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'BBS Downloader'
 SETTINGS = LOCAL_DIRECTORY / 'form.json'
 RATE_LIMIT_FILE = LOCAL_DIRECTORY / 'rate_limits.json'

@@ -346,6 +346,12 @@ def color_article(site, board, title, post, body, nav):
     header = (f'<header class="article-top"><span class="brand">{escape(site)}</span>'
               f'<span>› 看板 {escape(board)}</span>{nav}</header>')
     metadata = render_metadata(post.get('author'), title, post.get('date'), board) if has_terminal_header else ''
+    manual = post.get('manual_ansi')
+    if manual:
+        replacements = manual.get('decode_replacements', 0)
+        notice = f' · {replacements} 處解碼替代字元' if replacements else ''
+        metadata += (f'<p class="meta">人工 ANSI 備份 · {escape(manual["encoding"])}{notice}'
+                     f' · 原檔 <code>{escape(manual["original"])}</code></p>')
     return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
             + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0))
 
@@ -394,6 +400,8 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 post = {}
                 render_error = type(exc).__name__
             author = post.get('author') or ''
+            if post.get('manual_ansi'):
+                label += '人工備份 · '
             if data is not None:
                 comments = post.get('comments')
                 extra_comments = []
@@ -426,7 +434,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 if neighbor:
                     links.append(f'<a id="{link_id}" href="../index.html#a-{neighbor}" hidden>同主題</a>')
             nav = '<nav>' + ''.join(links) + '</nav>'
-            colored = bool(post.get('ansi_lines') or post.get('headerless'))
+            colored = bool(post.get('ansi_lines') or post.get('headerless') or post.get('manual_ansi'))
             try:
                 if data is None:
                     article = f'{nav}<h1>{escape(title)}</h1>' + article_body(body or title, None)

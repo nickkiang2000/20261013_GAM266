@@ -1,5 +1,7 @@
 """Local PTT and PTT2 downloader."""
+import base64
 import errno
+import hmac
 import json
 import logging
 import secrets
@@ -15,14 +17,18 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from archive import export_html
 import issue_records
-from board_session import (ArticleStalled, BoardSession, BoardTemporarilyClosed, BridgeNavigationError,
-                           FALLBACK_HEIGHT, MIN_COMMAND_INTERVAL, StationRateLimit, TAIPEI, detect_rate_limit)
+from board_session import (ArticleStalled, BoardNavigationError, BoardSession, BoardTemporarilyClosed, BridgeNavigationError,
+                           FALLBACK_HEIGHT, LINE_DOWN_INTERVAL, MIN_COMMAND_INTERVAL,
+                           StationRateLimit, TAIPEI, detect_rate_limit)
 from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
+from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.18.2'
+APP_VERSION = 'v2.19.3'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
+REPAIR_KEY = secrets.token_bytes(32)
+MAX_ANSI_BYTES = 4 * 1024 * 1024
 STATE = {'running': False, 'message': '尚未登入／實站驗證', 'saved': 0, 'skipped': 0}
 LOCK = threading.Lock()
 STOP = threading.Event()
@@ -43,6 +49,7 @@ BETWEEN_ITEMS_SECONDS = 1
 ITEMS_BEFORE_REST = 25
 REST_SECONDS = 20
 BOARD_RECHECK_SECONDS = 180
+OPEN_SCREEN_PHASE = '開正文後無法辨識首屏'
 # Increment when the stored capture format changes. HTML-only changes can be re-exported.
 CAPTURE_VERSION = 1
 
@@ -132,9 +139,10 @@ def record_failure(db, site, board, index, reason, *, article=False, aid=None):
     db.commit()
 
 
-def show_issue(index, aid, message):
+def show_issue(index, aid, message, *, notify=False, stage=None, continues=False):
     issues = STATE.setdefault('issues', [])
-    issues.append({'index': index, 'aid': aid, 'message': message})
+    issues.append({'index': index, 'aid': aid, 'message': message,
+                   'notify': notify, 'stage': stage, 'continues': continues})
 
 
 def find_pending_range(folder, site, board, *, with_progress=False):
@@ -204,6 +212,16 @@ def resume_checkpoints(db, site, board):
     skipped = db.execute('SELECT idx,aid,status FROM batch_unavailable WHERE site=? AND board=?', (site, board))
     checkpoints.update({index: (aid, status) for index, aid, status in skipped})
     return checkpoints
+
+
+def pending_open_failures(db, site, board):
+    opening_error = f'{OPEN_SCREEN_PHASE} · BoardNavigationError：%'
+    return set(db.execute('''SELECT i.idx,i.aid FROM article_issues i
+        WHERE i.site=? AND i.board=? AND i.idx IS NOT NULL AND i.aid IS NOT NULL
+        AND i.attempts>=2 AND i.reason LIKE ?
+        AND (SELECT count(*) FROM failures f WHERE f.site=i.site AND f.board=i.board AND f.idx=i.idx
+             AND f.created >= i.first_seen - 1 AND f.reason LIKE ?) >= 2''',
+        (site, board, opening_error, opening_error)))
 
 
 def confirmed_deleted(api, query, index):
@@ -309,6 +327,68 @@ def test_destination(site, board, aid, capture_mode, short_terminal):
     height = FALLBACK_HEIGHT if short_terminal else 100
     return (ROOT / 'test-downloads' / f'{site}_{board}' / aid
             / f'{capture_mode or "line"}-{height}' / ('run-' + secrets.token_hex(6)))
+
+
+def repair_root(value):
+    root = Path(value).expanduser()
+    if not root.is_absolute() or not root.is_dir():
+        raise ValueError('請輸入既有的備份根目錄')
+    return root.resolve()
+
+
+def repair_targets(root, aid):
+    targets = []
+    for folder in (root, *(path for path in root.iterdir() if path.is_dir() and not path.is_symlink())):
+        if not (folder / 'articles.sqlite3').is_file():
+            continue
+        with closing(sqlite3.connect((folder / 'articles.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='article_issues' AND type='table'").fetchone():
+                continue
+            for site, board, index, record_aid, reason in db.execute('''SELECT i.site,i.board,i.idx,i.aid,i.reason
+                    FROM article_issues i WHERE i.issue_key LIKE 'aid:%' AND i.idx>0 AND i.aid IS NOT NULL
+                    AND (?='' OR i.aid=?) AND NOT EXISTS (
+                        SELECT 1 FROM articles a WHERE a.site=i.site AND a.board=i.board AND a.aid=i.aid
+                        AND json_type(CASE WHEN json_valid(a.data) THEN a.data END, '$.manual_ansi')='object'
+                    )''', (aid, aid)):
+                targets.append({'site': site, 'board': board, 'index': index, 'aid': record_aid,
+                                'folder': str(folder), 'reason': reason})
+    return sorted(targets, key=lambda item: (item['site'], item['board'].casefold(), item['index'], item['folder']))
+
+
+def repair_article(data, *, commit):
+    root = repair_root(data['root'])
+    folder = Path(data['folder']).resolve()
+    site, board, index, aid = (data[key] for key in ('site', 'board', 'index', 'aid'))
+    if (folder != root and folder.parent != root) or not (folder / 'articles.sqlite3').is_file():
+        raise ValueError('所選文章的備份資料夾已無法辨識')
+    if (site not in SITES or not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', board) or type(index) is not int
+            or not re.fullmatch(r'[A-Za-z0-9_-]{8}', aid)):
+        raise ValueError('待查文章的站台、看板、篇號或 AID 無效')
+    raw = base64.b64decode(data['file'], validate=True)
+    if not 0 < len(raw) <= MAX_ANSI_BYTES:
+        raise ValueError('請選擇 4 MB 以下的 ANSI 檔')
+    post = prepare_ansi_article(raw, board)
+    original = post['manual_ansi']['original']
+    identity = json.dumps([str(root), str(folder), site, board, index, aid, original]).encode()
+    ticket = hmac.digest(REPAIR_KEY, identity, 'sha256').hex()
+    if not commit:
+        with closing(sqlite3.connect((folder / 'articles.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
+            check_ansi_target(db, site, board, index, aid, original)
+        return {'ticket': ticket, 'title': post['title'], 'folder': str(folder), **post['manual_ansi']}
+    if not isinstance(data.get('ticket'), str) or not hmac.compare_digest(data['ticket'], ticket):
+        raise ValueError('檔案或目的地已變更，請重新預覽')
+    with LOCK:
+        if STATE['running']:
+            return None
+        with closing(database(folder)) as db:
+            store_ansi_article(db, raw, post, folder, site, board, index, aid, save_article=save_article)
+            try:
+                export_html(db, folder, issue_evidence=issue_records.log_evidence(db, LOG_DIRECTORY))
+            except (OSError, sqlite3.Error):
+                return {'index_url': None, 'folder': str(folder)}
+        reader = secrets.token_urlsafe(24)
+        READERS[reader] = folder
+    return {'index_url': f'/reader/{reader}/index.html', 'folder': str(folder)}
 
 
 def export_progress(done, total):
@@ -583,6 +663,7 @@ def work(config):
                   all_articles=all_articles, terminal_height=height,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
                   between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
+                  line_down_seconds=LINE_DOWN_INTERVAL,
                   items_before_rest=ITEMS_BEFORE_REST, rest_seconds=REST_SECONDS)
         stage = 'login'
         stage_started = time.monotonic()
@@ -591,6 +672,7 @@ def work(config):
                         check_update=False, verify_ssl=True, screen_height=height)
         session = BoardSession(api)
         session.capture_mode = capture_mode
+        session.prefer_line_at_uncertain_seam = mode != 'test'
         def check_stop():
             if STOP.is_set():
                 raise DownloadStopped()
@@ -620,7 +702,7 @@ def work(config):
                 job.event('article', aid=aid, outcome='unreadable', reason=str(exc),
                           capture=getattr(exc, 'capture_diagnostics', STATE.get('ansi_diagnostics')),
                           stalled_line=getattr(exc, 'line', None), seconds=round(time.monotonic() - article_started, 3))
-                STATE['message'] = '指定文章待查。'
+                STATE['message'] = f'指定文章待查（AID {aid}）：{exc}。'
                 record_failure(db, site, board, None, str(exc), article=True, aid=aid)
                 return
             job.event('article', aid=aid, outcome=outcome, coverage=STATE.get('ansi_coverage', {}),
@@ -670,9 +752,11 @@ def work(config):
                   expected_count=expected_count, clipped_count=expected_count - planned_count,
                   saved_end=original_end, board_query_seconds=board_query_seconds)
         STATE.update(phase='download', batch_start=start, batch_end=end, scanned=0, batch_total=end-start+1,
-                     direction=direction, resumed=resumed)
+                     direction=direction, resumed=resumed, site=site, board=board)
         indices = range(end, start - 1, -1) if direction == 'newest' else range(start, end + 1)
         checkpoints = resume_checkpoints(db, site, board) if resumed else {}
+        open_failures = pending_open_failures(db, site, board) if resumed else set()
+        deferred_open = 0
         checked_until = skip_until = items_since_rest = 0
         for position, idx in enumerate(indices):
             if STOP.is_set():
@@ -743,9 +827,9 @@ def work(config):
                 outcome = status
             elif not aid or wrong_index:
                 reason = '站方回傳的編號與要求不符' if wrong_index else '未取得 AID'
-                record_failure(db, site, board, idx, reason, article=True)
+                record_failure(db, site, board, idx, f'查詢文章：{reason}', article=True)
                 STATE['unresolved'] += 1
-                show_issue(idx, aid, reason + '，可續傳重試')
+                show_issue(idx, aid, reason, notify=True, stage='查詢文章', continues=True)
                 outcome = 'wrong_index' if wrong_index else 'no_aid'
                 details['reason'] = reason
             elif existing and ((backup_mode == 'fill' and existing.get('full_content')) or db.execute(
@@ -765,9 +849,18 @@ def work(config):
                 if backup_mode == 'fill':
                     STATE['reused_local'] = STATE.get('reused_local', 0) + 1
                     outcome = 'reused_local'
+                    if existing.get('manual_ansi'):
+                        details['manual_backup'] = True
                 else:
                     STATE['resumed_verified'] = STATE.get('resumed_verified', 0) + 1
                     outcome = 'verified_earlier_in_batch'
+            elif query_index == idx and (idx, aid) in open_failures:
+                reason = '多次開正文後無法辨識首屏，保留待查供單篇重試'
+                deferred_open += 1
+                STATE['unresolved'] += 1
+                show_issue(idx, aid, reason, notify=True, stage=OPEN_SCREEN_PHASE, continues=True)
+                outcome = 'deferred_open_failure'
+                details['reason'] = reason
             else:
                 if STOP.wait(BEFORE_READ_SECONDS):
                     result = 'stopped'
@@ -789,12 +882,18 @@ def work(config):
 
                 try:
                     outcome, _ = run_station(read_article, retry=retry_article)
-                except (ArticleReadError, ArticleStalled) as exc:
-                    record_failure(db, site, board, idx, str(exc), article=True, aid=aid)
+                except (ArticleReadError, ArticleStalled, BoardNavigationError) as exc:
+                    if isinstance(exc, BoardNavigationError):
+                        if not session.confirm_list(board):
+                            raise
+                        reason = '讀取文章時無法核對終端畫面，已確認回到看板列表'
+                    else:
+                        reason = str(exc)
+                    record_failure(db, site, board, idx, f'讀取正文：{reason}', article=True, aid=aid)
                     STATE['unresolved'] += 1
-                    show_issue(idx, aid, str(exc))
+                    show_issue(idx, aid, reason, notify=True, stage='讀取正文', continues=True)
                     outcome = 'unreadable'
-                    details.update(reason=str(exc), capture=getattr(exc, 'capture_diagnostics',
+                    details.update(reason=reason, capture=getattr(exc, 'capture_diagnostics',
                                                                      STATE.get('ansi_diagnostics')))
                     if isinstance(exc, ArticleStalled):
                         details['stalled_line'] = exc.line
@@ -819,7 +918,7 @@ def work(config):
                 STATE['message'] = '已停止。下次登入同一看板會接回這批。'
                 break
         else:
-            if STATE['unresolved']:
+            if STATE['unresolved'] > deferred_open:
                 result = 'pending'
                 STATE['message'] = '已掃完範圍，仍有文章待查。可登入續傳。'
             else:
@@ -827,7 +926,8 @@ def work(config):
                 stage_started = time.monotonic()
                 with db:
                     db.execute('UPDATE batch_ranges SET completed=1 WHERE site=? AND board=?', (site, board))
-                STATE['message'] = '本次範圍處理完畢。'
+                STATE['message'] = (f'本次範圍處理完畢，{deferred_open} 篇開文待查。可用「單篇測試修正」重試。'
+                                    if deferred_open else '本次範圍處理完畢。')
     except DownloadStopped:
         result = 'stopped'
         STATE['message'] = '已中止，已完成的進度已保存。'
@@ -873,9 +973,21 @@ def work(config):
             }.get(diagnostic.get('screen_kind'),
                   '已登入，但未能辨識看板畫面。請用同一帳號手動確認能否進板，再按登入續傳。')
         STATE['message'] = f'站方限速。{detail}' if result == 'rate_limited' else f'已停止：{name}。{detail}'
+        phase = None
+        if stage in ('query_article', 'read_article') and (idx is not None or aid):
+            article = ' · '.join(part for part in (f'第 {idx} 篇' if idx is not None else '',
+                                                   f'AID {aid}' if aid else '') if part)
+            phase = '查詢文章' if stage == 'query_article' else '讀取正文'
+            diagnostics = getattr(exc, 'capture_diagnostics', {})
+            if stage == 'read_article' and diagnostics.get('open_screen_unrecognized'):
+                phase = OPEN_SCREEN_PHASE
+            STATE['message'] += f'\n{article} · {phase}'
+            if result == 'failed':
+                show_issue(idx, aid, detail, stage=phase)
         if db:
             try:
-                record_failure(db, site, board, idx, name + '：' + detail,
+                reason = f'{phase} · {name}：{detail}' if phase else f'{name}：{detail}'
+                record_failure(db, site, board, idx, reason,
                                article=stage in ('query_article', 'read_article'), aid=aid)
             except sqlite3.Error:
                 STATE['message'] += ' 無法寫入失敗紀錄。'
@@ -971,7 +1083,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(403,'{}')
         try:
             size=int(self.headers.get('Content-Length','0'))
-            if not 0 <= size <= 16384: raise ValueError()
+            limit = 6 * 1024 * 1024 if self.path in ('/repair-preview', '/repair-import') else 16384
+            if not 0 <= size <= limit: raise ValueError()
             data=json.loads(self.rfile.read(size) or b'{}')
             if not isinstance(data, dict):
                 raise ValueError()
@@ -981,6 +1094,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == '/stop':
                 STOP.set()
                 return self.reply(200,'{}')
+            if self.path in ('/repair-targets', '/repair-preview', '/repair-import'):
+                try:
+                    if self.path == '/repair-targets':
+                        aid = data.get('aid', '').strip().removeprefix('#')
+                        if aid and not re.fullmatch(r'[A-Za-z0-9_-]{8}', aid):
+                            raise ValueError('請輸入 8 碼 AID，或留空顯示全部')
+                        result = {'targets': repair_targets(repair_root(data['root']), aid)}
+                    else:
+                        result = repair_article(data, commit=self.path == '/repair-import')
+                    if result is None:
+                        return self.reply(409, json.dumps({'error': '請等目前的備份或重整完成再匯入'}))
+                    return self.reply(200, json.dumps(result, ensure_ascii=False))
+                except ValueError as exc:
+                    return self.reply(400, json.dumps({'error': str(exc)}, ensure_ascii=False))
             if self.path not in ('/start', '/export', '/pending'):
                 return self.reply(404,'{}')
             site, board = data.get('site'), data.get('board', '')
