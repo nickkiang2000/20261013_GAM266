@@ -18,13 +18,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from archive import export_html
 import issue_records
 from board_session import (ArticleStalled, BoardNavigationError, BoardSession, BoardTemporarilyClosed, BridgeNavigationError,
-                           FALLBACK_HEIGHT, LINE_DOWN_INTERVAL, MIN_COMMAND_INTERVAL,
+                           FALLBACK_HEIGHT, LINE_DOWN_INTERVAL, MIN_COMMAND_INTERVAL, PAGE_DOWN_INTERVAL,
                            StationRateLimit, TAIPEI, detect_rate_limit)
 from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limits, save_preferences, save_rate_limits
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.19.3'
+APP_VERSION = 'v2.20.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -224,6 +224,51 @@ def pending_open_failures(db, site, board):
         (site, board, opening_error, opening_error)))
 
 
+def repeated_read_failures(db, site, board, directory):
+    repeated = {identity: OPEN_SCREEN_PHASE for identity in pending_open_failures(db, site, board)}
+    issues = {(index, aid): (first, last) for index, aid, first, last in db.execute(
+        'SELECT idx,aid,first_seen,last_seen FROM article_issues WHERE site=? AND board=? AND attempts>=2',
+        (site, board)) if index is not None and aid}
+    if not issues:
+        return repeated
+    signatures = {}
+    for path in sorted(directory.glob('*.log')):
+        try:
+            with path.open(encoding='utf-8') as log:
+                start = json.loads(next(log, '{}'))
+                if (start.get('site'), start.get('board'), start.get('mode')) not in (
+                        (site, board, 'new'), (site, board, 'resume')):
+                    continue
+                for line in log:
+                    event = json.loads(line)
+                    key = event.get('index'), event.get('aid')
+                    if key not in issues or event.get('event') != 'article' or event.get('stage') != 'read_article':
+                        continue
+                    stamp = datetime.fromisoformat(event['time']).timestamp()
+                    first, last = issues[key]
+                    if not first - 1 <= stamp <= last + 1:
+                        continue
+                    capture = event.get('capture') or {}
+                    visible = (capture.get('numbering') or {}).get('last_range')
+                    mode, error = capture.get('mode'), event.get('error')
+                    if not visible or capture.get('reached_end'):
+                        continue
+                    if error == 'BoardNavigationError' and mode == 'page' and capture.get('page_turns'):
+                        phase = '逐頁翻頁後無法辨識畫面'
+                    elif error == 'ConnectionClosed' and mode == 'line' and capture.get('frames', 0):
+                        phase = '逐行讀取在同一位置中斷'
+                    else:
+                        continue
+                    signatures.setdefault(key, []).append((stamp, path.name, (phase, tuple(visible))))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    for key, attempts in signatures.items():
+        attempts.sort()
+        if len(attempts) >= 2 and attempts[-1][0] >= issues[key][1] - 3 and attempts[-1][2] == attempts[-2][2]:
+            repeated[key] = attempts[-1][2][0]
+    return repeated
+
+
 def confirmed_deleted(api, query, index):
     # The SDK can report DELETED on a timeout with a stale listing. Require the
     # actual selected row, index and explicit BBS deletion marker.
@@ -367,9 +412,10 @@ def repair_article(data, *, commit):
     raw = base64.b64decode(data['file'], validate=True)
     if not 0 < len(raw) <= MAX_ANSI_BYTES:
         raise ValueError('請選擇 4 MB 以下的 ANSI 檔')
-    post = prepare_ansi_article(raw, board)
+    filename = data.get('filename', '')
+    post = prepare_ansi_article(raw, board, site=site, index=index, aid=aid, filename=filename)
     original = post['manual_ansi']['original']
-    identity = json.dumps([str(root), str(folder), site, board, index, aid, original]).encode()
+    identity = json.dumps([str(root), str(folder), site, board, index, aid, filename, original]).encode()
     ticket = hmac.digest(REPAIR_KEY, identity, 'sha256').hex()
     if not commit:
         with closing(sqlite3.connect((folder / 'articles.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
@@ -403,6 +449,7 @@ def publish_archive(db, folder, job=None, *, force=False):
     count = export_html(db, folder, progress=export_progress, force=force, stats=stats,
                         issue_evidence=evidence)
     STATE['html_written'] = stats['written']
+    STATE['html_rendered'] = stats['rendered']
     if job:
         for site, board, index, aid, reason, attempts in db.execute(
                 'SELECT site,board,idx,aid,reason,attempts FROM article_issues ORDER BY site,board,idx,aid'):
@@ -663,7 +710,7 @@ def work(config):
                   all_articles=all_articles, terminal_height=height,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
                   between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
-                  line_down_seconds=LINE_DOWN_INTERVAL,
+                  line_down_seconds=LINE_DOWN_INTERVAL, page_down_seconds=PAGE_DOWN_INTERVAL,
                   items_before_rest=ITEMS_BEFORE_REST, rest_seconds=REST_SECONDS)
         stage = 'login'
         stage_started = time.monotonic()
@@ -755,7 +802,7 @@ def work(config):
                      direction=direction, resumed=resumed, site=site, board=board)
         indices = range(end, start - 1, -1) if direction == 'newest' else range(start, end + 1)
         checkpoints = resume_checkpoints(db, site, board) if resumed else {}
-        open_failures = pending_open_failures(db, site, board) if resumed else set()
+        deferred_failures = repeated_read_failures(db, site, board, job.path.parent) if resumed else {}
         deferred_open = 0
         checked_until = skip_until = items_since_rest = 0
         for position, idx in enumerate(indices):
@@ -854,12 +901,13 @@ def work(config):
                 else:
                     STATE['resumed_verified'] = STATE.get('resumed_verified', 0) + 1
                     outcome = 'verified_earlier_in_batch'
-            elif query_index == idx and (idx, aid) in open_failures:
-                reason = '多次開正文後無法辨識首屏，保留待查供單篇重試'
+            elif query_index == idx and (idx, aid) in deferred_failures:
+                phase = deferred_failures[idx, aid]
+                reason = '多次讀取中斷，保留待查供單篇重試'
                 deferred_open += 1
                 STATE['unresolved'] += 1
-                show_issue(idx, aid, reason, notify=True, stage=OPEN_SCREEN_PHASE, continues=True)
-                outcome = 'deferred_open_failure'
+                show_issue(idx, aid, reason, notify=True, stage=phase, continues=True)
+                outcome = 'deferred_open_failure' if phase == OPEN_SCREEN_PHASE else 'deferred_read_failure'
                 details['reason'] = reason
             else:
                 if STOP.wait(BEFORE_READ_SECONDS):
@@ -884,7 +932,7 @@ def work(config):
                     outcome, _ = run_station(read_article, retry=retry_article)
                 except (ArticleReadError, ArticleStalled, BoardNavigationError) as exc:
                     if isinstance(exc, BoardNavigationError):
-                        if not session.confirm_list(board):
+                        if not session.recover_list_after_read_error(board):
                             raise
                         reason = '讀取文章時無法核對終端畫面，已確認回到看板列表'
                     else:
@@ -926,7 +974,7 @@ def work(config):
                 stage_started = time.monotonic()
                 with db:
                     db.execute('UPDATE batch_ranges SET completed=1 WHERE site=? AND board=?', (site, board))
-                STATE['message'] = (f'本次範圍處理完畢，{deferred_open} 篇開文待查。可用「單篇測試修正」重試。'
+                STATE['message'] = (f'本次範圍處理完畢，{deferred_open} 篇讀取待查。可用「單篇測試修正」重試。'
                                     if deferred_open else '本次範圍處理完畢。')
     except DownloadStopped:
         result = 'stopped'
@@ -1014,7 +1062,7 @@ def work(config):
                     count = publish_archive(db, folder, job=job)
                     if job:
                         job.event('export', seconds=round(time.monotonic() - export_started, 3), html_count=count,
-                                  html_written=STATE['html_written'])
+                                  html_written=STATE['html_written'], article_pages_rendered=STATE['html_rendered'])
                     STATE['message'] = message
                 except Exception as exc:
                     if result == 'done':

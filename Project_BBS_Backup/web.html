@@ -688,7 +688,7 @@ repairPreview.onclick = () => runRepair(async () => {
     let binary = '';
     for (let offset = 0; offset < bytes.length; offset += 32768)
         binary += String.fromCharCode(...bytes.subarray(offset, offset + 32768));
-    const payload = {...target, root: repairSearchRoot, file: btoa(binary)};
+    const payload = {...target, root: repairSearchRoot, file: btoa(binary), filename: file.name};
     const result = await repairRequest('/repair-preview', payload);
     if (revision !== repairRevision) return;
     repairDraft = {...payload, ticket: result.ticket};

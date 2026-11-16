@@ -14,7 +14,8 @@ from websockets.exceptions import ConnectionClosed as SocketClosed
 
 
 MIN_COMMAND_INTERVAL = 1.0
-LINE_DOWN_INTERVAL = 0.5
+LINE_DOWN_INTERVAL = 0.2
+PAGE_DOWN_INTERVAL = 0.2
 END_KEY = '\x1b[4~'
 PAGE_DOWN_KEY = '\x1b[6~'
 FALLBACK_HEIGHT = 24
@@ -135,8 +136,11 @@ class BoardSession:
             self.operations['receive_only_waits'] += 1
         if self.pacing and message:
             article_step = any(t.get_detect_target() == screens.Target.PostEnd for t in targets)
-            interval = (LINE_DOWN_INTERVAL if self.capture_mode == 'line' and message == command.down
-                        and article_step else MIN_COMMAND_INTERVAL)
+            interval = MIN_COMMAND_INTERVAL
+            if article_step and self.capture_mode == 'line' and message == command.down:
+                interval = LINE_DOWN_INTERVAL
+            elif article_step and self.capture_mode == 'page' and message == PAGE_DOWN_KEY:
+                interval = PAGE_DOWN_INTERVAL
             if self.last_sent is not None:
                 remaining = interval - (time.monotonic() - self.last_sent)
                 if remaining > 0:
@@ -168,22 +172,46 @@ class BoardSession:
             raise BoardNavigationError()
         return result
 
-    def _require_list(self):
-        if not _api_util.is_article_list(self.api, self._screen()):
+    def _require_list(self, board=None):
+        screen = self._screen()
+        board = board or self.board
+        if not (_api_util.is_article_list(self.api, screen) or (board and self._matches_board_list(board, screen))):
             raise BoardNavigationError()
         self.view = 'list'
         self.selected = None
 
     def confirm_list(self, board):
         screen = self._screen()
-        heading = '\n'.join(screen.splitlines()[:3])
-        board_label = rf'看板\s*[《〈\[【]\s*{re.escape(board)}\s*[》〉\]】]'
-        if self.board != board or not re.search(board_label, heading, re.I):
+        if not board or self.board != board or not self._matches_board_list(board, screen):
             return False
-        if not _api_util.is_article_list(self.api, screen):
-            return False
-        self._require_list()
+        self.view = 'list'
+        self.selected = None
         return True
+
+    def recover_list_after_read_error(self, board):
+        if self.confirm_list(board):
+            return True
+        if self.check_stop:
+            self.check_stop()
+        try:
+            self.connect_core.send(None, self._list_targets(), screen_timeout=1)
+        except exceptions.ConnectionClosed:
+            return False
+        return self.confirm_list(board)
+
+    def _matches_board_list(self, board, screen):
+        rows = screen.splitlines()
+        if not rows:
+            return False
+        heading = rows[0]
+        board_label = rf'看板\s*[《〈\[【]\s*{re.escape(board)}\s*[》〉\]】]'
+        if not re.search(board_label, heading, re.I) or screens.in_board_setting(screen):
+            return False
+        if _api_util.is_article_list(self.api, screen):
+            return True
+        return (len(rows) >= 3 and bool(re.match(r'^\s*【\s*板主', heading))
+                and '[i]' in rows[1] and '閱讀' in rows[1]
+                and bool(re.search(r'編號\s*日\s*期\s*作\s*者\s*文\s*章\s*標\s*題', rows[2])))
 
     def _enter(self, board):
         if self.board is not None:
@@ -192,10 +220,11 @@ class BoardSession:
             return
         self.pacing = True
         _api_util.goto_board(self.api, board)
-        if not _api_util.is_article_list(self.api, self._screen()):
+        screen = self._screen()
+        if not (_api_util.is_article_list(self.api, screen) or self._matches_board_list(board, screen)):
             # The SDK may recognize the board header before the list redraw finishes.
             self._checked_send(None, self._list_targets())
-        self._require_list()
+        self._require_list(board)
         self.board = board
 
     def _return_to_list(self):

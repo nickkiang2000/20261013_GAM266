@@ -264,10 +264,12 @@ class StorageTests(unittest.TestCase):
                 mtimes = {p: p.stat().st_mtime_ns for p in folder.rglob('*.html')}
                 app.export_html(db, folder, stats=stats)
                 self.assertEqual(stats['written'], 0)
+                self.assertEqual(stats['rendered'], 0)
                 self.assertEqual({p: p.stat().st_mtime_ns for p in mtimes}, mtimes)
                 save(2)
                 self.assertEqual(app.export_html(db, folder, stats=stats), 4)
                 self.assertEqual(stats['written'], 3)
+                self.assertEqual(stats['rendered'], 3)
                 missing = next((folder / 'articles').glob('*.html'))
                 missing.unlink()
                 app.export_html(db, folder, stats=stats)
@@ -740,7 +742,7 @@ class StorageTests(unittest.TestCase):
             ])
 
             links = dict((int(number), path) for path, number in re.findall(
-                r'href="(articles/[^\"]+)"><span[^>]*>[^<]*</span>Article (\d+)</a>', index_page))
+                r'href="(articles/[^\"]+)"[^>]*><span[^>]*>[^<]*</span>Article (\d+)</a>', index_page))
             boundary = (folder / links[21]).read_text(encoding='utf-8')
             self.assertIn(f'id="previous" href="{Path(links[20]).name}"', boundary)
             self.assertIn(f'id="next" href="{Path(links[23]).name}"', boundary)
@@ -1097,15 +1099,16 @@ class StorageTests(unittest.TestCase):
         article = [connect_core.TargetUnit(screens.Target.PostEnd)]
         board = [connect_core.TargetUnit(screens.Target.InBoard)]
         for mode, key, targets, wait in (
-                ('line', command.down, article, .25), ('line', command.down, board, .75),
-                ('page', PAGE_DOWN_KEY, article, .75), ('line', command.enter * 2, article, .75)):
+                ('line', command.down, article, .1), ('line', command.down, board, .9),
+                ('page', PAGE_DOWN_KEY, article, .1), ('line', command.enter * 2, article, .9)):
             with self.subTest(mode=mode, key=key, targets=targets):
                 session.capture_mode = mode
                 session.last_sent = 10.0
-                with patch('board_session.time.monotonic', return_value=10.25), \
+                with patch('board_session.time.monotonic', return_value=10.1), \
                         patch('board_session.time.sleep') as sleep:
                     session._send(key, targets)
-                sleep.assert_called_once_with(wait)
+                sleep.assert_called_once()
+                self.assertAlmostEqual(sleep.call_args.args[0], wait)
 
 class BoardSessionTests(unittest.TestCase):
     def test_page_capture_checks_continuity_and_stops_at_captured_end(self):

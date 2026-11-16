@@ -24,10 +24,12 @@ def parse_ansi_article(data):
     header = plain.splitlines()
     if len(header) < 2:
         raise ValueError('ANSI 檔缺少文章標頭')
-    author = re.match(r'^\s*作者\s*[:：]?\s*(.*?)\s+看板\s*[:：]?\s*([^\s]+)', header[0])
+    author = re.match(r'^\s*作者\s*[:：]?\s*(\S.*)', header[0])
     title = re.match(r'^\s*標題\s*[:：]?\s*(\S.*)', header[1])
     if not author or not title:
-        raise ValueError('無法從 ANSI 檔開頭確認作者、標題和看板')
+        raise ValueError('無法從 ANSI 檔開頭確認作者和標題')
+    author_text = author[1].strip()
+    board = re.search(r'\s+看板\s*[:：]?\s*([A-Za-z0-9_-]+)\s*$', author_text)
 
     palette = ColorScreen(24)
     lines = []
@@ -45,10 +47,11 @@ def parse_ansi_article(data):
         lines.append(''.join(value for value, _ in runs))
         if any(style for _, style in runs):
             colors[str(index)] = runs
-    post = {'author': author[1], 'title': title[1].strip(), 'full_content': '\n'.join(lines),
+    post = {'author': author_text[:board.start()].rstrip() if board else author_text,
+            'title': title[1].strip(), 'full_content': '\n'.join(lines),
             'ansi_lines': colors, 'pass_format_check': True, 'terminal_verified': True,
             'manual_ansi': {'encoding': encoding, 'decode_replacements': text.count('\ufffd')}}
-    return author[2], post
+    return board[1] if board else None, post
 
 
 def check_ansi_target(db, site, board, index, aid, original):
@@ -69,10 +72,17 @@ def check_ansi_target(db, site, board, index, aid, original):
     return same_source
 
 
-def prepare_ansi_article(data, board):
+def prepare_ansi_article(data, board, *, site, index, aid, filename=''):
     file_board, post = parse_ansi_article(data)
-    if file_board.casefold() != board.casefold():
+    if file_board and file_board.casefold() != board.casefold():
         raise ValueError('ANSI 檔的看板與指定看板不同')
+    match = re.fullmatch(r'(PTT2?)_([A-Za-z0-9_-]+)_(\d+)_([A-Za-z0-9_-]{8})\.ans', filename, re.I)
+    if match and (match[1].upper(), match[2].casefold(), int(match[3]), match[4]) != (
+            site, board.casefold(), index, aid):
+        raise ValueError('ANSI 檔名的站台、看板、篇號或 AID 與所選紀錄不同')
+    if not file_board and not match:
+        raise ValueError(f'ANSI 標頭缺少看板。請核對來源，將檔名命名為 {site}_{board}_{index}_{aid}.ans 後再預覽')
+    post['manual_ansi']['identity_from_filename'] = not file_board
     post['manual_ansi']['original'] = f'manual-ansi/{sha256(data).hexdigest()}.ans'
     return post
 
@@ -104,7 +114,7 @@ def import_ansi_article(source, folder, site, board, index, aid):
     if not (folder / 'articles.sqlite3').is_file():
         raise ValueError('找不到既有的備份資料庫')
     data = source.read_bytes()
-    post = prepare_ansi_article(data, board)
+    post = prepare_ansi_article(data, board, site=site, index=index, aid=aid, filename=source.name)
     with closing(app.database(folder)) as db:
         original = store_ansi_article(db, data, post, folder, site, board, index, aid,
                                       save_article=app.save_article)

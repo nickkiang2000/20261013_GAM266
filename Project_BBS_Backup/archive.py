@@ -39,7 +39,7 @@ OFFLINE_README = Path(__file__).with_name('offline_readme.html')
 OFFLINE_SEARCH = Path(__file__).with_name('offline_search.js')
 URL_PATTERN = re.compile(r"""https?://[^\s<>"'\x00-\x1f，。！？；：、（）【】《》「」『』]+""", re.I)
 
-INDEX_KEYS = '''
+INDEX_KEYS = r'''
 const boards = Array.from(document.querySelectorAll('.board'), section => ({
     pages: Array.from(section.querySelectorAll('.entries')),
     entries: Array.from(section.querySelectorAll('.entries a')),
@@ -105,11 +105,42 @@ function restoreSelection() {
 }
 restoreSelection();
 window.addEventListener('hashchange', restoreSelection);
+let numberInput = '';
+const numberStatus = document.getElementById('number-jump');
 
 document.addEventListener('keydown', event => {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey ||
-        event.isComposing || !activeBoard || document.getElementById('search-dialog').open) return;
+        event.isComposing || !activeBoard || document.getElementById('search-dialog').open ||
+        event.target.closest?.('input, textarea, select, [contenteditable="true"]')) return;
     const board = activeBoard;
+    if (/^\d$/.test(event.key)) {
+        event.preventDefault();
+        numberInput = (numberInput + event.key).slice(0, 10);
+        numberStatus.textContent = `篇號 ${numberInput} · 按 Enter 定位`;
+        return;
+    }
+    if (numberInput) {
+        if (event.key === 'Backspace') {
+            event.preventDefault();
+            numberInput = numberInput.slice(0, -1);
+            numberStatus.textContent = numberInput ? `篇號 ${numberInput} · 按 Enter 定位` : '';
+            return;
+        }
+        const number = Number(numberInput);
+        numberInput = '';
+        numberStatus.textContent = '';
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            const position = board.entries.findIndex(entry => entry.dataset.sourceIndex === String(number));
+            if (position >= 0) select(board, position);
+            else numberStatus.textContent = `離線索引沒有第 ${number} 篇`;
+            return;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            return;
+        }
+    }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault();
         const step = event.key === 'ArrowDown' ? 1 : -1;
@@ -219,6 +250,14 @@ def write_page(path, content, *, force=False):
     temp.write_bytes(data)
     temp.replace(path)
     return True
+
+
+def file_stamp(path):
+    try:
+        stat = path.stat()
+        return stat.st_size, stat.st_mtime_ns
+    except FileNotFoundError:
+        return None
 
 
 def linkified_line(line, runs=()):
@@ -359,6 +398,19 @@ def color_article(site, board, title, post, body, nav):
 def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
+    db.execute('''CREATE TABLE IF NOT EXISTS html_render_cache(
+        path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, size INTEGER NOT NULL, modified INTEGER NOT NULL)''')
+    cached = {path: (digest, (size, modified)) for path, digest, size, modified in db.execute(
+        'SELECT path,fingerprint,size,modified FROM html_render_cache')}
+    cache_updates = {}
+    renderer = sha256(Path(__file__).read_bytes() + Path(__file__).with_name('ansi_style.py').read_bytes()).hexdigest()
+
+    def unchanged(path, fingerprint):
+        return not force and cached.get(path) == (fingerprint, file_stamp(folder / path))
+
+    def remember(path, fingerprint):
+        cache_updates[path] = (fingerprint, *file_stamp(folder / path))
+
     rows = db.execute('''SELECT * FROM (
                             SELECT site,board,aid,title,body,data,source_index,fetched FROM articles
                             UNION ALL
@@ -370,11 +422,13 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
     total = db.execute('SELECT count(*) FROM articles').fetchone()[0]
     count = 0
     written = 0
+    rendered = 0
     if progress:
         progress(count, total)
     sections = []
     board_summaries = []
     search_boards = {}
+    search_fingerprint = sha256(renderer.encode())
     for (site, board), group in groupby(rows, key=lambda row: row[:2]):
         items = list(group)
         keys = [sha256(json.dumps(row[:3]).encode()).hexdigest() for row in items]
@@ -403,25 +457,14 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
             if post.get('manual_ansi'):
                 label += '人工備份 · '
             if data is not None:
-                comments = post.get('comments')
-                extra_comments = []
-                if isinstance(comments, list):
-                    for comment in comments:
-                        if isinstance(comment, dict):
-                            comment = comment.get('content')
-                        if isinstance(comment, str) and comment and comment not in (body or ''):
-                            extra_comments.append(comment)
-                search_rows.append({
-                    'key': key, 'index': source_index, 'aid': aid, 'title': title,
-                    'author': str(author), 'subject': subject_key(title),
-                    'body': '\n'.join([(body or '').rstrip(), *extra_comments]).replace('\x08', ''),
-                })
+                search_rows.append((key, source_index, aid, title, str(author), body, post.get('comments')))
             label += f'{author} · ' if author else ''
             neighbors = tuple(keys[target] if target is not None else None
                               for target in subject_links.get(i, (None, None)))
             subject_attrs = ''.join(f' data-subject-{direction}="a-{neighbor}"'
                                     for direction, neighbor in zip(('older', 'newer'), neighbors) if neighbor)
-            entries.append(f'<li><a id="a-{key}" href="articles/{key}.html"{subject_attrs}>'
+            index_attr = f' data-source-index="{source_index}"' if type(source_index) is int and source_index > 0 else ''
+            entries.append(f'<li><a id="a-{key}" href="articles/{key}.html"{index_attr}{subject_attrs}>'
                            f'<span class="meta">{escape(label)}</span>{escape(title)}</a></li>')
             links = [f'<a id="back" href="../index.html#a-{key}">返回列表</a>']
             if i > 0:
@@ -434,6 +477,17 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 if neighbor:
                     links.append(f'<a id="{link_id}" href="../index.html#a-{neighbor}" hidden>同主題</a>')
             nav = '<nav>' + ''.join(links) + '</nav>'
+            relative_path = f'articles/{key}.html'
+            fingerprint = sha256(json.dumps([renderer, title, body, data, nav], ensure_ascii=False).encode()).hexdigest()
+            if data is not None:
+                search_fingerprint.update(json.dumps([key, source_index, fingerprint]).encode())
+            if unchanged(relative_path, fingerprint):
+                if data is not None:
+                    count += 1
+                    if progress:
+                        progress(count, total)
+                continue
+            rendered += 1
             colored = bool(post.get('ansi_lines') or post.get('headerless') or post.get('manual_ansi'))
             try:
                 if data is None:
@@ -453,8 +507,10 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 with db:
                     issue_records.record(db, site, board, source_index, aid,
                                          '原格式呈現失敗，已改用純文字 HTML：' + render_error, kind='html')
-            changed = write_page(articles / f'{key}.html', page(title, article, ARTICLE_KEYS, ansi=colored),
+            changed = write_page(folder / relative_path, page(title, article, ARTICLE_KEYS, ansi=colored),
                                  force=force)
+            if not render_error:
+                remember(relative_path, fingerprint)
             if data is not None and not render_error:
                 with db:
                     db.execute('DELETE FROM article_issues WHERE site=? AND board=? AND issue_key=?',
@@ -498,16 +554,39 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
              '<h1>BBS時光庫</h1><span>› <span id="active-board"></span></span>'
              '<button id="open-search" type="button">全板搜尋 ?</button>'
              '<a href="ReadMe.html">操作說明與紀錄</a></header>'
+             '<output id="number-jump" class="meta" aria-live="polite"></output>'
              + (''.join(sections) if sections else '<p>尚無文章</p>') + SEARCH_DIALOG)
     readme = OFFLINE_README.read_text(encoding='utf-8')
     boards = '<ul>' + ''.join(board_summaries) + '</ul>' if board_summaries else '<p>目前尚無離線文章。</p>'
     readme = readme.replace('<!-- BOARD_SUMMARIES -->', boards).replace(
         '<!-- ISSUE_RECORDS -->', issue_report(db, issue_evidence))
     write_page(folder / 'ReadMe.html', readme, force=force)
-    search_data = json.dumps(search_boards, ensure_ascii=False, separators=(',', ':'))
-    write_page(folder / 'search-data.js', 'window.bbsSearchData = ' + search_data + ';\n', force=force)
+    search_digest = search_fingerprint.hexdigest()
+    if not unchanged('search-data.js', search_digest):
+        search_data = {board: [search_entry(*row) for row in rows] for board, rows in search_boards.items()}
+        packed = json.dumps(search_data, ensure_ascii=False, separators=(',', ':'))
+        write_page(folder / 'search-data.js', 'window.bbsSearchData = ' + packed + ';\n', force=force)
+        remember('search-data.js', search_digest)
     index_keys = INDEX_KEYS + '\n' + OFFLINE_SEARCH.read_text(encoding='utf-8')
     write_page(folder / 'index.html', page('BBS時光庫', index, index_keys), force=force)
+    if cache_updates:
+        with db:
+            db.executemany('INSERT OR REPLACE INTO html_render_cache VALUES(?,?,?,?)',
+                           ((path, *values) for path, values in cache_updates.items()))
     if stats is not None:
         stats['written'] = written
+        stats['rendered'] = rendered
     return count
+
+
+def search_entry(key, index, aid, title, author, body, comments):
+    body = body or ''
+    extra_comments = []
+    if isinstance(comments, list):
+        for comment in comments:
+            if isinstance(comment, dict):
+                comment = comment.get('content')
+            if isinstance(comment, str) and comment and comment not in body:
+                extra_comments.append(comment)
+    return {'key': key, 'index': index, 'aid': aid, 'title': title, 'author': author,
+            'subject': subject_key(title), 'body': '\n'.join([body.rstrip(), *extra_comments]).replace('\x08', '')}
