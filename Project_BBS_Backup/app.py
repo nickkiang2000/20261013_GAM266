@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.20.0'
+APP_VERSION = 'v2.23.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -95,6 +95,8 @@ def database(folder):
                 db.execute("ALTER TABLE batch_ranges ADD COLUMN capture_mode TEXT NOT NULL DEFAULT 'line'")
             if 'backup_mode' not in batch_columns:
                 db.execute("ALTER TABLE batch_ranges ADD COLUMN backup_mode TEXT NOT NULL DEFAULT 'recheck'")
+            if 'selected_indices' not in batch_columns:
+                db.execute('ALTER TABLE batch_ranges ADD COLUMN selected_indices TEXT')
             db.execute('''CREATE TABLE IF NOT EXISTS batch_verified(
                           site TEXT, board TEXT, aid TEXT, PRIMARY KEY(site,board,aid))''')
             db.execute('''CREATE TABLE IF NOT EXISTS batch_line_retries(
@@ -167,14 +169,36 @@ def find_pending_range(folder, site, board, *, with_progress=False):
         backup = 'backup_mode' if 'backup_mode' in columns else "'recheck'"
         capture_mode, backup_mode = db.execute(f'SELECT {capture},{backup} FROM batch_ranges WHERE site=? AND board=?',
                                               (site, board)).fetchone()
-        return {'first': first, 'last': last, 'direction': direction, 'reusable': reusable,
-                'capture_mode': capture_mode, 'backup_mode': backup_mode}
+        result = {'first': first, 'last': last, 'direction': direction, 'reusable': reusable,
+                  'capture_mode': capture_mode, 'backup_mode': backup_mode}
+        if 'selected_indices' in columns:
+            selected, = db.execute('SELECT selected_indices FROM batch_ranges WHERE site=? AND board=?',
+                                   (site, board)).fetchone()
+            if selected:
+                result['selected_indices'] = json.loads(selected)
+        return result
 
 
 def stored_article(db, site, board, aid):
     row = db.execute('SELECT data FROM articles WHERE site=? AND board=? AND aid=?',
                      (site, board, aid)).fetchone()
     return json.loads(row[0]) if row else None
+
+
+START_INPUT_ERROR = '請輸入一個編號，或用逗號分隔多個正整數。0 只能單獨使用。'
+
+
+def parse_start_input(value):
+    if not isinstance(value, str) and type(value) is not int:
+        raise ValueError(START_INPUT_ERROR)
+    normalized = str(value).translate(str.maketrans('０１２３４５６７８９，', '0123456789,'))
+    parts = [part.strip() for part in normalized.split(',')]
+    if len(parts) > 10000 or any(not re.fullmatch(r'[0-9]{1,10}', part) for part in parts):
+        raise ValueError(START_INPUT_ERROR)
+    numbers = [int(part) for part in parts]
+    if max(numbers) > 2147483647 or (len(numbers) > 1 and 0 in numbers):
+        raise ValueError(START_INPUT_ERROR)
+    return numbers[0] if len(numbers) == 1 else list(dict.fromkeys(numbers))
 
 
 def batch_bounds(newest, requested_start, count, direction):
@@ -526,6 +550,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             raise DownloadStopped() from exc
         STATE['message'] = f'編號 {source_index} 逐頁未通過，正在改用逐行重讀'
         retry_started = time.monotonic()
+        api.wrapped_line_retry = bool(failed_page['capture'].get('numbering', {}).get('wrap_marker_seen'))
         try:
             api.capture_mode = 'line'
             current = api.get_post(board, index=source_index, query=True)
@@ -539,6 +564,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             raise
         finally:
             api.capture_mode = 'page'
+            api.wrapped_line_retry = False
         failed_page.update(line_result='read', line_seconds=round(time.monotonic() - retry_started, 3))
         post.setdefault('ansi_diagnostics', {})['page_fallback'] = failed_page
     except Exception as exc:
@@ -584,7 +610,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     STATE['ansi_samples'] = STATE.get('ansi_samples', 0) + 1
     STATE['ansi_colored'] = STATE.get('ansi_colored', 0) + bool(post.get('ansi_lines'))
     STATE['ansi_coverage'] = post.get('ansi_coverage', {})
-    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments')
+    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments', 'link_targets')
     unchanged = verified and existing and complete_capture(existing) and all(
         json.dumps(post.get(key), sort_keys=True) == json.dumps(existing.get(key), sort_keys=True)
         for key in fields)
@@ -700,6 +726,7 @@ def work(config):
         backup_mode = config.get('backup_mode', 'recheck')
         height = FALLBACK_HEIGHT if config.get('aid') and config.get('short_terminal') else 100
         all_articles = mode == 'new' and config.get('all_articles', False)
+        selected_indices = config.get('selected_indices')
         job.event('start', version=APP_VERSION, site=site, board=board, capture_version=CAPTURE_VERSION,
                   mode=mode, requested_aid=config.get('aid') or None,
                   requested_start=config.get('start') if mode == 'new' else None,
@@ -707,7 +734,7 @@ def work(config):
                   requested_direction=config.get('direction', 'newest') if mode == 'new' else None,
                   requested_capture_mode=capture_mode,
                   backup_mode=backup_mode if mode == 'new' else None,
-                  all_articles=all_articles, terminal_height=height,
+                  all_articles=all_articles, selected_indices=selected_indices, terminal_height=height,
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
                   between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
                   line_down_seconds=LINE_DOWN_INTERVAL, page_down_seconds=PAGE_DOWN_INTERVAL,
@@ -761,19 +788,33 @@ def work(config):
         stage_started = time.monotonic()
         newest = run_station(lambda: session.get_newest_index(PyPtt.NewIndex.BOARD, board=board))
         board_query_seconds = round(time.monotonic() - stage_started, 3)
-        pending = db.execute('''SELECT first_index,last_index,direction,backup_mode FROM batch_ranges
+        pending = db.execute('''SELECT first_index,last_index,direction,backup_mode,selected_indices FROM batch_ranges
                                 WHERE site=? AND board=? AND completed=0''', (site, board)).fetchone()
         resumed = pending is not None and not config.get('new_batch')
         if resumed:
-            start, original_end, direction, backup_mode = pending
+            start, original_end, direction, backup_mode, selected = pending
+            selected_indices = json.loads(selected) if selected else None
             end = min(newest, original_end)
             expected_count = original_end - start + 1
         else:
             direction = config.get('direction', 'newest')
-            expected_count = newest if all_articles else config['count']
-            bounds = (1, newest) if all_articles else batch_bounds(newest, config['start'], expected_count, direction)
-            start, end = bounds if bounds is not None else (1, 0)
+            if selected_indices:
+                start, end = min(selected_indices), max(selected_indices)
+                expected_count = len(selected_indices)
+            else:
+                expected_count = newest if all_articles else config['count']
+                bounds = (1, newest) if all_articles else batch_bounds(newest, config['start'], expected_count, direction)
+                start, end = bounds if bounds is not None else (1, 0)
             original_end = end
+        if selected_indices:
+            invalid = [index for index in selected_indices if index > newest]
+            if invalid:
+                result = 'pending' if resumed else 'failed'
+                job.event('range', newest=newest, resumed=resumed, reason='selected_above_newest', invalid=invalid)
+                shown = '、'.join(map(str, invalid[:5])) + ('等' if len(invalid) > 5 else '')
+                STATE['message'] = f'指定編號 {shown} 超過站上最新編號 {newest}。請修正清單後再開始。'
+                return
+            expected_count = len(selected_indices)
         if start > end:
             result = 'pending' if resumed else 'failed'
             job.event('range', newest=newest, direction=direction, resumed=resumed,
@@ -788,19 +829,19 @@ def work(config):
                 db.execute('DELETE FROM batch_verified WHERE site=? AND board=?', (site, board))
                 db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=?', (site, board))
             db.execute('''INSERT OR REPLACE INTO batch_ranges
-                          (site,board,first_index,last_index,direction,capture_mode,backup_mode)
-                          VALUES(?,?,?,?,?,?,?)''', (site, board, start, original_end, direction,
-                                                    session.capture_mode, backup_mode))
-        planned_count = end - start + 1
+                          (site,board,first_index,last_index,direction,capture_mode,backup_mode,selected_indices)
+                          VALUES(?,?,?,?,?,?,?,?)''', (site, board, start, original_end, direction,
+                                                      session.capture_mode, backup_mode,
+                                                      json.dumps(selected_indices) if selected_indices else None))
+        indices = selected_indices or (range(end, start - 1, -1) if direction == 'newest' else range(start, end + 1))
+        planned_count = len(indices)
         job.event('range', start=start, end=end, direction=direction, resumed=resumed,
                   capture_mode=session.capture_mode, backup_mode=backup_mode,
-                  newest=newest, first_scan=end if direction == 'newest' else start,
-                  last_scan=start if direction == 'newest' else end, planned_count=planned_count,
+                  newest=newest, first_scan=indices[0], last_scan=indices[-1], planned_count=planned_count,
                   expected_count=expected_count, clipped_count=expected_count - planned_count,
-                  saved_end=original_end, board_query_seconds=board_query_seconds)
-        STATE.update(phase='download', batch_start=start, batch_end=end, scanned=0, batch_total=end-start+1,
-                     direction=direction, resumed=resumed, site=site, board=board)
-        indices = range(end, start - 1, -1) if direction == 'newest' else range(start, end + 1)
+                  saved_end=original_end, board_query_seconds=board_query_seconds, selected_indices=selected_indices)
+        STATE.update(phase='download', batch_start=start, batch_end=end, scanned=0, batch_total=planned_count,
+                     direction=direction, resumed=resumed, site=site, board=board, selected_indices=selected_indices)
         checkpoints = resume_checkpoints(db, site, board) if resumed else {}
         deferred_failures = repeated_read_failures(db, site, board, job.path.parent) if resumed else {}
         deferred_open = 0
@@ -828,7 +869,8 @@ def work(config):
                     break
             if position >= checked_until and idx in checkpoints:
                 checked_until = position + 1
-                while checked_until < len(indices) and indices[checked_until] in checkpoints:
+                while (not selected_indices and checked_until < len(indices)
+                       and indices[checked_until] in checkpoints):
                     checked_until += 1
                 anchor_index = indices[checked_until - 1]
                 anchor_aid, status = checkpoints[anchor_index]
@@ -853,7 +895,8 @@ def work(config):
                     STATE['unavailable'] = STATE.get('unavailable', 0) + skipped
                     skip_until = checked_until
                     continue
-            STATE['message'] = f'正在讀取編號 {idx}（{DIRECTIONS[direction]} · {CAPTURE_MODES[session.capture_mode]}）'
+            order_label = '依輸入順序' if selected_indices else DIRECTIONS[direction]
+            STATE['message'] = f'正在讀取編號 {idx}（{order_label} · {CAPTURE_MODES[session.capture_mode]}）'
             article_started = stage_started = time.monotonic()
             query_seconds = None
             body_seconds = None
@@ -934,6 +977,8 @@ def work(config):
                     if isinstance(exc, BoardNavigationError):
                         if not session.recover_list_after_read_error(board):
                             raise
+                        if session.retry_height is not None:
+                            session._restore_height()
                         reason = '讀取文章時無法核對終端畫面，已確認回到看板列表'
                     else:
                         reason = str(exc)
@@ -1191,6 +1236,7 @@ class Handler(BaseHTTPRequestHandler):
                     data['capture_mode'] = capture_mode
                     folder = test_destination(site, board, aid, capture_mode, data['short_terminal'])
                 data['folder'] = str(folder)
+                data.pop('selected_indices', None)
                 data['all_articles'] = mode == 'new' and data.get('all_articles') == 'on'
                 if mode == 'new':
                     data['backup_mode'] = data.get('backup_mode', 'fill')
@@ -1202,10 +1248,18 @@ class Handler(BaseHTTPRequestHandler):
                     if data['all_articles']:
                         data['count'] = data['start'] = None
                     else:
-                        data['count'] = int(data['count'])
-                        data['start'] = int(data['start'])
-                        if not 1 <= data['count'] <= 10000 or data['start'] < 0:
-                            raise ValueError()
+                        try:
+                            start = parse_start_input(data.get('start'))
+                        except ValueError as exc:
+                            return self.reply(400, json.dumps({'error': str(exc)}, ensure_ascii=False))
+                        if isinstance(start, list):
+                            data.update(start=None, count=None, direction='newest', selected_indices=start)
+                        else:
+                            data.pop('selected_indices', None)
+                            data['start'] = start
+                            data['count'] = int(data['count'])
+                            if not 1 <= data['count'] <= 10000:
+                                raise ValueError()
                 if not all(isinstance(data[key], str) and data[key] for key in ('user', 'password')):
                     raise ValueError()
                 target, args = work, (data,)
@@ -1223,7 +1277,7 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.update(running=True, message='正在啟動…', saved=0, skipped=0,
                              unresolved=0, timed_samples=0, seconds_per_article=None, elapsed=0,
                              ansi_samples=0, ansi_colored=0, ansi_coverage={}, ansi_review=0, resumed=False, scanned=0,
-                             batch_total=0, batch_start=None, batch_end=None, direction=None, phase='prepare',
+                             batch_total=0, batch_start=None, batch_end=None, direction=None, phase='prepare', selected_indices=None,
                              exported=0, export_total=0, index_path=None, index_url=None, log_path=None,
                              resumed_verified=0, local_count=None, updated=0, issues=[], folder=str(folder),
                              unavailable=0, kept_previous=0, reused_local=0, html_written=0,

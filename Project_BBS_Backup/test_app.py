@@ -381,6 +381,44 @@ class StorageTests(unittest.TestCase):
             with self.subTest(newest=newest, start=start, count=count, direction=direction):
                 self.assertEqual(app.batch_bounds(newest, start, count, direction), expected)
 
+    def test_start_input_accepts_single_index_or_comma_separated_indices(self):
+        self.assertEqual(app.parse_start_input('０'), 0)
+        self.assertEqual(app.parse_start_input(' 2509 '), 2509)
+        self.assertEqual(app.parse_start_input('3603，2509, ３４５６,3603'), [3603, 2509, 3456])
+        for value in ('', '2509 3456', '2509;3456', '2509,,3456', '2509,', '0,3456',
+                      '1.5', '1e3', '-1', '2147483648', True, [2509, 3456]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                app.parse_start_input(value)
+
+    def test_selected_indices_resume_in_input_order_without_scanning_intervening_posts(self):
+        import PyPtt
+
+        with tempfile.TemporaryDirectory() as d, patch.object(PyPtt, 'API') as factory, \
+                patch.object(app, 'STATE', dict(saved=0, skipped=0, unresolved=0, timed_samples=0)), \
+                patch('ansi_capture.read_colored_post') as capture:
+            folder = Path(d)
+            api = factory.return_value
+            api.get_newest_index.return_value = 4000
+            api.get_post.side_effect = lambda _board, index, query: {'index': index, 'aid': f'aid{index:05}'}
+            capture.side_effect = lambda _api, _board, aid: {
+                'aid': aid, 'title': '備份', 'full_content': '正文', 'pass_format_check': True,
+                'ansi_coverage': {'matched': 1, 'total': 1, 'colored': 0},
+            }
+            credentials = dict(site='PTT', board='Test', folder=d, user='test', password='dummy')
+            with patch.object(app.STOP, 'wait', side_effect=[False, True]):
+                app.work(dict(credentials, mode='new', selected_indices=[3603, 2509, 3456]))
+            self.assertEqual(app.find_pending_range(folder, 'PTT', 'Test', with_progress=True)['selected_indices'],
+                             [3603, 2509, 3456])
+            self.assertEqual(app.STATE['batch_total'], 3)
+            with patch.object(app.STOP, 'wait', return_value=False):
+                app.work(dict(credentials, mode='resume'))
+            self.assertEqual([call.kwargs['index'] for call in api.get_post.call_args_list],
+                             [3603, 3603, 2509, 3456])
+            self.assertEqual([call.args[2] for call in capture.call_args_list],
+                             ['aid03603', 'aid02509', 'aid03456'])
+            self.assertEqual(app.STATE['result'], 'done')
+            self.assertIsNone(app.find_pending_range(folder, 'PTT', 'Test'))
+
     def test_all_articles_uses_live_board_end_above_manual_count_limit(self):
         import PyPtt
 
@@ -594,6 +632,343 @@ class StorageTests(unittest.TestCase):
         article.observe(['different', 'three'], '瀏覽 第 2/3 頁 目前顯示: 第 2~3 行', at_end=False, styled=None)
         self.assertIsNone(article.assemble())
         self.assertEqual(article.diagnostics()['first_conflict_line'], 2)
+
+    def test_osc8_chunks_preserve_screen_text_ansi_and_full_html_target(self):
+        from ansi_capture import ColorScreen
+        from archive import article_body
+        from PyPtt import screens
+        from terminal_links import TerminalLinks
+
+        target = (b'http://www.taiwannews.com.tw/etn/news_content.php'
+                  b'?id=823527&lang=tc_news&cate_img=257.jpg&cate_rss=news_PD')
+        label = target.split(b'&cate_img=')[0]
+        start = b'\x1b[Hsource\r\n\x1b[33m'
+        tail = b'\x1b[m\r\nfollowing text'
+        expected = start + label + tail
+        for terminator in (b'\x07', b'\x1b\\'):
+            wire = start + b'\x1b]8;;' + target + terminator + label + b'\x1b]8;;' + terminator + tail
+            for size in (1, 2, 5, len(wire)):
+                with self.subTest(terminator=terminator, chunk_size=size):
+                    decoder = TerminalLinks()
+                    result = b''.join(decoder.feed(wire[i:i + size]) for i in range(0, len(wire), size))
+                    self.assertEqual(result, expected)
+                    frame = ColorScreen(24).replay(result, 'ascii')
+                    self.assertEqual('\n'.join(frame), screens.VT100Parser(expected, 'ascii').screen)
+                    self.assertEqual(frame[1].runs(), [(label.decode(), ('f3',))])
+                    self.assertEqual(frame[2], 'following text')
+                    aliases = {name: next(iter(values)) for name, values in decoder.links.items()}
+                    html = article_body(str(frame[1]), {'0': frame[1].runs()}, targets=aliases)
+                    self.assertIn('href="' + target.decode().replace('&', '&amp;') + '"', html)
+                    self.assertIn(label.decode().replace('&', '&amp;'), html)
+
+    def test_first_wrapped_page_retains_extra_row_only_after_verified_overlap(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        plain = [CapturedLine(f'原文第 {i} 行', ()) for i in range(1, 8)]
+        prefix = '甲' * 39
+        folded = CapturedLine(prefix + '\\', ((prefix, ()), ('\\', ('f7', 'hl'))))
+        continuation = CapturedLine('續行', ())
+        for extra in (CapturedLine('', ()), plain[4]):
+            with self.subTest(extra=extra):
+                article = NumberedArticle(page_mode=True, allow_wrapping=True)
+                first = [plain[0], folded, continuation, plain[2], plain[3], extra]
+                second = [plain[2], plain[3], extra, plain[5], plain[6]]
+                article.observe(first, '瀏覽 第 1/2 頁 (49%) 第 1~4 行', at_end=False, styled=first)
+                self.assertIsNone(article.assemble())
+                article.observe(second, '瀏覽 第 2/2 頁 (100%) 第 2~6 行', at_end=True, styled=second)
+                self.assertEqual(article.page_line_offset, 1)
+                self.assertEqual(article.assemble().split('\n'),
+                                 [plain[0], prefix + continuation, plain[2], plain[3], extra, *plain[5:]])
+
+    def test_after_unknown_page_only_exits_from_confirmed_article(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import BoardNavigationError, BoardSession, ArticleStalled, PAGE_DOWN_KEY
+
+        for confirmed in (False, True):
+            with self.subTest(confirmed=confirmed):
+                numbering = NumberedArticle(page_mode=True)
+                session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(
+                    _decode_screen=Mock(), send=Mock()), cursor='>'))
+
+                def send(key):
+                    if key == PAGE_DOWN_KEY:
+                        raise BoardNavigationError()
+                    rows = ['首行', '正文']
+                    numbering.observe(rows, '瀏覽 第 1/2 頁 (49%) 第 1~2 行', at_end=False, styled=None)
+                    session.view = 'article'
+                    return 1
+
+                with patch.object(session, '_send_article_key', side_effect=send), \
+                        patch.object(session, '_confirm_article_screen', return_value=confirmed), \
+                        patch.object(session, '_return_to_list') as exit_article:
+                    with self.assertRaises(ArticleStalled if confirmed else BoardNavigationError):
+                        session._read_article_pages(lambda: numbering)
+                self.assertEqual(exit_article.call_count, int(confirmed))
+
+    def test_near_edge_tail_on_second_screen_is_kept_until_continuation_is_verified(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        blank = CapturedLine('', ())
+        earlier = '前' * 39
+        first_piece = CapturedLine(earlier + '\\', ((earlier, ()), ('\\', ('f7', 'hl'))))
+        prior_end = CapturedLine('前段續行', ())
+        prefix = '甲' * 38 + 'a'
+        tail = CapturedLine(prefix + '\\', ((prefix + '\\', ('f7', 'hl')),))
+        continuation = CapturedLine('同一行結尾', (('同一行結尾', ('f2',)),))
+        earlier_frames = [CapturedLine(f'原文 {i}', ()) for i in range(1, 18)]
+        earlier_frames.append(blank)
+        first = [*earlier_frames, first_piece, prior_end, blank]
+        second = [*earlier_frames[1:], first_piece, prior_end, blank, tail]
+        for suffix in (continuation, CapturedLine('另一段', ())):
+            with self.subTest(suffix=suffix):
+                article = NumberedArticle(allow_wrapping=True)
+                article.observe(first, '瀏覽 第 1/3 頁 (10%) 第 1~19 行', at_end=False, styled=first)
+                article.observe(second, '瀏覽 第 1/3 頁 (12%) 第 2~20 行', at_end=False, styled=second)
+                self.assertEqual(article.tail_wrap_hints, 1)
+                self.assertEqual(article.pending_wrap, (20, prefix))
+                self.assertIsNone(article.assemble())
+                final_tail = tail if suffix is continuation else CapturedLine('不相符的上一個片段', ())
+                final = [first_piece, prior_end, final_tail, suffix]
+                last = 20 if suffix is continuation else 21
+                article.observe(final, f'瀏覽 第 3/3 頁 (100%) 第 19~{last} 行', at_end=True, styled=final)
+                if suffix is continuation:
+                    self.assertEqual(article.assemble().split('\n')[-1], prefix + continuation)
+                    self.assertEqual(article.colors[20], ((prefix, ('f7', 'hl')), (continuation, ('f2',))))
+                else:
+                    self.assertIsNone(article.assemble())
+
+    def test_linked_wrapped_first_screen_in_line_mode_uses_verified_overlap(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        normal = [CapturedLine(f'原文 {i}', ()) for i in range(1, 8)]
+        label = 'http://example.test/' + 'x' * 59
+        first_piece = CapturedLine(label + '\\', ((label, ()), ('\\', ('f7', 'hl'))))
+        tail = CapturedLine('/完整網址尾段', ())
+        first = [normal[0], first_piece, tail, *normal[2:5]]
+        second = [*normal[2:7]]
+        for linked in (False, True):
+            with self.subTest(linked=linked):
+                article = NumberedArticle(allow_wrapping=True)
+                article.observe(first, '瀏覽 第 1/4 頁 (20%) 第 1~4 行',
+                                at_end=False, styled=first, linked_screen=linked)
+                self.assertIsNone(article.assemble())
+                article.observe(second, '瀏覽 第 4/4 頁 (100%) 第 2~6 行', at_end=True, styled=second)
+                if linked:
+                    self.assertEqual(article.page_line_offset, 1)
+                    self.assertEqual(article.assemble().split('\n'), [normal[0], label + tail, *normal[2:]])
+                else:
+                    self.assertIsNone(article.assemble())
+
+    def test_line_reader_uses_down_after_signature_until_confirmed_end(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from contextlib import nullcontext
+        from PyPtt import command, screens
+        import line_reader
+
+        frames = iter([
+            ('正文\n' + screens.Target.content_end_list[0] + '\n瀏覽 第 1/3 頁 (50%) 第 1~2 行', 2),
+            (screens.Target.content_end_list[0] + '\n推文甲\n瀏覽 第 2/3 頁 (75%) 第 2~3 行', 2),
+            ('推文甲\n推文乙\n瀏覽 第 3/3 頁 (100%) 第 3~4 行', 1),
+        ])
+        queue = []
+        def send(_key, _targets):
+            screen, matched = next(frames)
+            queue.append(screen)
+            return matched
+        transport = Mock(side_effect=send)
+        api = SimpleNamespace(connect_core=SimpleNamespace(send=transport, get_screen_queue=lambda: queue))
+        with patch.object(line_reader, 'expanded_screen', return_value=nullcontext()):
+            body, _ = line_reader.get_content(api)
+        self.assertEqual([call.args[0] for call in transport.call_args_list],
+                         [command.enter * 2, command.down, command.down])
+        self.assertIn('正文', body)
+        self.assertIn('推文甲', body)
+        self.assertTrue(body.endswith('推文乙'))
+
+    def test_line_body_at_end_can_save_when_number_mapping_needs_review(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import read_colored_post
+        from board_session import BoardSession
+        from PyPtt import command
+
+        queue = []
+        transport = Mock(return_value=0)
+        core = SimpleNamespace(_decode_screen=Mock(), _stream_screen=Mock(), send=transport,
+                               config=SimpleNamespace(screen_height=100), current_encoding='utf-8',
+                               get_screen_queue=lambda: queue)
+        session = BoardSession(SimpleNamespace(connect_core=core, cursor='>'))
+
+        def get_post(*_args, **_kwargs):
+            queue.append('正文\n推文仍保留\n瀏覽 第 1/1 頁 (100%) 第 1~1 行')
+            core.send(command.enter * 2, session._article_targets())
+            return {'full_content': '正文\n推文仍保留'}
+        with patch.object(session, 'get_post', side_effect=get_post):
+            post = read_colored_post(session, 'Test', 'fixture1')
+        self.assertEqual(post['full_content'], '正文\n推文仍保留')
+        self.assertEqual(post['ansi_diagnostics']['assembly'], 'sdk')
+        self.assertTrue(post['ansi_diagnostics']['reached_end'])
+        path = Path(post['ansi_diagnostics']['reading_capture'])
+        self.assertTrue(path.is_file())
+        self.assertIn('推文仍保留', path.read_text(encoding='utf-8'))
+        self.assertEqual(json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))['aid'], 'fixture1')
+
+    def test_reading_capture_preserves_colors_raw_bytes_and_escaped_text(self):
+        from base64 import b64decode
+        from local_state import save_reading_capture
+        from ansi_capture import ColorScreen
+
+        wire = b'\x1b[H\x1b[33m<script>&\x1b[m\r\nend'
+        frame = ColorScreen(24).replay(wire, 'ascii')
+        sample = dict(screen='\n'.join(frame), encoding='ascii', height=24, key='down', at_end=True,
+                      linked_screen=False, colors=[line.runs() for line in frame[:-1]], raw=wire)
+        path = save_reading_capture('Test', 'fixture1', 'line', [sample], {'reached_end': True}, 'review')
+        html = path.read_text(encoding='utf-8')
+        self.assertIn('&lt;script&gt;&amp;', html)
+        self.assertNotIn('<script>', html)
+        self.assertIn('ansi-run f3', html)
+        data = json.loads(path.with_suffix('.json').read_text(encoding='utf-8'))
+        replay = ColorScreen(data['frames'][0]['height']).replay(
+            b64decode(data['frames'][0]['raw']), data['frames'][0]['encoding'])
+        self.assertEqual('\n'.join(replay), sample['screen'])
+
+    def test_short_reader_recognizes_animation_prompt_and_uses_numbered_source(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import BoardSession
+        from PyPtt import command, screens
+
+        article = NumberedArticle(allow_wrapping=True)
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(
+            _decode_screen=Mock(), send=Mock()), cursor='>'))
+
+        def send(key, targets):
+            if key == command.enter * 2:
+                self.assertEqual(targets[-1].get_detect_target(), screens.Target.Animation)
+                return 4
+            self.assertEqual(key, 'n')
+            article.observe(['已核對的原始正文'], '瀏覽 第 1/1 頁 (100%) 第 1~1 行',
+                            at_end=True, styled=None)
+            return 0
+
+        with patch.object(session, '_checked_send', side_effect=send) as transport:
+            self.assertEqual(session._read_numbered_article(lambda: article), '已核對的原始正文')
+        self.assertEqual([call.args[0] for call in transport.call_args_list], [command.enter * 2, 'n'])
+
+    def test_short_reader_does_not_probe_end_while_reported_start_advances(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import NumberedArticle
+        from board_session import BoardSession
+        from PyPtt import command
+
+        article = NumberedArticle()
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(
+            _decode_screen=Mock(), send=Mock()), cursor='>'))
+        frames = iter([
+            (1, 3, ['首行', '第二行', '第三行'], False),
+            (2, 3, ['第二行', '第三行'], False),
+            (2, 4, ['第二行', '第三行', '文末'], True),
+        ])
+
+        def send(_key):
+            first, last, rows, end = next(frames)
+            article.observe(rows, f'瀏覽 第 1/2 頁 (5%) 第 {first}~{last} 行', at_end=end, styled=None)
+            return 0 if end else 1
+
+        with patch.object(session, '_send_article_key', side_effect=send) as keys:
+            self.assertEqual(session._read_numbered_article(lambda: article), '首行\n第二行\n第三行\n文末')
+        self.assertEqual([call.args[0] for call in keys.call_args_list], [command.enter * 2, command.down, command.down])
+
+    def test_near_edge_marker_remains_valid_when_tail_moves_up_a_row(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        def marker(text):
+            return CapturedLine(text + '\\', ((text, ('f3',)), ('\\', ('f7', 'hl'))))
+
+        blank = CapturedLine('', ())
+        rows = [CapturedLine(f'原文 {i}', ()) for i in range(1, 18)]
+        earlier = marker('前' * 39)
+        earlier_end = CapturedLine('前段續行', ())
+        prefix = '甲' * 38 + 'a'
+        next_piece = '乙' * 39
+        final_piece = CapturedLine('末段', (('末段', ('f2',)),))
+        frames = [
+            (1, 19, [*rows, earlier, earlier_end, blank, blank]),
+            (2, 20, [*rows[1:], earlier, earlier_end, blank, blank, marker(prefix)]),
+            (3, 20, [*rows[2:], earlier, earlier_end, blank, blank, marker(prefix), marker(next_piece)]),
+            (18, 20, [earlier, earlier_end, blank, marker(prefix), marker(next_piece), final_piece]),
+        ]
+        article = NumberedArticle(allow_wrapping=True)
+        for i, (first, last, frame) in enumerate(frames):
+            article.observe(frame, f'瀏覽 第 1/3 頁 ({10 + i}%) 第 {first}~{last} 行',
+                            at_end=i == 3, styled=frame)
+            if i == 2:
+                self.assertEqual(article.pending_wrap, (20, prefix + next_piece))
+        self.assertEqual(article.assemble().split('\n')[-2:], ['', prefix + next_piece + final_piece])
+        self.assertEqual(article.width_mismatches, 0)
+
+    def test_short_screen_can_verify_a_persistent_extra_row_without_a_hyperlink(self):
+        from ansi_capture import CapturedLine, NumberedArticle
+
+        rows = [CapturedLine(f'原文 {i}', ()) for i in range(1, 8)]
+        for corroborated in (True, False):
+            with self.subTest(corroborated=corroborated):
+                article = NumberedArticle(allow_wrapping=True, short_wrap_retry=True)
+                article.observe(rows[:5], '瀏覽 第 1/3 頁 (5%) 第 1~4 行', at_end=False, styled=rows[:5])
+                article.observe(rows[1:6], '瀏覽 第 1/3 頁 (5%) 第 2~5 行', at_end=False, styled=rows[1:6])
+                self.assertEqual(article.provisional_row, 6)
+                self.assertNotIn(6, article.rows)
+                self.assertIsNone(article.assemble())
+                final = rows[2:] if corroborated else [*rows[2:5], CapturedLine('不同的續文', ()), rows[6]]
+                article.observe(final, '瀏覽 第 3/3 頁 (100%) 第 3~7 行', at_end=True, styled=final)
+                self.assertEqual(article.assemble(), '\n'.join(rows) if corroborated else None)
+
+    def test_wrapped_page_keeps_new_fragments_when_reported_end_stays_the_same(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from ansi_capture import CapturedLine, NumberedArticle
+        from board_session import BoardSession, PAGE_DOWN_KEY
+        from PyPtt import command
+
+        def wrap(text, style):
+            return CapturedLine(text + '\\', ((text, (style,)), ('\\', ('f7', 'hl'))))
+
+        lines = [CapturedLine(f'原文第 {number} 行', ()) for number in range(1, 20)]
+        lines[5] = CapturedLine('', ())
+        pieces = [wrap(char * 39, style) for char, style in zip('甲乙丙', ('f1', 'f2', 'f3'))]
+        end = CapturedLine('長句結尾', (('長句結尾', ('f4',)),))
+        frames = iter([
+            (1, 19, 10, lines),
+            (4, 20, 15, [*lines[3:], pieces[0]]),
+            (5, 20, 18, [*lines[4:], *pieces]),
+            (16, 21, 100, [*lines[15:], *pieces, end, CapturedLine('真正文末', ())]),
+        ])
+        numbering = NumberedArticle(page_mode=True, allow_wrapping=True)
+        session = BoardSession(SimpleNamespace(connect_core=SimpleNamespace(
+            _decode_screen=Mock(), send=Mock()), cursor='>'))
+
+        def send(_key):
+            first, last, percent, rows = next(frames)
+            at_end = percent == 100
+            numbering.observe(rows, f'瀏覽 第 1/3 頁 ({percent}%) 第 {first}~{last} 行',
+                              at_end=at_end, styled=rows)
+            if percent == 18:
+                self.assertEqual(numbering.pending_wrap[0], 20)
+                self.assertEqual(len(numbering.pending_wrap[1]), 117)
+                self.assertEqual(numbering.last_window[1], 19)
+            return 0 if at_end else 1
+
+        with patch.object(session, '_send_article_key', side_effect=send) as keys:
+            body = session._read_article_pages(lambda: numbering)
+        self.assertEqual([call.args[0] for call in keys.call_args_list], [command.enter * 2, *[PAGE_DOWN_KEY] * 3])
+        self.assertEqual(body.split('\n'), [*lines, '甲' * 39 + '乙' * 39 + '丙' * 39 + end, '真正文末'])
+        self.assertEqual(numbering.colors[20], (('甲' * 39, ('f1',)), ('乙' * 39, ('f2',)),
+                                               ('丙' * 39, ('f3',)), ('長句結尾', ('f4',))))
 
     def test_24_row_capture_joins_wrapped_line_that_continues_on_next_screen(self):
         from types import SimpleNamespace
@@ -1099,12 +1474,12 @@ class StorageTests(unittest.TestCase):
         article = [connect_core.TargetUnit(screens.Target.PostEnd)]
         board = [connect_core.TargetUnit(screens.Target.InBoard)]
         for mode, key, targets, wait in (
-                ('line', command.down, article, .1), ('line', command.down, board, .9),
-                ('page', PAGE_DOWN_KEY, article, .1), ('line', command.enter * 2, article, .9)):
+                ('line', command.down, article, .05), ('line', command.down, board, .95),
+                ('page', PAGE_DOWN_KEY, article, .05), ('line', command.enter * 2, article, .95)):
             with self.subTest(mode=mode, key=key, targets=targets):
                 session.capture_mode = mode
                 session.last_sent = 10.0
-                with patch('board_session.time.monotonic', return_value=10.1), \
+                with patch('board_session.time.monotonic', return_value=10.05), \
                         patch('board_session.time.sleep') as sleep:
                     session._send(key, targets)
                 sleep.assert_called_once()
@@ -1536,7 +1911,7 @@ class BoardSessionTests(unittest.TestCase):
         with patch('board_session.MIN_COMMAND_INTERVAL', 0), \
                 patch('board_session._api_get_newest_index._get_newest_index', return_value=12), \
                 patch('board_session._api_util.parse_query_post', side_effect=selected), \
-                patch('board_session._api_util.get_content', side_effect=content):
+                patch('board_session.line_reader.get_content', side_effect=content):
             self.assertEqual(session.get_newest_index(None, board='Test'), 12)
             for index in (12, 11):
                 post = session.get_post('Test', index=index, query=True)

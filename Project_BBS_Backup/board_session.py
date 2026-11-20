@@ -10,12 +10,13 @@ import time
 from PyPtt import _api_get_newest_index, _api_get_post, _api_util
 from PyPtt import command, connect_core, data_type, exceptions, lib_util, screens
 from PyPtt._api_get_post import AutoJsonEncoder, PostField
+import line_reader
 from websockets.exceptions import ConnectionClosed as SocketClosed
 
 
 MIN_COMMAND_INTERVAL = 1.0
-LINE_DOWN_INTERVAL = 0.2
-PAGE_DOWN_INTERVAL = 0.2
+LINE_DOWN_INTERVAL = 0.1
+PAGE_DOWN_INTERVAL = 0.1
 END_KEY = '\x1b[4~'
 PAGE_DOWN_KEY = '\x1b[6~'
 FALLBACK_HEIGHT = 24
@@ -105,6 +106,7 @@ class BoardSession:
         self.last_sent = None
         self.pacing = False
         self.capture_mode = 'line'
+        self.wrapped_line_retry = False
         self.prefer_line_at_uncertain_seam = False
         self.bridge_events = []
         self.check_stop = None
@@ -269,13 +271,18 @@ class BoardSession:
             parser.feed(redraw[start:end + len(b'\x1b[?2026l')] if end >= 0 else redraw[start:])
             screen = parser.screen
             self._check_notice(screen)
-            if (start == clear or end >= 0) and _api_util.is_article_list(self.api, screen):
+            if (start == clear or end >= 0) and (
+                    _api_util.is_article_list(self.api, screen) or self._matches_board_list(self.board, screen)):
                 core._RDQ.add(screen)
                 self._require_list()
                 self.operations['resize_redraws_verified'] += 1
                 return
         self.operations['resize_refreshes'] += 1
-        self._refresh_list()
+        try:
+            self._refresh_list()
+        except BoardNavigationError:
+            if not self.confirm_list(self.board):
+                raise
 
     def _restore_height(self):
         if self.retry_height is not None:
@@ -354,7 +361,7 @@ class BoardSession:
 
     def _send_article_key(self, key):
         targets = self._article_targets()
-        if self.capture_mode == 'page' and key == command.enter * 2:
+        if key == command.enter * 2:
             targets.append(connect_core.TargetUnit(screens.Target.Animation, break_detect=True))
         if self.capture_mode == 'page' and key == command.up:
             result = self._send_bridge_up(targets)
@@ -428,6 +435,11 @@ class BoardSession:
                 raise ArticleStalled(None, '逐頁接縫補查無法核對行號')
         raise BridgeNavigationError()
 
+    def _confirm_article_screen(self):
+        screen = self._screen()
+        return any(connect_core.TargetUnit(target).is_match(screen, self.cursor)
+                   for target in (screens.Target.InPost, screens.Target.PostEnd))
+
     def _verify_end(self, get_numbering):
         numbering = get_numbering()
         end = numbering.last_window
@@ -445,21 +457,28 @@ class BoardSession:
 
     def _read_numbered_article(self, get_numbering):
         result = self._send_article_key(command.enter * 2)
+        if result == 4:
+            # Match the page reader: use the numbered source view.
+            self.operations['animation_prompts_declined'] += 1
+            result = self._send_article_key('n')
         numbering = get_numbering()
         for step in range(FALLBACK_MAX_STEPS + 1):
             if result == 0:
                 return numbering.assemble() if not numbering.color_conflicts else None
             previous = numbering.last_window
             if (result == 2 or step == FALLBACK_MAX_STEPS or previous is None
-                    or not numbering.covers(previous[1]) or numbering.color_conflicts):
+                    or not numbering.covers_prefix(previous[1]) or numbering.color_conflicts):
                 break
             if self.check_stop:
                 self.check_stop()
-            was_wrapping = numbering.pending_wrap is not None
+            pending = numbering.pending_wrap
+            reported = numbering.last_range
             result = self._send_article_key(command.down)
             current_window = numbering.last_window
             if result == 1 and current_window and current_window[1] <= previous[1]:
-                if current_window[0] > previous[0] and (was_wrapping or numbering.pending_wrap):
+                advanced = reported and numbering.last_range and any(
+                    new > old for old, new in zip(reported, numbering.last_range))
+                if advanced or numbering.extends_pending_wrap(pending):
                     continue
                 return self._verify_end(get_numbering)
         return None
@@ -469,6 +488,7 @@ class BoardSession:
         key = command.enter * 2
         last = 0
         previous_start = 0
+        pending = None
         while True:
             if self.check_stop:
                 self.check_stop()
@@ -478,9 +498,13 @@ class BoardSession:
             except BoardNavigationError as exc:
                 if key == command.enter * 2 and seen == 0:
                     exc.open_screen_unrecognized = True
+                elif key == PAGE_DOWN_KEY and self.view == 'article' and self._confirm_article_screen():
+                    self._return_to_list()
+                    raise ArticleStalled(last or None, '翻頁回應無法辨識，已從正文安全退出') from exc
                 raise
             if result == 4:
                 # Decline automatic playback so each screen advances on one key.
+                self.operations['animation_prompts_declined'] += 1
                 key = 'n'
                 continue
             numbered = get_numbering()
@@ -511,32 +535,52 @@ class BoardSession:
                 reason = f'逐頁擷取缺少第 {last + 1}～{window[0] - 1} 行'
             elif numbered.conflicts:
                 reason = '逐頁擷取的重疊行正文不一致'
-            elif window[1] <= last:
+            elif window[1] <= last and not (
+                    numbered.extends_pending_wrap(pending)
+                    or (pending is None and numbered.pending_wrap is not None
+                        and numbered.pending_wrap[0] + numbered.page_line_offset == last + 1
+                        and window[1] == last)):
                 reason = '逐頁擷取未取得新的正文行'
             elif result == 0:
                 body = numbered.assemble()
                 if body is not None:
                     return body
                 reason = '逐頁擷取已到文末，但未能核對完整正文'
-            elif previous_start and window[0] - previous_start == 1:
+            elif (previous_start and window[0] - previous_start == 1
+                  and not numbered.wrapped_screens):
                 reason = 'Page Down 只前進一行，無法確認整頁位移'
             else:
                 previous_start, last = window[:2]
+                pending = numbered.pending_wrap
                 key = PAGE_DOWN_KEY
                 continue
             self._return_to_list()
             raise ArticleStalled(window[1] if window else last or None, reason)
 
-    def _read_at_fallback_height(self, selected, get_numbering):
-        self.retry_height = self.connect_core.config.screen_height
-        self._resize_list(FALLBACK_HEIGHT)
-        self._position(selected.index)
-        current = self._query('')
-        body = None
-        if current.aid == selected.aid and current.index == selected.index and not current.lock_post:
-            body = self._read_numbered_article(get_numbering)
+    def _read_at_fallback_height(self, selected, get_numbering, attempt=None):
+        if attempt is None:
+            attempt = {}
         self._return_to_list()
+        self.retry_height = self.connect_core.config.screen_height
+        try:
+            attempt['stage'] = 'resize_list'
+            self._resize_list(FALLBACK_HEIGHT)
+            attempt['stage'] = 'verify_selected_article'
+            self._position(selected.index)
+            current = self._query('')
+            body = None
+            if current.aid == selected.aid and current.index == selected.index and not current.lock_post:
+                attempt['stage'] = 'read_numbered_article'
+                body = self._read_numbered_article(get_numbering)
+            self._return_to_list()
+        except BoardNavigationError:
+            attempt['height_on_error'] = self.connect_core.config.screen_height
+            if self.confirm_list(self.board):
+                self._restore_height()
+            raise
+        attempt['stage'] = 'restore_height'
         self._restore_height()
+        attempt['stage'] = 'finished'
         return body
 
     def _recover_stalled_article(self, exc, selected=None, get_numbering=None, fallback_attempts=None):
@@ -680,8 +724,22 @@ class BoardSession:
                 raise ArticleStalled(numbering.last_window[1] if numbering.last_window else None)
             self.api.Unconfirmed = False
             return body, False
+        if (get_numbering is not None and self.wrapped_line_retry
+                and self.connect_core.config.screen_height > FALLBACK_HEIGHT):
+            attempt = {'height': FALLBACK_HEIGHT, 'method': 'wrapped_page_retry'}
+            fallback_attempts.append(attempt)
+            try:
+                body = self._read_at_fallback_height(selected, get_numbering, attempt)
+            finally:
+                attempt['numbering'] = get_numbering().diagnostics()
+            attempt['verified'] = body is not None
+            if body is None:
+                raise ArticleStalled(get_numbering().last_range[1] if get_numbering().last_range else None,
+                                     '相容讀取無法核對折行後的完整正文')
+            self.api.Unconfirmed = False
+            return body, False
         try:
-            body, has_control_code = _api_util.get_content(self.api)
+            body, has_control_code = line_reader.get_content(self.api)
         except exceptions.UnknownError as exc:
             body = self._recover_stalled_article(exc, selected, get_numbering, fallback_attempts)
             if body is None:

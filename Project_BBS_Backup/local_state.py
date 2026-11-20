@@ -77,3 +77,46 @@ class JobLog:
         stack = [f'{Path(frame.filename).name}:{frame.lineno}:{frame.name}'
                  for frame in traceback.extract_tb(exc.__traceback__)]
         self.event('error', stage=stage, error=type(exc).__name__, index=index, aid=aid, stack=stack)
+
+
+def save_reading_capture(board, aid, mode, samples, diagnostic, reason):
+    """Save only recognized article screens, with raw replies for offline replay."""
+    from base64 import b64encode
+    from html import escape
+    from ansi_style import ANSI_STYLE, render_run
+
+    directory = LOG_DIRECTORY / 'readings'
+    stamp = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d-%H%M%S')
+    name = f'{stamp}-{secrets.token_hex(3)}'
+    data_path = directory / f'{name}.json'
+    html_path = directory / f'{name}.html'
+    frames = [{**sample, 'raw': b64encode(sample['raw']).decode('ascii')} for sample in samples]
+    payload = dict(board=board, aid=aid, mode=mode, reason=reason, diagnostic=diagnostic, frames=frames)
+    sections = []
+    for i, sample in enumerate(samples, 1):
+        rows = sample['screen'].split('\n')
+        rendered = []
+        for index, row in enumerate(rows):
+            colors = sample['colors']
+            runs = colors[index] if colors is not None and index < len(colors) else []
+            if runs and ''.join(value for value, _ in runs) == row:
+                rendered.append(''.join(render_run(value, style) for value, style in runs))
+            else:
+                rendered.append(escape(row))
+        sections.append(f'<h2>畫面 {i} · {escape(sample["key"])} · {sample["height"]} 列</h2>'
+                        '<pre class="color-reference">' + '\n'.join(rendered) + '</pre>')
+    heading = escape(f'{board} · AID {aid} · {mode}')
+    page = ('<!doctype html><html lang="zh-Hant"><meta charset="utf-8">'
+            f'<title>文章擷取診斷 · {heading}</title><style>{ANSI_STYLE}'
+            'body{background:#111;color:#ddd;margin:20px}pre{background:#000;'
+            'white-space:pre;width:max-content;min-width:80ch;padding:12px}</style>'
+            f'<h1>{heading}</h1><p>{escape(reason)}</p>'
+            '<p>以下為程式收到的文章畫面。配套 JSON 含原始回應及配色，可供離線重播除錯。</p>'
+            f'<p><a href="{name}.json">下載診斷 JSON</a></p>' + ''.join(sections) + '</html>')
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        data_path.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+        html_path.write_text(page, encoding='utf-8')
+    except OSError:
+        return None
+    return html_path

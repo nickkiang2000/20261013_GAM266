@@ -1,10 +1,14 @@
 """Capture SGR colors alongside PyPtt's plain-text article reader (2.3.16)."""
 
+from collections import deque
 from difflib import SequenceMatcher
+from hashlib import sha256
 from itertools import groupby
 import re
 
 from PyPtt import command, screens
+
+from terminal_links import TerminalLinks
 
 
 SGR = re.compile(r'\x1b\[([0-9;]*)m')
@@ -61,7 +65,27 @@ def is_screen_padding(line):
         token.startswith('b') for _, style in line.color_runs for token in style)
 
 
-def fold_numbered_rows(rows, styled, first, count, known_markers):
+def right_edge_marker(row, colors):
+    last = row.rstrip(' ')
+    if not last.endswith('\\'):
+        return None
+    column = screens._cell_len(last.replace('\x08', ''))
+    if column < min(WRAP_MARKER_COLUMNS) - 1:
+        return None
+    glyph = len(last) - 1
+    prefix_runs = []
+    offset = 0
+    for value, style in colors:
+        if offset + len(value) > glyph:
+            if offset < glyph:
+                prefix_runs.append((value[:glyph - offset], style))
+            return column, style, tuple(prefix_runs), offset == glyph and value.rstrip(' ') == '\\'
+        prefix_runs.append((value, style))
+        offset += len(value)
+    return column, (), (), False
+
+
+def fold_numbered_rows(rows, styled, first, count, known_markers, *, first_page=False, tail_hint=False, near_edge=False):
     """Use a distinct bright-white right-edge marker to join display rows."""
     if styled is None or count <= 0 or len(styled) != len(rows):
         return None
@@ -70,6 +94,8 @@ def fold_numbered_rows(rows, styled, first, count, known_markers):
     runs = []
     markers = {}
     reused = 0
+    last_visible = next((i for i in range(len(rows) - 1, -1, -1)
+                         if not is_screen_padding(styled[i])), -1)
     for i, row in enumerate(rows):
         colors = styled[i].color_runs or (((row, ()),) if row else ())
         last = row.rstrip(' ')
@@ -81,12 +107,17 @@ def fold_numbered_rows(rows, styled, first, count, known_markers):
             # and offset, then check the assembled frame against its overlap.
             marker_colors = known_markers[key]
             reused += 1
-        elif (last.endswith('\\') and screens._cell_len(last.replace('\x08', '')) in WRAP_MARKER_COLUMNS
-              and len(colors) >= 2 and colors[-1][0].rstrip(' ') == '\\'
-              and set(colors[-1][1]) == {'f7', 'hl'}):
-            marker_colors = colors[:-1]
         else:
             marker_colors = None
+            marker = right_edge_marker(row, colors)
+            if marker is not None:
+                column, style, prefix_runs, separate = marker
+                strong = column in WRAP_MARKER_COLUMNS and separate
+                tentative = (tail_hint and i == last_visible and bool(prefix_runs)
+                             and min(WRAP_MARKER_COLUMNS) - 1 <= column <= max(WRAP_MARKER_COLUMNS))
+                near_marker = near_edge and separate and column == min(WRAP_MARKER_COLUMNS) - 1
+                if set(style) == {'f7', 'hl'} and (strong or tentative or near_marker):
+                    marker_colors = prefix_runs
         if marker_colors is not None:
             text += fragment
             runs.extend(marker_colors)
@@ -108,7 +139,8 @@ def fold_numbered_rows(rows, styled, first, count, known_markers):
         return None
     # Drop only trailing unpainted screen padding beyond the advertised range.
     complete = count - (pending is not None)
-    if len(logical) < complete or any(not is_screen_padding(line) for line in logical[complete:]):
+    retained = complete + 1 if first_page and pending is None and len(logical) == complete + 1 else complete
+    if len(logical) < complete or any(not is_screen_padding(line) for line in logical[retained:]):
         return None
     if pending is not None and len(logical) > complete:
         # The physical screen may have padding immediately before an
@@ -118,7 +150,9 @@ def fold_numbered_rows(rows, styled, first, count, known_markers):
             (first + complete if number == pending_number else number, offset, fragment): colors
             for (number, offset, fragment), colors in markers.items()
         }
-    return logical[:complete], pending, markers, reused
+    # The first page can include one additional logical row, even after
+    # folding. Keep the candidate until the next page proves the offset.
+    return logical[:retained], pending, markers, reused
 
 
 class ColorScreen(screens._VT100Engine):
@@ -216,19 +250,25 @@ def match_colors(body, frames):
 class NumberedArticle:
     """Reassemble physical rows only when the terminal numbering proves their positions."""
 
-    def __init__(self, *, page_mode=False, allow_wrapping=False):
+    def __init__(self, *, page_mode=False, allow_wrapping=False, short_wrap_retry=False):
         self.page_mode = page_mode
         self.allow_wrapping = allow_wrapping
+        self.short_wrap_retry = short_wrap_retry
         self.pending_wrap = None
         self.wrap_markers = {}
         self.wrapped_screens = 0
+        self.wrap_marker_seen = False
         self.wrap_joins = 0
+        self.tail_wrap_hints = 0
+        self.near_edge_wrap_frames = 0
         self.wrap_markers_reused = 0
         self.wrap_failure = None
         self.wrap_alignments = []
         self.wrap_window_checks = []
         self.extra_first_row = False
         self.first_padding_row = None
+        self.provisional_row = None
+        self.provisional_content = None
         self.bridge_distance = self.bridge_remaining = self.bridge_moves = 0
         self.bridge_next_start = self.bridge_min_end = None
         self.bridge_result = None
@@ -248,7 +288,7 @@ class NumberedArticle:
         self.color_conflicts = 0
         self.end_evidence = None
 
-    def observe(self, rows, status, *, at_end, styled):
+    def observe(self, rows, status, *, at_end, styled, linked_screen=False):
         self.seen += 1
         self.last_window = None
         percent = re.search(r'\(\s*(\d{1,3})%\)', status)
@@ -270,12 +310,37 @@ class NumberedArticle:
         if at_end:
             self.end_range = span
         count = last - first + 1
+        seen_provisional = self.provisional_row
+        prior_provisional = self.provisional_content
+        checking_first_extra = (self.seen == 2 or bridging) and (
+            self.extra_first_row or self.first_padding_row is not None)
+        first_extra_candidate = (self.seen == 1 and first == 1 and not at_end
+                                 and (self.page_mode or linked_screen or self.short_wrap_retry))
         if self.allow_wrapping:
-            folded = fold_numbered_rows(rows, styled, first, count, self.wrap_markers)
+            folded = fold_numbered_rows(rows, styled, first, count, self.wrap_markers,
+                                        first_page=(first_extra_candidate or checking_first_extra
+                                                    or (seen_provisional is not None and not at_end)))
+            if (folded is None and styled is not None
+                    and (not at_end or self.pending_wrap is not None or self.near_edge_wrap_frames)):
+                candidate = fold_numbered_rows(rows, styled, first, count, self.wrap_markers, near_edge=True)
+                if candidate is not None and (not at_end or candidate[1] is None):
+                    overlap = self._check_wrapped_window(first + self.page_line_offset, candidate[0])
+                    if ((self.seen == 1 and first == 1 and candidate[1] is None)
+                            or (overlap['distinct_text_anchors'] and not overlap['conflicting_rows'])):
+                        folded = candidate
+                        self.near_edge_wrap_frames += 1
+            if folded is None and styled is not None and self.wrap_markers and not at_end:
+                candidate = fold_numbered_rows(rows, styled, first, count, self.wrap_markers, tail_hint=True)
+                if candidate is not None and candidate[1] is not None:
+                    overlap = self._check_wrapped_window(first + self.page_line_offset, candidate[0])
+                    if overlap['distinct_text_anchors'] and not overlap['conflicting_rows']:
+                        folded = candidate
+                        self.tail_wrap_hints += 1
             if folded is None and styled is not None and self.wrap_markers:
                 folded = self._align_wrapped_overlap(first, count, styled)
             if folded is not None:
-                if self.wrap_markers and self.pending_wrap is None:
+                self.wrap_marker_seen = True
+                if self.wrap_markers and not checking_first_extra and not self.page_line_offset:
                     nominal = self._check_wrapped_window(first, folded[0])
                     if nominal['conflicting_rows']:
                         verified = self._recover_wrapped_window(
@@ -295,13 +360,19 @@ class NumberedArticle:
                     return
                 if self.pending_wrap is not None:
                     pending_number, prefix = self.pending_wrap
-                    offset = pending_number - first
-                    observed = rows[offset] if 0 <= offset < len(rows) else pending if pending_number == last else None
                     prefix_colors = [style for value, style in prefix.color_runs for _ in value]
-                    observed_colors = ([style for value, style in observed.color_runs for _ in value]
-                                       or [()] * len(observed)) if observed is not None else []
-                    if (observed is None or not observed.startswith(prefix)
-                            or observed_colors[:len(prefix_colors)] != prefix_colors):
+                    positions = {pending_number, pending_number + first - span[0]}
+                    matches = 0
+                    for number in positions:
+                        offset = number - first
+                        observed = (rows[offset] if 0 <= offset < len(rows)
+                                    else pending if number == last else None)
+                        if observed is None or not observed.startswith(prefix):
+                            continue
+                        observed_colors = ([style for value, style in observed.color_runs for _ in value]
+                                           or [()] * len(observed))
+                        matches += observed_colors[:len(prefix_colors)] == prefix_colors
+                    if matches != 1:
                         self.wrap_failure = 'continuation_did_not_match'
                         self.width_mismatches += 1
                         return
@@ -310,7 +381,7 @@ class NumberedArticle:
                 self.wrapped_screens += 1
                 self.wrap_joins += len(markers)
                 self.wrap_markers_reused += reused
-                count = len(rows)
+                count = last - first + 1 - (pending is not None)
             elif self.pending_wrap is not None:
                 self.wrap_failure = 'continuation_not_observed'
                 self.width_mismatches += 1
@@ -327,20 +398,20 @@ class NumberedArticle:
             if self.bridge_remaining:
                 return
         extra = rows[max(count, 0):]
-        padded = (self.page_mode and not any(row.strip() for row in extra)
+        padded = ((self.page_mode or first_extra_candidate) and not any(row.strip() for row in extra)
                   and (styled is None or not any(line.color_runs for line in styled[max(count, 0):])))
         # Some first screens contain one more display row than the reported span.
         # Keep it provisionally, then require a unique overlap on the next screen.
-        if self.page_mode and self.seen == 1 and not at_end and first == 1 and count > 0 and len(extra) == 1:
+        if (first_extra_candidate and (self.page_mode or self.wrapped_screens or self.short_wrap_retry)
+                and self.pending_wrap is None and count > 0 and len(extra) == 1):
             if padded:
                 self.first_padding_row = (extra[0], styled[count].color_runs if styled is not None else None)
             else:
                 self.extra_first_row = True
                 count += 1
-        elif self.page_mode and (self.seen == 2 or bridging) and (
-                self.extra_first_row or self.first_padding_row is not None):
+        elif checking_first_extra:
             candidates = []
-            visible = rows[:count]
+            visible = rows[:count + 1] if len(rows) == count + 1 else rows[:count]
             if self._confirms_first_overlap(first, visible) or (
                     self.first_padding_row is not None and first == len(self.rows) + 1):
                 candidates.append(0)
@@ -348,7 +419,7 @@ class NumberedArticle:
             if self._confirms_first_overlap(first + 1, visible, extra_row=extra_row):
                 candidates.append(1)
             if len(candidates) != 1:
-                if not candidates and not bridging and extra_row is not None:
+                if self.page_mode and not candidates and not bridging and extra_row is not None:
                     if self._plan_blank_bridge(first, last, visible, extra_row, at_end=at_end):
                         return
                 if bridging:
@@ -358,6 +429,15 @@ class NumberedArticle:
                                           'rows': len(rows), 'overlap_candidates': candidates})
                 return
             self.page_line_offset = candidates[0]
+            if (not self.page_line_offset and len(visible) == count + 1 and styled is not None
+                    and not at_end and self.pending_wrap is None):
+                overlap = self._check_wrapped_window(first, styled[:count + 1])
+                # Keep a second extra row only while full overlap confirms
+                # the start. A later frame must confirm the tentative row.
+                if (overlap['distinct_text_anchors'] >= 2 and not overlap['conflicting_rows']
+                        and first + count > max(self.rows, default=0)):
+                    self.provisional_row = first + count
+                    count += 1
             if bridging:
                 self.bridge_result = 'aligned'
             if self.page_line_offset and self.first_padding_row is not None:
@@ -367,7 +447,19 @@ class NumberedArticle:
                 if runs is not None:
                     self.colors[number] = runs
                 self.extra_first_row = True
-                self.page_ranges[0]['mapped'][1] = number
+                if self.page_ranges:
+                    self.page_ranges[0]['mapped'][1] = number
+        if (seen_provisional is not None and not at_end and self.pending_wrap is None
+                and len(rows) == count + 1 and styled is not None):
+            start = first + self.page_line_offset
+            overlap = self._check_wrapped_window(start, styled)
+            if (start <= seen_provisional < start + count
+                    and start + count == seen_provisional + 1
+                    and overlap['distinct_text_anchors'] >= 2 and not overlap['conflicting_rows']
+                    and prior_provisional == (rows[seen_provisional - start],
+                                               styled[seen_provisional - start].color_runs)):
+                self.provisional_row = start + count
+                count += 1
         if first < 1 or not 0 < count <= len(rows) or (any(rows[count:]) and not padded):
             self.width_mismatches += 1
             # Match the SDK's first-and-final screen extraction. The status
@@ -377,19 +469,35 @@ class NumberedArticle:
                     and any(row.strip() for row in rows)):
                 self.single_screen_body = '\n'.join(rows)
             self.record_width_sample(span, rows, styled)
+            if self.wrap_marker_seen:
+                self.single_screen_body = None
             return
         first += self.page_line_offset
         last = first + count - 1
+        if seen_provisional is not None and seen_provisional != self.provisional_row:
+            # The additional row advances only after the former one matched.
+            self.provisional_content = None
+        elif seen_provisional is not None and first <= seen_provisional <= last and styled is not None:
+            observed = styled[seen_provisional - first]
+            if prior_provisional == (observed, observed.color_runs):
+                self.provisional_row = self.provisional_content = None
         if self.page_mode and len(self.page_ranges) < 12:
             self.page_ranges.append({'reported': span, 'mapped': [first, last],
                                      'rows': len(rows), 'percent': self.last_percent})
         if at_end:
             self.end_range = [first, last]
             self.end_usable = True
-        self.last_window = (first, last, tuple(rows[:count]))
+        # A candidate may be observed while the preceding source line is
+        # still incomplete. Do not enter it in the overlap map before proof.
+        if self.provisional_row == last:
+            self.provisional_content = (rows[count - 1], styled[count - 1].color_runs)
+            count -= 1
+        self.last_window = (first, first + count - 1, tuple(rows[:count]))
 
         for offset, row in enumerate(rows[:count]):
             number = first + offset
+            if number == self.provisional_row:
+                continue
             if self.rows.setdefault(number, row) != row:
                 self.conflicts += 1
                 if self.first_conflict is None:
@@ -527,6 +635,13 @@ class NumberedArticle:
                 for offset, row in enumerate(rows)
                 if (last_text := row.rstrip(' ')).endswith('\\')
                 and screens._cell_len(last_text.replace('\x08', '')) in WRAP_MARKER_COLUMNS]
+            sample['near_edge_backslashes'] = []
+            for offset, line in enumerate(styled or ()):
+                marker = right_edge_marker(line, line.color_runs)
+                if marker is not None:
+                    column, style, _, separate = marker
+                    sample['near_edge_backslashes'].append({'row': offset + 1, 'column': column,
+                                                            'style': style, 'separate_run': separate})
             if self.pending_wrap:
                 pending_number, prefix = self.pending_wrap
                 sample['pending_line_expected_screen_row'] = pending_number - span[0] + 1
@@ -537,6 +652,8 @@ class NumberedArticle:
                     if offset == 0 and prefix.startswith(fragment)})
                 sample['previous_overlap_rows'] = sum(
                     line in self.rows and line in self.colors for line in range(span[0], pending_number))
+            self.wrap_marker_seen |= any(set(row['last_style']) == {'f7', 'hl'}
+                                         for row in sample['backslash_rows_at_right_edge'])
         self.width_sample.append(sample)
 
     def _matching_first_overlap(self, first, rows, *, extra_row=None):
@@ -574,6 +691,17 @@ class NumberedArticle:
         self.bridge_result = 'checking'
         return True
 
+    def extends_pending_wrap(self, previous):
+        if not previous or not self.pending_wrap:
+            return False
+        number, prefix = self.pending_wrap
+        return number == previous[0] and len(prefix) > len(previous[1]) and prefix.startswith(previous[1])
+
+    def covers_prefix(self, end):
+        return (not (self.conflicts or self.width_mismatches or self.unnumbered)
+                and end >= 1 and len(self.rows) >= end
+                and all(number in self.rows for number in range(1, end + 1)))
+
     def covers(self, end):
         return (not (self.conflicts or self.width_mismatches or self.unnumbered)
                 and len(self.rows) == end and min(self.rows, default=0) == 1
@@ -589,7 +717,8 @@ class NumberedArticle:
         return self.assemble()
 
     def assemble(self):
-        if self.pending_wrap is not None or not self.end_usable or not self.covers(self.end_range[1]):
+        if (self.pending_wrap is not None or self.provisional_row is not None
+                or not self.end_usable or not self.covers(self.end_range[1])):
             return None
         end = self.end_range[1]
         if self.bridge_min_end is not None and end < self.bridge_min_end:
@@ -613,6 +742,10 @@ class NumberedArticle:
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
             'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
             'wrapped_screens': self.wrapped_screens, 'wrap_joins': self.wrap_joins,
+            'wrap_marker_seen': self.wrap_marker_seen,
+            'tail_wrap_hints': self.tail_wrap_hints,
+            'near_edge_wrap_frames': self.near_edge_wrap_frames,
+            'provisional_row': self.provisional_row,
             'wrap_markers_reused': self.wrap_markers_reused,
             'wrap_alignments': self.wrap_alignments,
             'wrap_window_checks': self.wrap_window_checks,
@@ -633,18 +766,24 @@ class NumberedArticle:
 
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
-    from board_session import BoardSession, FALLBACK_HEIGHT, PAGE_DOWN_KEY
+    from board_session import BoardSession, END_KEY, FALLBACK_HEIGHT, PAGE_DOWN_KEY
 
     core = api.connect_core
     send = core.send
     stream = core._stream_screen
     buffers = {}
     frames = []
+    terminal_steps = deque(maxlen=6)
+    observed_rows = deque(maxlen=3)
+    capture_samples = deque(maxlen=3)
+    link_decoders = {}
+    link_stream = None
     line_cache = {}
     mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
     def new_numbering():
-        return NumberedArticle(page_mode=mode == 'page', allow_wrapping=(
-            mode == 'line' and core.config.screen_height == FALLBACK_HEIGHT))
+        return NumberedArticle(page_mode=mode == 'page', allow_wrapping=True, short_wrap_retry=(
+            isinstance(api, BoardSession) and mode == 'line'
+            and core.config.screen_height == FALLBACK_HEIGHT))
 
     numbered = new_numbering()
     if isinstance(api, BoardSession):
@@ -654,15 +793,57 @@ def read_colored_post(api, board, aid):
     reached_end = False
     page_turns = 0
     fallback_attempts = []
+    received_bytes = 0
+    key_names = {None: 'receive_only', command.enter * 2: 'open', command.down: 'down',
+                 command.up: 'up', command.right: 'right', command.left: 'left',
+                 PAGE_DOWN_KEY: 'page_down', END_KEY: 'end', 'n': 'decline_animation'}
+
+    def record_step(message, outcome, silent=None):
+        queue = core.get_screen_queue()
+        screen = queue[-1] if queue else ''
+        footer = screen.rsplit('\n', 1)[-1]
+        extent = LINE_RANGE.search(footer)
+        percent = re.search(r'\(\s*(\d{1,3})%\)', footer) if extent else None
+        terminal_steps.append({
+            'key': key_names.get(message, 'other'), 'result': outcome, 'silent_timeout': silent,
+            'received_bytes': received_bytes, 'height': core.config.screen_height,
+            'screen_rows': screen.count('\n') + bool(screen),
+            'article_range': list(map(int, extent.groups())) if extent else None,
+            'percent': int(percent[1]) if percent else None,
+            'screen_digest': sha256(screen.encode()).hexdigest()[:16] if screen else None,
+        })
 
     def diagnostics():
         return {'mode': mode, 'page_key': 'Page Down' if mode == 'page' else None,
                 'page_turns': page_turns, 'frames': len(frames), 'frame_limit_hit': frame_limit_hit,
                 'reached_end': reached_end or numbered.end_evidence is not None,
                 'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts,
-                'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else []}
+                'osc8_commands': max((decoder.commands for decoder in link_decoders.values()), default=0),
+                'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else [],
+                'recent_row_layouts': [
+                    {'range': span, 'rows': [
+                        {'row': i, 'width': screens._cell_len(row), 'blank': not row.strip(),
+                         'backslash_column': screens._cell_len(row.rstrip(' ')) if row.rstrip(' ').endswith('\\') else None,
+                         'digest': sha256(row.encode()).hexdigest()[:12] if row.strip() else None}
+                        for i, row in enumerate(rows, 1)]}
+                    for span, rows in observed_rows
+                ] if not reached_end or numbered.assemble() is None else [],
+                'terminal_steps': list(terminal_steps) if not reached_end or numbered.assemble() is None else []}
 
     def capture_stream(encoding, chunk):
+        nonlocal link_stream, received_bytes
+        if capturing and encoding == core.current_encoding:
+            received_bytes += len(chunk)
+        if link_stream is not core._stream_parsers:
+            link_stream = core._stream_parsers
+            for decoder in link_decoders.values():
+                decoder.pending = b''
+                decoder.target = ''
+                decoder.label.clear()
+        decoder = link_decoders.get(encoding)
+        if decoder is None:
+            decoder = link_decoders[encoding] = TerminalLinks()
+        chunk = decoder.feed(chunk)
         result = stream(encoding, chunk)
         if capturing:
             parser = core._stream_parsers.get(encoding)
@@ -678,14 +859,18 @@ def read_colored_post(api, board, aid):
         return result
 
     def capture_send(message, targets, *args, **kwargs):
-        nonlocal capturing, frame_limit_hit, reached_end, numbered, page_turns
+        nonlocal capturing, frame_limit_hit, reached_end, numbered, page_turns, received_bytes
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
         article_screen = any(target.get_detect_target() in article_targets for target in targets)
         if article_screen and message == command.enter * 2:
             # PyPtt can retry from the beginning when metadata validation fails.
             # Keep completion and colors tied to the attempt it actually returns.
             frames.clear()
+            observed_rows.clear()
+            capture_samples.clear()
             line_cache.clear()
+            for decoder in link_decoders.values():
+                decoder.links.clear()
             numbered = new_numbering()
             reached_end = frame_limit_hit = False
             page_turns = 0
@@ -693,10 +878,22 @@ def read_colored_post(api, board, aid):
             page_turns += 1
         capturing = article_screen and numbered.seen < MAX_FRAMES
         frame_limit_hit |= article_screen and not capturing
+        command_counts = {encoding: decoder.commands for encoding, decoder in link_decoders.items()}
+        received_bytes = 0
         try:
-            result = send(message, targets, *args, **kwargs)
+            try:
+                result = send(message, targets, *args, **kwargs)
+            except Exception as exc:
+                if article_screen:
+                    record_step(message, type(exc).__name__)
+                raise
+            if article_screen:
+                record_step(message, result, bool(getattr(core, 'last_timeout_was_silent', False)) if result < 0 else None)
             if article_screen and 0 <= result < len(targets):
-                reached_end |= targets[result].get_detect_target() == screens.Target.PostEnd
+                target = targets[result].get_detect_target()
+                reached_end |= target == screens.Target.PostEnd
+                if target == screens.Target.Animation:
+                    terminal_steps[-1]['prompt'] = 'animation'
             if capturing and 0 <= result < len(targets) and targets[result].get_detect_target() in article_targets:
                 _, data = buffers.get(core.current_encoding, (None, None))
                 plain = core.get_screen_queue()[-1]
@@ -719,10 +916,29 @@ def read_colored_post(api, board, aid):
                     except (ValueError, IndexError, LookupError):
                         pass
                 at_end = targets[result].get_detect_target() == screens.Target.PostEnd
-                numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed)
+                decoder = link_decoders.get(core.current_encoding)
+                linked_screen = bool(decoder and decoder.commands > command_counts.get(core.current_encoding, 0))
+                numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed, linked_screen=linked_screen)
+                observed_rows.append((numbered.last_range, packed or rows[:-1]))
+                capture_samples.append({
+                    'screen': plain, 'encoding': core.current_encoding, 'height': core.config.screen_height,
+                    'key': key_names.get(message, 'other'), 'at_end': at_end, 'linked_screen': linked_screen,
+                    'colors': [list(line.color_runs) for line in packed] if packed is not None else None,
+                    'raw': bytes(data) if data else b'',
+                })
             return result
         finally:
             capturing = False
+
+    def save_diagnostic(capture, reason):
+        if capture_samples:
+            from local_state import save_reading_capture
+            try:
+                path = save_reading_capture(board, aid, mode, list(capture_samples), capture, reason)
+            except OSError as exc:
+                capture['reading_capture_error'] = type(exc).__name__
+            else:
+                capture['reading_capture'] = str(path)
 
     core.send = capture_send
     core._stream_screen = capture_stream
@@ -733,6 +949,7 @@ def read_colored_post(api, board, aid):
             post = api.get_post(board, aid=aid)
     except Exception as exc:
         exc.capture_diagnostics = diagnostics()
+        save_diagnostic(exc.capture_diagnostics, type(exc).__name__)
         if getattr(exc, 'open_screen_unrecognized', False):
             exc.capture_diagnostics['open_screen_unrecognized'] = True
         raise
@@ -756,6 +973,11 @@ def read_colored_post(api, board, aid):
         else:
             colors, covered = match_colors(body, frames)
         selected_rows = body.split('\n')
+        decoder = link_decoders.get(core.current_encoding)
+        targets = {label: next(iter(addresses)) for label, addresses in (decoder.links.items() if decoder else ())
+                   if len(addresses) == 1 and label not in addresses and label in body}
+        if targets:
+            post['link_targets'] = targets
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}
@@ -771,4 +993,6 @@ def read_colored_post(api, board, aid):
                 (n for n, (old, new) in enumerate(zip(sdk_rows, selected_rows), 1) if old != new),
                 min(len(sdk_rows), len(selected_rows)) + 1 if len(sdk_rows) != len(selected_rows) else None),
         )
+    if body and numbered.assemble() is None and numbered.single_screen_body is None:
+        save_diagnostic(capture, 'Text or color alignment needs review')
     return post

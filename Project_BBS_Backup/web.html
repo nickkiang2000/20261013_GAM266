@@ -22,6 +22,8 @@ input:not([type=checkbox],[type=hidden]), select { display: block; width: 100%; 
 button { padding: 5px 9px; font: inherit; color: inherit; background: #202441;
          border: 1px solid #59658b; border-radius: 3px; cursor: pointer; }
 button:disabled { cursor: default; }
+input:disabled, select:disabled { opacity: .5; }
+#start-error { color: #ffadad; }
 #run { color: #ffffa0; background: #141488; border-color: #5353bc; }
 #run:disabled { opacity: .5; }
 #stop[data-result="done"], #stop[data-result="stopped"] { background: #a12635; color: #fff; border-color: #e76b78; }
@@ -125,7 +127,9 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
 </div>
 <div class="form-row scan-fields">
-    <label>起始編號（0為最新）<input name="start" id="scan-start" type="number" min="0" value="0" required></label>
+    <label>起始編號<input name="start" id="scan-start" type="text" value="0" required autocomplete="off"
+        title="0為最新，或可輸入想下載的編號，以逗號分隔" aria-describedby="start-error">
+        <small id="start-error" hidden></small></label>
     <label>掃描篇數<input name="count" id="scan-count-input" type="number" min="1" max="10000" value="5" required></label>
     <label>掃描方向<select name="direction" id="scan-direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
     <div>
@@ -407,14 +411,28 @@ updateDesktopToggle();
 function updateFormSummary() {
     const {start, direction, site, board, count, folder, backup_mode,
         test_aid, test_capture_mode, test_short_terminal} = form.elements;
-    const first = Number(start.value);
+    const raw = start.value.replace(/[０-９]/g, char => String(char.charCodeAt(0) - 0xFF10)).replace(/，/g, ',');
+    const parts = raw.split(',').map(part => part.trim());
+    const listMode = parts.length > 1;
+    const validStart = parts.length <= 10000 && parts.every(part =>
+        /^[0-9]{1,10}$/.test(part) && Number(part) <= 2147483647 && (!listMode || Number(part) > 0));
+    const error = validStart ? '' : '請輸入一個編號，或用逗號分隔多個正整數。0 只能單獨使用。';
+    start.setCustomValidity(error);
+    const startError = document.getElementById('start-error');
+    startError.textContent = error;
+    startError.hidden = !error;
+    count.disabled = direction.disabled = listMode;
+    const first = Number(parts[0]);
     const amount = Number(count.value);
     const oldestFirst = direction.value === 'oldest';
-    const valid = start.checkValidity() && count.checkValidity()
-        && Number.isSafeInteger(first) && Number.isSafeInteger(first + amount - 1);
+    const valid = validStart && (listMode || (count.checkValidity() && Number.isSafeInteger(first + amount - 1)));
     let estimate = '請確認編號與篇數';
     let range = estimate;
-    if (valid && first === 0) {
+    if (valid && listMode) {
+        const selected = [...new Set(parts.map(Number))];
+        estimate = `指定 ${selected.length} 篇`;
+        range = selectedRange(selected);
+    } else if (valid && first === 0) {
         estimate = '登入後確認最新編號';
         range = oldestFirst ? '從最新一篇起 · 舊到新 · 只掃最新一篇' : `從最新一篇起 · 最多 ${amount} 篇 · 新到舊`;
     } else if (valid) {
@@ -423,8 +441,8 @@ function updateFormSummary() {
         range = `${estimate} · 最多 ${Math.abs(first - last) + 1} 篇 · ${oldestFirst ? '舊到新' : '新到舊'}`;
     }
     setText('range-preview', estimate);
-    document.getElementById('range-preview').title = valid && first > 0
-        ? '實際掃描範圍以登入時的看板編號為準' : '';
+    document.getElementById('range-preview').title = valid && listMode ? range
+        : valid && first > 0 ? '實際掃描範圍以登入時的看板編號為準' : '';
     const name = archiveName();
     const actualLeaf = resolvedFolder.split(/[\\/]/).filter(Boolean).at(-1);
     folderSuffix.hidden = !name || Boolean(resolvedFolder && actualLeaf?.toLowerCase() !== name.toLowerCase());
@@ -448,7 +466,13 @@ function backupLabel(mode) {
     return mode === 'fill' ? '補齊備份' : '重新核對';
 }
 
-function pendingRange({first, last, direction}) {
+function selectedRange(indices) {
+    const preview = indices.slice(0, 6).join('、') + (indices.length > 6 ? '…' : '');
+    return `指定 ${indices.length} 篇（${preview}）· 依輸入順序`;
+}
+
+function pendingRange({first, last, direction, selected_indices}) {
+    if (selected_indices?.length) return selectedRange(selected_indices);
     return direction === 'oldest' ? `${first} → ${last} · 舊到新` : `${last} → ${first} · 新到舊`;
 }
 
@@ -571,10 +595,10 @@ async function send(path, data) {
         });
         if (!response.ok) {
             const error = await response.json();
-            showNotice('無法啟動操作', error.no_pending ? '找不到未完成批次。'
+            showNotice('無法啟動操作', error.error || (error.no_pending ? '找不到未完成批次。'
                 : error.rate_limit ? '站方限速仍在生效，請等到頁面顯示的時間後再續傳。'
                 : response.status === 403 ? '本機程式可能已重新啟動，請重新整理頁面。'
-                : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。');
+                : response.status === 409 ? '另一個任務正在執行。' : '請確認欄位與資料夾完整路徑。'));
             checkPending();
         } else if (path !== '/stop') {
             if (data.mode !== 'test') {
@@ -717,6 +741,8 @@ repairConfirm.onclick = () => runRepair(async () => {
 
 form.addEventListener('submit', event => {
     event.preventDefault();
+    updateFormSummary();
+    if (!form.reportValidity()) return;
     const data = Object.fromEntries(new FormData(form));
     data.folder = rootFolder(data.folder);
     form.elements.password.value = '';
@@ -798,7 +824,9 @@ async function refresh() {
         progress.max = state.batch_total;
         progress.value = state.scanned;
         scan = `${state.scanned}／${state.batch_total}`;
-        if (state.batch_start) {
+        if (state.selected_indices?.length) {
+            range = `${state.resumed ? '接續' : '本次'}${selectedRange(state.selected_indices)}`;
+        } else if (state.batch_start) {
             const ascending = state.direction === 'oldest';
             range = `${state.resumed ? '接續' : '本次'}範圍 ${ascending ? state.batch_start : state.batch_end} → ${ascending ? state.batch_end : state.batch_start}`;
         }

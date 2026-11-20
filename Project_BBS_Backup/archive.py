@@ -5,6 +5,8 @@ from html import escape
 from itertools import groupby
 import json
 import re
+
+from terminal_links import WEB_URL
 from issue_records import report as issue_report
 import issue_records
 from pathlib import Path
@@ -260,7 +262,7 @@ def file_stamp(path):
         return None
 
 
-def linkified_line(line, runs=()):
+def linkified_line(line, runs=(), targets=None):
     def render_slice(start, stop):
         if not runs:
             return escape(line[start:stop])
@@ -285,13 +287,17 @@ def linkified_line(line, runs=()):
             continue
         stop = match.start() + len(url)
         parts.append(render_slice(cursor, match.start()))
-        parts.append(f'<a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">'
+        target = (targets or {}).get(url, url)
+        if not isinstance(target, str) or not WEB_URL.fullmatch(target):
+            target = url
+        parts.append(f'<a href="{escape(target, quote=True)}" target="_blank" rel="noopener noreferrer">'
                      + render_slice(match.start(), stop) + '</a>')
         cursor = stop
     return ''.join(parts) + render_slice(cursor, len(line))
 
 
-def article_body(body, color_lines, *, start_line=0):
+def article_body(body, color_lines, *, start_line=0, targets=None):
+    targets = targets if isinstance(targets, dict) else {}
     lines = body.split('\n')
     end = len(lines)
     while end > start_line and not lines[end - 1].strip(' \t\r\x08'):
@@ -303,15 +309,15 @@ def article_body(body, color_lines, *, start_line=0):
     # Keep a short final frame aligned to the article's page boundary.
     frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-(end - start_line)) % FRAME_ROWS}lh"'
     if color_lines is None:
-        return f'<pre{frame_style}>\n' + '\n'.join(map(linkified_line, lines[:end])) + '</pre>'
+        return f'<pre{frame_style}>\n' + '\n'.join((linkified_line(line, targets=targets) for line in lines[:end])) + '</pre>'
     rendered = []
     for index in range(start_line, end):
         line = lines[index]
         runs = color_lines.get(str(index), [])
         if runs and ''.join(text for text, _ in runs) == line:
-            rendered.append(linkified_line(line, runs))
+            rendered.append(linkified_line(line, runs, targets))
         else:
-            rendered.append(linkified_line(line))
+            rendered.append(linkified_line(line, targets=targets))
     return f'<style>{ANSI_STYLE}</style><pre class="color-reference"{frame_style}>\n' + '\n'.join(rendered) + '</pre>'
 
 
@@ -392,7 +398,8 @@ def color_article(site, board, title, post, body, nav):
         metadata += (f'<p class="meta">人工 ANSI 備份 · {escape(manual["encoding"])}{notice}'
                      f' · 原檔 <code>{escape(manual["original"])}</code></p>')
     return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
-            + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0))
+            + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0,
+                           targets=post.get('link_targets')))
 
 
 def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
@@ -496,7 +503,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                     article = color_article(site, board, title, post, body, nav)
                 else:
                     article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
-                               f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None))
+                               f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None, targets=post.get('link_targets')))
             except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
                 render_error = type(exc).__name__
             if render_error:
