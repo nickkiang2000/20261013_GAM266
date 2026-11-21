@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.23.0'
+APP_VERSION = 'v2.24.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)

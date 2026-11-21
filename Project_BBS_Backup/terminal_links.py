@@ -16,6 +16,7 @@ class TerminalLinks:
         self.target = ''
         self.label = bytearray()
         self.links = {}
+        self.targets = set()
         self.commands = 0
 
     def _visible(self, data):
@@ -61,6 +62,8 @@ class TerminalLinks:
                     self.links.setdefault(label, set()).add(self.target)
                 address = target.decode('ascii', errors='replace')
                 self.target = address if address.isascii() and WEB_URL.fullmatch(address) else ''
+                if self.target:
+                    self.targets.add(self.target)
                 self.label.clear()
             data = data[end.end():]
         return b''.join(parts)

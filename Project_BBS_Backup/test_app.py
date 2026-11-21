@@ -921,8 +921,8 @@ class StorageTests(unittest.TestCase):
                 article = NumberedArticle(allow_wrapping=True, short_wrap_retry=True)
                 article.observe(rows[:5], '瀏覽 第 1/3 頁 (5%) 第 1~4 行', at_end=False, styled=rows[:5])
                 article.observe(rows[1:6], '瀏覽 第 1/3 頁 (5%) 第 2~5 行', at_end=False, styled=rows[1:6])
-                self.assertEqual(article.provisional_row, 6)
-                self.assertNotIn(6, article.rows)
+                self.assertEqual(len(article.scrolling.rows), 6)
+                self.assertIsNone(article.scrolling.result)
                 self.assertIsNone(article.assemble())
                 final = rows[2:] if corroborated else [*rows[2:5], CapturedLine('不同的續文', ()), rows[6]]
                 article.observe(final, '瀏覽 第 3/3 頁 (100%) 第 3~7 行', at_end=True, styled=final)

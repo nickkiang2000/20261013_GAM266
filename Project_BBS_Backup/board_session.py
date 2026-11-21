@@ -465,6 +465,18 @@ class BoardSession:
         for step in range(FALLBACK_MAX_STEPS + 1):
             if result == 0:
                 return numbering.assemble() if not numbering.color_conflicts else None
+            if numbering.scrolling is not None:
+                if result == 2 or step == FALLBACK_MAX_STEPS or numbering.scrolling.waiting >= 6:
+                    break
+                if self.check_stop:
+                    self.check_stop()
+                revision = numbering.scrolling.revision
+                previous_range = numbering.last_range
+                result = self._send_article_key(command.down)
+                if (result == 1 and numbering.scrolling.revision == revision
+                        and numbering.scrolling.waiting == 0 and numbering.last_range == previous_range):
+                    return self._verify_end(get_numbering)
+                continue
             previous = numbering.last_window
             if (result == 2 or step == FALLBACK_MAX_STEPS or previous is None
                     or not numbering.covers_prefix(previous[1]) or numbering.color_conflicts):

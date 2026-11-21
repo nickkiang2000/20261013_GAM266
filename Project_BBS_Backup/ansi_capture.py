@@ -254,6 +254,8 @@ class NumberedArticle:
         self.page_mode = page_mode
         self.allow_wrapping = allow_wrapping
         self.short_wrap_retry = short_wrap_retry
+        from scroll_capture import ScrollCapture
+        self.scrolling = ScrollCapture() if short_wrap_retry else None
         self.pending_wrap = None
         self.wrap_markers = {}
         self.wrapped_screens = 0
@@ -310,6 +312,21 @@ class NumberedArticle:
         if at_end:
             self.end_range = span
         count = last - first + 1
+        if self.scrolling is not None:
+            self.scrolling.observe(styled, first, last, at_end)
+            from scroll_capture import wrap_prefix
+            self.wrap_marker_seen |= any(wrap_prefix(row) is not None for row in self.scrolling.rows)
+            selected = self.scrolling.result
+            visible, _ = self.scrolling.fold(self.scrolling.rows)
+            selected = selected if selected is not None else visible
+            self.rows = {i: text for i, (text, _) in enumerate(selected, 1)}
+            self.colors = {i: runs for i, (_, runs) in enumerate(selected, 1)}
+            self.last_window = (1, len(selected), tuple(text for text, _ in selected)) if selected else None
+            self.end_usable = self.scrolling.result is not None
+            if self.end_usable:
+                self.end_range = [1, len(selected)]
+                self.end_evidence = 'screen_overlap_and_end_count'
+            return
         seen_provisional = self.provisional_row
         prior_provisional = self.provisional_content
         checking_first_extra = (self.seen == 2 or bridging) and (
@@ -717,6 +734,9 @@ class NumberedArticle:
         return self.assemble()
 
     def assemble(self):
+        if self.scrolling is not None:
+            selected = self.scrolling.result
+            return '\n'.join(text for text, _ in selected) if selected is not None else None
         if (self.pending_wrap is not None or self.provisional_row is not None
                 or not self.end_usable or not self.covers(self.end_range[1])):
             return None
@@ -738,6 +758,7 @@ class NumberedArticle:
         if previous < last:
             gaps.append([previous + 1, last])
         return {
+            'screen_overlap': self.scrolling.diagnostics() if self.scrolling is not None else None,
             'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
             'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
@@ -819,6 +840,7 @@ def read_colored_post(api, board, aid):
                 'reached_end': reached_end or numbered.end_evidence is not None,
                 'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts,
                 'osc8_commands': max((decoder.commands for decoder in link_decoders.values()), default=0),
+                'hyperlink_targets': sorted({target for decoder in link_decoders.values() for target in decoder.targets}),
                 'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else [],
                 'recent_row_layouts': [
                     {'range': span, 'rows': [
@@ -871,6 +893,7 @@ def read_colored_post(api, board, aid):
             line_cache.clear()
             for decoder in link_decoders.values():
                 decoder.links.clear()
+                decoder.targets.clear()
             numbered = new_numbering()
             reached_end = frame_limit_hit = False
             page_turns = 0
@@ -918,6 +941,10 @@ def read_colored_post(api, board, aid):
                 at_end = targets[result].get_detect_target() == screens.Target.PostEnd
                 decoder = link_decoders.get(core.current_encoding)
                 linked_screen = bool(decoder and decoder.commands > command_counts.get(core.current_encoding, 0))
+                if (isinstance(api, BoardSession) and mode == 'line'
+                        and core.config.screen_height == FALLBACK_HEIGHT and numbered.scrolling is None):
+                    from scroll_capture import ScrollCapture
+                    numbered.scrolling = ScrollCapture()
                 numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed, linked_screen=linked_screen)
                 observed_rows.append((numbered.last_range, packed or rows[:-1]))
                 capture_samples.append({
@@ -981,7 +1008,7 @@ def read_colored_post(api, board, aid):
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}
-        assembly = 'numbered' if reconstructed is not None else 'sdk'
+        assembly = ('screen_overlap' if numbered.scrolling is not None else 'numbered') if reconstructed is not None else 'sdk'
         if numbered.single_screen_body is not None:
             assembly = 'single_screen'
         capture.update(
