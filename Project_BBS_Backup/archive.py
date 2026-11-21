@@ -262,7 +262,7 @@ def file_stamp(path):
         return None
 
 
-def linkified_line(line, runs=(), targets=None):
+def linkified_line(line, runs=(), targets=None, occurrences=()):
     def render_slice(start, stop):
         if not runs:
             return escape(line[start:stop])
@@ -291,16 +291,28 @@ def linkified_line(line, runs=(), targets=None):
         # Use an exact known label; never infer an unknown URL by removing '/'.
         if url.endswith('\\') and url[:-1] in (targets or {}):
             url = url[:-1]
-        target = (targets or {}).get(url, url)
+        matching = [link for link in occurrences if link['start'] == match.start()
+                    and link['label'] in (url, url.removesuffix('\\'))]
+        positional = {link['target'] for link in matching}
+        target = next(iter(positional)) if len(positional) == 1 else (targets or {}).get(url, url)
         if not isinstance(target, str) or not WEB_URL.fullmatch(target):
             target = url
         parts.append(f'<a href="{escape(target, quote=True)}" target="_blank" rel="noopener noreferrer">'
-                     + render_slice(match.start(), stop) + '</a>')
+                     + (escape(target) if len(positional) == 1 else render_slice(match.start(), stop)) + '</a>')
         cursor = stop
     return ''.join(parts) + render_slice(cursor, len(line))
 
 
-def display_lines(lines, colors, targets, start, end):
+def occurrence_targets(targets, links):
+    local = dict(targets)
+    values = {}
+    for link in links:
+        values.setdefault(link['label'], set()).add(link['target'])
+    local.update({label: next(iter(addresses)) for label, addresses in values.items() if len(addresses) == 1})
+    return local
+
+
+def display_lines(lines, colors, targets, start, end, line_links=None):
     """Join a displayed URL only when its saved full target proves both pieces."""
     output = []
     index = start
@@ -309,15 +321,18 @@ def display_lines(lines, colors, targets, start, end):
         runs = (colors or {}).get(str(index), [])
         joined = False
         if index + 1 < end:
-            for label, target in targets.items():
+            for label, target in occurrence_targets(targets, (line_links or {}).get(index, [])).items():
                 if (not isinstance(target, str) or not WEB_URL.fullmatch(target)
                         or not target.startswith(label) or target == label):
                     continue
                 head = line.rstrip(' ')
                 tail = lines[index + 1]
-                if not head.endswith(label + '\\') or tail.rstrip(' ') != target[len(label):]:
+                if tail.rstrip(' ') != target[len(label):]:
                     continue
-                head = head[:-1]
+                if head.endswith(label + '\\'):
+                    head = head[:-1]
+                elif not head.endswith(label):
+                    continue
                 first_runs = []
                 offset = 0
                 for text, style in runs:
@@ -339,9 +354,17 @@ def display_lines(lines, colors, targets, start, end):
     return output
 
 
-def article_body(body, color_lines, *, start_line=0, targets=None, soft_wrap_lines=(), personalized=False):
+def article_body(body, color_lines, *, start_line=0, targets=None, soft_wrap_lines=(), personalized=False, link_occurrences=()):
     targets = targets if isinstance(targets, dict) else {}
     lines = body.split('\n')
+    line_links = {}
+    for link in link_occurrences:
+        index = link.get('line', -1)
+        start = link.get('start', -1)
+        if (isinstance(index, int) and isinstance(start, int) and 0 <= index < len(lines) and start >= 0
+                and lines[index][start:start+len(link.get('label', ''))] == link.get('label')
+                and isinstance(link.get('target'), str) and WEB_URL.fullmatch(link['target'])):
+            line_links.setdefault(index, []).append(link)
     end = len(lines)
     while end > start_line and not lines[end - 1].strip(' \t\r\x08'):
         runs = (color_lines or {}).get(str(end - 1), ())
@@ -349,22 +372,24 @@ def article_body(body, color_lines, *, start_line=0, targets=None, soft_wrap_lin
                for _, classes in runs):
             break
         end -= 1
-    entries = display_lines(lines, color_lines, targets, start_line if color_lines is not None else 0, end)
+    entries = display_lines(lines, color_lines, targets, start_line if color_lines is not None else 0, end, line_links)
     frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-len(entries)) % FRAME_ROWS}lh"'
     if color_lines is None:
-        return f'<pre{frame_style}>\n' + '\n'.join(linkified_line(line, targets=targets) for _, line, _, _ in entries) + '</pre>'
+        return f'<pre{frame_style}>\n' + '\n'.join(linkified_line(line, targets=occurrence_targets(targets, line_links.get(index, [])), occurrences=line_links.get(index, [])) for index, line, _, _ in entries) + '</pre>'
     rendered = []
     soft_wrap_lines = set(soft_wrap_lines)
     for index, line, runs, joined_url in entries:
+        links = line_links.get(index, [])
+        local_targets = occurrence_targets(targets, links)
         if personalized:
             neutral = re.sub(r'(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]{1,12}(?=\s+你有什麼特別的願望呢)', '〔讀者〕', line)
             if neutral != line:
                 line, runs = neutral, []
         if runs and ''.join(text for text, _ in runs) == line:
-            rendered.append(linkified_line(line, runs, targets))
+            rendered.append(linkified_line(line, runs, local_targets, links))
         else:
-            rendered.append(linkified_line(line, targets=targets))
-        if index in soft_wrap_lines or joined_url:
+            rendered.append(linkified_line(line, targets=local_targets, occurrences=links))
+        if index in soft_wrap_lines or joined_url or links:
             rendered[-1] = '<span class="soft-wrap-line">' + rendered[-1] + '</span>'
     return f'<style>{ANSI_STYLE}</style><pre class="color-reference"{frame_style}>\n' + '\n'.join(rendered) + '</pre>'
 
@@ -467,7 +492,8 @@ def color_article(site, board, title, post, body, nav):
     return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
             + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0,
                            targets=post.get('link_targets'), soft_wrap_lines=soft,
-                           personalized=post.get('personalized_capture', False)))
+                           personalized=post.get('personalized_capture', False),
+                           link_occurrences=post.get('link_occurrences', [])))
 
 
 def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
@@ -571,7 +597,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                     article = color_article(site, board, title, post, body, nav)
                 else:
                     article = (f'{nav}<h1>{escape(title)}</h1><p class="meta">'
-                               f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None, targets=post.get('link_targets')))
+                               f'{escape(site)} / {escape(board)} · {escape(aid)}</p>' + article_body(body, None, targets=post.get('link_targets'), link_occurrences=post.get('link_occurrences', [])))
             except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
                 render_error = type(exc).__name__
             if render_error:

@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.25.1'
+APP_VERSION = 'v2.25.2'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -525,6 +525,7 @@ def manual_capture_issues(post):
     body = post.get('full_content') or ''
     coverage = post.get('ansi_coverage') or {}
     mapped = set((post.get('link_targets') or {}).values())
+    mapped.update(link['target'] for link in post.get('link_occurrences', []))
     known = diagnostic.get('hyperlink_targets') or []
     issues = []
     if not complete_capture(post):
@@ -644,7 +645,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     STATE['ansi_samples'] = STATE.get('ansi_samples', 0) + 1
     STATE['ansi_colored'] = STATE.get('ansi_colored', 0) + bool(post.get('ansi_lines'))
     STATE['ansi_coverage'] = post.get('ansi_coverage', {})
-    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments', 'link_targets', 'soft_wrap_lines', 'personalized_capture')
+    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments', 'link_targets', 'link_occurrences', 'soft_wrap_lines', 'personalized_capture')
     unchanged = verified and existing and complete_capture(existing) and all(
         json.dumps(post.get(key), sort_keys=True) == json.dumps(existing.get(key), sort_keys=True)
         for key in fields)

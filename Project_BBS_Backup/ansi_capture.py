@@ -798,7 +798,7 @@ class NumberedArticle:
 
 def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
-    from board_session import BoardSession, END_KEY, FALLBACK_HEIGHT, PAGE_DOWN_KEY
+    from board_session import ArticleTargetUnit, BoardSession, END_KEY, FALLBACK_HEIGHT, PAGE_DOWN_KEY
 
     core = api.connect_core
     send = core.send
@@ -809,6 +809,7 @@ def read_colored_post(api, board, aid):
     observed_rows = deque(maxlen=3)
     capture_samples = deque(maxlen=3)
     link_decoders = {}
+    link_frames = []
     link_stream = None
     line_cache = {}
     mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
@@ -851,6 +852,7 @@ def read_colored_post(api, board, aid):
                 'reached_end': reached_end or numbered.end_evidence is not None,
                 'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts,
                 'osc8_commands': max((decoder.commands for decoder in link_decoders.values()), default=0),
+                'link_frames': len(link_frames),
                 'hyperlink_targets': sorted({target for decoder in link_decoders.values() for target in decoder.targets}),
                 'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else [],
                 'recent_row_layouts': [
@@ -870,9 +872,7 @@ def read_colored_post(api, board, aid):
         if link_stream is not core._stream_parsers:
             link_stream = core._stream_parsers
             for decoder in link_decoders.values():
-                decoder.pending = b''
-                decoder.target = ''
-                decoder.label.clear()
+                decoder.reset_frame()
         decoder = link_decoders.get(encoding)
         if decoder is None:
             decoder = link_decoders[encoding] = TerminalLinks()
@@ -894,6 +894,8 @@ def read_colored_post(api, board, aid):
     def capture_send(message, targets, *args, **kwargs):
         nonlocal capturing, frame_limit_hit, reached_end, numbered, page_turns, received_bytes
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
+        targets = [ArticleTargetUnit(target) if target.get_detect_target() in article_targets
+                   and not isinstance(target, ArticleTargetUnit) else target for target in targets]
         article_screen = any(target.get_detect_target() in article_targets for target in targets)
         if article_screen and message == command.enter * 2:
             # PyPtt can retry from the beginning when metadata validation fails.
@@ -902,6 +904,7 @@ def read_colored_post(api, board, aid):
             observed_rows.clear()
             capture_samples.clear()
             line_cache.clear()
+            link_frames.clear()
             for decoder in link_decoders.values():
                 decoder.links.clear()
                 decoder.targets.clear()
@@ -923,6 +926,15 @@ def read_colored_post(api, board, aid):
                 raise
             if article_screen:
                 record_step(message, result, bool(getattr(core, 'last_timeout_was_silent', False)) if result < 0 else None)
+            if (article_screen and result < 0 and received_bytes and numbered.seen
+                    and message in (command.down, command.up, PAGE_DOWN_KEY, END_KEY)):
+                unknown = core.get_screen_queue()[-1]
+                # Save only an article movement response, never a login prompt.
+                if not any(token in unknown for token in ('請輸入密碼', '請輸入代號', 'Password:', '密碼不正確')):
+                    _, raw = buffers.get(core.current_encoding, (None, None))
+                    capture_samples.append({'screen': unknown, 'encoding': core.current_encoding,
+                        'height': core.config.screen_height, 'key': 'unknown_after_' + key_names.get(message, 'movement'),
+                        'at_end': False, 'linked_screen': False, 'colors': None, 'raw': bytes(raw) if raw else b''})
             if article_screen and 0 <= result < len(targets):
                 target = targets[result].get_detect_target()
                 reached_end |= target == screens.Target.PostEnd
@@ -952,6 +964,12 @@ def read_colored_post(api, board, aid):
                 at_end = targets[result].get_detect_target() == screens.Target.PostEnd
                 decoder = link_decoders.get(core.current_encoding)
                 linked_screen = bool(decoder and decoder.commands > command_counts.get(core.current_encoding, 0))
+                if data and decoder and decoder.occurrences:
+                    from link_positions import frame_links
+                    marks = frame_links(bytes(data), core.current_encoding, core.config.screen_height,
+                                        decoder.occurrences, rows[:-1])
+                    if marks:
+                        link_frames.append({'rows': rows[:-1], 'links': marks})
                 if (isinstance(api, BoardSession) and mode == 'line'
                         and core.config.screen_height == FALLBACK_HEIGHT and numbered.scrolling is None):
                     from scroll_capture import ScrollCapture
@@ -1020,6 +1038,12 @@ def read_colored_post(api, board, aid):
                    if len(addresses) == 1 and label not in addresses and label in body}
         if targets:
             post['link_targets'] = targets
+        if link_frames:
+            from link_positions import resolve_links
+            occurrences = resolve_links(body, link_frames)
+            if occurrences:
+                post['link_occurrences'] = occurrences
+            capture['resolved_link_occurrences'] = len(occurrences)
         if colors:
             post['ansi_lines'] = colors
         post['ansi_coverage'] = {'matched': covered, 'total': len(selected_rows), 'colored': len(colors)}

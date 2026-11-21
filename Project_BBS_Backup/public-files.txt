@@ -25,3 +25,5 @@ test_scroll_capture.py
 test_release.py
 tests/fixtures/scroll_v223.json
 test_patch.py
+link_positions.py
+test_final_cases.py

@@ -18,8 +18,20 @@ class TerminalLinks:
         self.links = {}
         self.targets = set()
         self.commands = 0
+        self.visible_bytes = 0
+        self.label_start = 0
+        self.occurrences = []
+
+    def reset_frame(self):
+        self.pending = b''
+        self.target = ''
+        self.label.clear()
+        self.visible_bytes = 0
+        self.label_start = 0
+        self.occurrences.clear()
 
     def _visible(self, data):
+        self.visible_bytes += len(data)
         if self.target and len(self.label) <= MAX_COMMAND_BYTES:
             self.label.extend(data[:MAX_COMMAND_BYTES + 1 - len(self.label)])
         return data
@@ -60,10 +72,15 @@ class TerminalLinks:
                 label = SGR_BYTES.sub(b'', self.label).decode('ascii', errors='replace')
                 if self.target and WEB_URL.fullmatch(label) and label.isascii():
                     self.links.setdefault(label, set()).add(self.target)
+                occurrence = WEB_URL.match(label)
+                if self.target and occurrence and occurrence[0].isascii():
+                    self.occurrences.append({'label': occurrence[0], 'target': self.target,
+                                             'byte_start': self.label_start})
                 address = target.decode('ascii', errors='replace')
                 self.target = address if address.isascii() and WEB_URL.fullmatch(address) else ''
                 if self.target:
                     self.targets.add(self.target)
                 self.label.clear()
+                self.label_start = self.visible_bytes
             data = data[end.end():]
         return b''.join(parts)

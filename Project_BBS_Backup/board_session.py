@@ -26,6 +26,35 @@ SCROLL_MAX_SECONDS = 2700
 TAIPEI = timezone(timedelta(hours=8))
 
 
+class ArticleTargetUnit(connect_core.TargetUnit):
+    """Recognize the personalized article footer while keeping SDK target IDs."""
+    def __init__(self, target, **kwargs):
+        if isinstance(target, connect_core.TargetUnit):
+            self.__dict__.update(target.__dict__)
+        else:
+            super().__init__(target, **kwargs)
+
+    def is_match(self, screen, cursor):
+        if self._current_match >= self._max_match > 0:
+            return False
+        if super().is_match(screen, cursor):
+            return True
+        footer = screen.rstrip('\n').rsplit('\n', 1)[-1]
+        match = re.search(r'^\s*瀏覽\s*第\s*\d+\s*/\s*\d+\s*頁\s*\(\s*(\d{1,3})%\s*\)', footer)
+        if not match or '此頁內容會依閱讀者不同' not in footer or '原文未必有您的資料' not in footer:
+            return False
+        percent = int(match[1])
+        if not 0 <= percent <= 100:
+            return False
+        if self.detect_target == screens.Target.PostEnd:
+            accepted = percent == 100
+        else:
+            accepted = self.detect_target == screens.Target.InPost
+        if accepted:
+            self._current_match += 1
+        return accepted
+
+
 class BoardNavigationError(RuntimeError):
     """The terminal did not reach a state in which it is safe to keep sending keys."""
 
@@ -356,8 +385,8 @@ class BoardSession:
         self.operations['empty_articles'] += 1
 
     def _article_targets(self):
-        return [connect_core.TargetUnit(screens.Target.PostEnd, break_detect=True),
-                connect_core.TargetUnit(screens.Target.InPost, break_detect=True),
+        return [ArticleTargetUnit(screens.Target.PostEnd, break_detect=True),
+                ArticleTargetUnit(screens.Target.InPost, break_detect=True),
                 *self._list_targets(),
                 connect_core.TargetUnit(screens.Target.PostNoContent, break_detect=True)]
 
@@ -439,7 +468,7 @@ class BoardSession:
 
     def _confirm_article_screen(self):
         screen = self._screen()
-        return any(connect_core.TargetUnit(target).is_match(screen, self.cursor)
+        return any(ArticleTargetUnit(target).is_match(screen, self.cursor)
                    for target in (screens.Target.InPost, screens.Target.PostEnd))
 
     def _verify_end(self, get_numbering):
