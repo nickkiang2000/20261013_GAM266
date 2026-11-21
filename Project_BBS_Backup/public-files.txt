@@ -24,3 +24,4 @@ test_app.py
 test_scroll_capture.py
 test_release.py
 tests/fixtures/scroll_v223.json
+test_patch.py

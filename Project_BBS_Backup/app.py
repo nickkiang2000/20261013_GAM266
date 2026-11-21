@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.25.0'
+APP_VERSION = 'v2.25.1'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -520,14 +520,29 @@ def complete_capture(post):
             and coverage.get('matched') == coverage['total'])
 
 
-def manual_capture_ready(post):
+def manual_capture_issues(post):
     diagnostic = post.get('ansi_diagnostics') or {}
     body = post.get('full_content') or ''
+    coverage = post.get('ansi_coverage') or {}
     mapped = set((post.get('link_targets') or {}).values())
     known = diagnostic.get('hyperlink_targets') or []
-    return (complete_capture(post) and diagnostic.get('reached_end') is True
-            and '8;;' not in body
-            and all(target in body or target in mapped for target in known))
+    issues = []
+    if not complete_capture(post):
+        issues.append({'code': 'coverage_incomplete',
+                       'message': f"畫面／配色對齊 {coverage.get('matched', 0)}／{coverage.get('total', 0)} 行，尚未完整"})
+    if diagnostic.get('reached_end') is not True:
+        issues.append({'code': 'end_unconfirmed', 'message': '尚未確認文末'})
+    if '8;;' in body:
+        issues.append({'code': 'control_code_residue', 'message': '正文仍殘留 8;; 控制碼文字'})
+    missing = sorted({target for target in known if target not in body and target not in mapped})
+    if missing:
+        issues.append({'code': 'unmapped_url_targets', 'message': f'{len(missing)} 個完整網址尚未對應正文',
+                       'targets': missing})
+    return issues
+
+
+def manual_capture_ready(post):
+    return not manual_capture_issues(post)
 
 
 def download_article(api, db, site, board, aid, *, source_index=None, existing=None, checkpoint=False):
@@ -618,8 +633,14 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     post['capture_version'] = CAPTURE_VERSION
     verified = complete_capture(post)
     replacing_manual = bool(existing and existing.get('manual_ansi'))
-    if replacing_manual and not manual_capture_ready(post):
-        raise ArticleReadError('人工備份保留：本次擷取或網址控制碼尚未通過核對')
+    if replacing_manual:
+        issues = manual_capture_issues(post)
+        diagnostic = post.setdefault('ansi_diagnostics', {})
+        diagnostic['manual_replacement_check'] = {'passed': not issues, 'issues': issues}
+        if issues:
+            error = ArticleReadError('人工備份保留：' + '；'.join(issue['message'] for issue in issues))
+            error.capture_diagnostics = diagnostic
+            raise error
     STATE['ansi_samples'] = STATE.get('ansi_samples', 0) + 1
     STATE['ansi_colored'] = STATE.get('ansi_colored', 0) + bool(post.get('ansi_lines'))
     STATE['ansi_coverage'] = post.get('ansi_coverage', {})

@@ -8,6 +8,31 @@ def padding(row):
     return not text.strip() and not any(token.startswith('b') for _, style in runs for token in style)
 
 
+def visible_row(row):
+    """Remove only trailing backspace residue after terminal rendering.
+
+    Interior controls and all spaces remain untouched. Colored text must
+    still describe the same visible string; raw traffic stays in diagnostics.
+    """
+    text, runs = row
+    visible = text.rstrip('\x08')
+    if visible == text:
+        return text, runs
+    painted = ''.join(value for value, _ in runs)
+    if not runs or painted == visible:
+        return visible, runs
+    if painted != text:
+        return text, runs
+    trimmed = []
+    offset = 0
+    for value, style in runs:
+        if offset >= len(visible):
+            break
+        trimmed.append((value[:len(visible)-offset], style))
+        offset += len(value)
+    return visible, tuple(trimmed)
+
+
 def wrap_prefix(row):
     text, runs = row
     last = text.rstrip(' ')
@@ -53,6 +78,10 @@ class ScrollCapture:
         self.first_failure = None
         self.last_accepted = None
         self.end_without_extent = False
+        self.last_failure = None
+        self.trailing_controls_removed = 0
+        self.end_padding_rows = 0
+        self.expected_end_lines = None
 
     @staticmethod
     def fold(rows):
@@ -60,6 +89,7 @@ class ScrollCapture:
         text, runs = '', ()
         continuing = False
         for row in rows:
+            row = visible_row(row)
             marker = wrap_prefix(row)
             if marker is not None:
                 text += marker[0]
@@ -106,13 +136,37 @@ class ScrollCapture:
             choices.extend((size, trim) for size in overlap_candidates(previous[:-trim], observed))
         return choices
 
+    def resolve_ambiguity(self, choices, first):
+        if (len(choices) <= 1 or first is None or self.last_range is None
+                or len(self.offsets) < 2 or self.offsets[-1] != self.offsets[-2]):
+            return choices, False
+        advance = first - self.last_range[0]
+        if advance <= 0:
+            return choices, False
+        supported = []
+        for overlap, trim in choices:
+            removed = len(self.previous) - trim - overlap
+            lines, pending = self.fold(self.previous[:removed])
+            if not pending and len(lines) == advance:
+                supported.append((overlap, trim))
+        return (supported, True) if len(supported) == 1 else (choices, False)
+
+    def record_failure(self, current, first, last, reason):
+        snapshot = {'accepted': self.previous, 'observed': current,
+                    'accepted_range': self.last_range, 'reported': [first, last], 'reason': reason}
+        if self.first_failure is None:
+            self.first_failure = snapshot
+        self.last_failure = snapshot
+
     def observe(self, styled, first, last, at_end):
         self.result = None
         if styled is None:
             self.waiting += 1
             self.error = 'colors_unavailable'
             return
-        current = [(str(row), tuple((text, tuple(style)) for text, style in row.color_runs)) for row in styled]
+        raw = [(str(row), tuple((text, tuple(style)) for text, style in row.color_runs)) for row in styled]
+        current = [visible_row(row) for row in raw]
+        self.trailing_controls_removed += sum(len(old[0])-len(new[0]) for old, new in zip(raw, current))
         if self.previous is None:
             if first != 1:
                 self.error = 'missing_start'
@@ -132,12 +186,13 @@ class ScrollCapture:
         else:
             choices = self.seam(current)
             candidates = [size for size, _ in choices]
+            choices, resolved = self.resolve_ambiguity(choices, first)
             self.moves.append({'reported': [first, last], 'overlaps': candidates,
-                               'padding_trims': [trim for _, trim in choices]})
+                               'padding_trims': [trim for _, trim in choices],
+                               'resolved_by_source_advance': resolved,
+                               'selected_overlap': choices[0][0] if len(choices) == 1 else None})
             if len(choices) != 1 or (first is not None and self.last_range and first < self.last_range[0]):
-                if self.first_failure is None:
-                    self.first_failure = {'accepted': self.previous, 'observed': current,
-                                          'reported': [first, last]}
+                self.record_failure(current, first, last, 'overlap_ambiguous' if candidates else 'overlap_missing')
                 self.waiting += 1
                 self.error = 'overlap_ambiguous' if candidates else 'overlap_missing'
                 return
@@ -147,6 +202,7 @@ class ScrollCapture:
             if overlap == len(current) and first is not None and (first, last) != self.last_range:
                 self.waiting += 1
                 self.error = 'repeated_window'
+                self.record_failure(current, first, last, self.error)
                 return
             if trim:
                 del self.rows[-trim:]
@@ -175,18 +231,26 @@ class ScrollCapture:
             last = len(folded)
             difference = 0
         self.end = last
-        # Footer offsets can settle back to zero at EOF. Accept the actual
-        # final extent or the single extra line evidenced on the first screen.
-        corroborated = (len(self.offsets) >= 2 and self.offsets[-1] == self.offsets[-2] == difference
-                        and self.revision >= 3 and abs(difference) <= len(current))
-        expected = len(folded) if corroborated else last + self.initial_extra if len(folded) > last else last
-        # Only remove unpainted padding beyond the corroborated source extent.
-        # Interior and source-counted blank lines remain intact.
-        while len(folded) > expected and padding(folded[-1]):
-            folded.pop()
-        if pending or len(folded) != expected:
+        # Source numbering is corroborating evidence. Work out the expected
+        # extent from prior connected screens BEFORE considering trailing blanks.
+        stable_offset = (self.offsets[-1] if len(self.offsets) >= 2
+                         and self.offsets[-1] == self.offsets[-2]
+                         and self.revision >= 3 and abs(self.offsets[-1]) <= len(current) else None)
+        if difference == 0:
+            expected = last
+        elif stable_offset is not None:
+            expected = last + stable_offset
+        else:
+            expected = last + self.initial_extra if len(folded) > last else last
+        self.expected_end_lines = expected
+        extra = folded[max(expected, 0):]
+        if (pending or expected < 1 or len(folded) < expected
+                or any(not padding(row) for row in extra)):
             self.error = 'end_line_count_mismatch'
             return
+        # Retain harmless tail blanks in the stored body, rather than refusing
+        # or deleting them just to force equality with the footer count.
+        self.end_padding_rows = len(extra)
         self.result = folded
         self.wrapped_lines = []
         logical = 0
@@ -203,5 +267,7 @@ class ScrollCapture:
                 'initial_extra': self.initial_extra, 'moves': list(self.moves),
                 'end_without_extent': self.end_without_extent,
                 'complete': self.result is not None, 'observed_offsets': list(self.offsets),
-                'first_failed_seam': self.first_failure,
+                'first_failed_seam': self.first_failure, 'last_failed_seam': self.last_failure,
+                'trailing_controls_removed': self.trailing_controls_removed,
+                'end_padding_rows_retained': self.end_padding_rows, 'expected_end_lines': self.expected_end_lines,
                 'accepted_display_rows': self.rows if self.error and self.end is not None else None}

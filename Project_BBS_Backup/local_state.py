@@ -105,13 +105,18 @@ def save_reading_capture(board, aid, mode, samples, diagnostic, reason):
                 rendered.append(escape(row))
         sections.append(f'<h2>畫面 {i} · {escape(sample["key"])} · {sample["height"]} 列</h2>'
                         '<pre class="color-reference">' + '\n'.join(rendered) + '</pre>')
-    seam = diagnostic.get('numbering', {}).get('screen_overlap') or {}
-    seam = seam.get('first_failed_seam') or {}
-    for label, key in (('最後確認成功的畫面', 'accepted'), ('第一次接合失敗的畫面', 'observed')):
-        if seam.get(key):
-            rendered = [''.join(render_run(text, style) for text, style in runs) if runs else escape(text)
-                        for text, runs in seam[key]]
-            sections.append(f'<h2>{label}</h2><pre class="color-reference">' + '\n'.join(rendered) + '</pre>')
+    overlap = diagnostic.get('numbering', {}).get('screen_overlap') or {}
+    first = overlap.get('first_failed_seam') or {}
+    latest = overlap.get('last_failed_seam') or {}
+    snapshots = [(first, '最後確認成功的畫面', '第一次接合失敗的畫面')]
+    if latest and latest != first:
+        snapshots.append((latest, '最近失敗前的已確認畫面', '最近一次接合失敗的畫面'))
+    for seam, accepted_label, observed_label in snapshots:
+        for label, key in ((accepted_label, 'accepted'), (observed_label, 'observed')):
+            if seam.get(key):
+                rendered = [''.join(render_run(text, style) for text, style in runs) if runs else escape(text)
+                            for text, runs in seam[key]]
+                sections.append(f'<h2>{label}</h2><pre class="color-reference">' + '\n'.join(rendered) + '</pre>')
     heading = escape(f'{board} · AID {aid} · {mode}')
     page = ('<!doctype html><html lang="zh-Hant"><meta charset="utf-8">'
             f'<title>文章擷取診斷 · {heading}</title><style>{ANSI_STYLE}'

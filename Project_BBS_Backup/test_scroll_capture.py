@@ -86,7 +86,7 @@ class ScrollTests(unittest.TestCase):
         self.assertIsNone(capture.result)
         capture = ScrollCapture()
         observe(capture, [line('a'), line('b'), line(''), line('')], 1, 3, True)
-        self.assertEqual([r[0] for r in capture.result], ['a','b',''])
+        self.assertEqual([r[0] for r in capture.result], ['a','b','',''])
         capture = ScrollCapture()
         observe(capture, [line('a'), line('b'), line('unexpected'), line('extra')], 1, 2, True)
         self.assertIsNone(capture.result)
