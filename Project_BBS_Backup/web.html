@@ -114,7 +114,7 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 </style>
 <header class="heading"><h1>BBS文章備份程式</h1><div class="heading-actions">
 <span class="version">__APP_VERSION__</span>
-<a href="ReadMe.html" target="_blank" rel="noopener">操作說明與紀錄</a>
+<a href="downloader-guide.html" target="_blank" rel="noopener">操作說明與紀錄</a>
 <button type="button" id="desktop-toggle" aria-pressed="false">啟用桌面通知</button>
 <button type="button" id="theme-toggle" aria-pressed="true">切換淺色</button></div></header>
 <main>
@@ -841,6 +841,7 @@ async function refresh() {
     if (state.resumed_verified) review.push(`沿用 ${state.resumed_verified} 篇`);
     if (state.unresolved) review.push(`文章待查 ${state.unresolved} 筆`);
     if (state.unavailable) review.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
+    if (state.manual_replaced) review.push(`人工備份替換 ${state.manual_replaced} 篇`);
     if (state.kept_previous) review.push(`保留舊備份 ${state.kept_previous} 篇`);
     if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
     const issues = document.getElementById('issues');

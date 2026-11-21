@@ -37,7 +37,7 @@ nav { display: flex; flex-wrap: wrap; gap: 1.25rem; }
 
 PAGE_SIZE = 20
 FRAME_ROWS = 22
-OFFLINE_README = Path(__file__).with_name('offline_readme.html')
+OFFLINE_README = Path(__file__).with_name('archive-guide.template.html')
 OFFLINE_SEARCH = Path(__file__).with_name('offline_search.js')
 URL_PATTERN = re.compile(r"""https?://[^\s<>"'\x00-\x1f，。！？；：、（）【】《》「」『』]+""", re.I)
 
@@ -287,6 +287,10 @@ def linkified_line(line, runs=(), targets=None):
             continue
         stop = match.start() + len(url)
         parts.append(render_slice(cursor, match.start()))
+        # A terminal continuation marker may have survived in an old backup.
+        # Use an exact known label; never infer an unknown URL by removing '/'.
+        if url.endswith('\\') and url[:-1] in (targets or {}):
+            url = url[:-1]
         target = (targets or {}).get(url, url)
         if not isinstance(target, str) or not WEB_URL.fullmatch(target):
             target = url
@@ -296,7 +300,46 @@ def linkified_line(line, runs=(), targets=None):
     return ''.join(parts) + render_slice(cursor, len(line))
 
 
-def article_body(body, color_lines, *, start_line=0, targets=None):
+def display_lines(lines, colors, targets, start, end):
+    """Join a displayed URL only when its saved full target proves both pieces."""
+    output = []
+    index = start
+    while index < end:
+        line = lines[index]
+        runs = (colors or {}).get(str(index), [])
+        joined = False
+        if index + 1 < end:
+            for label, target in targets.items():
+                if (not isinstance(target, str) or not WEB_URL.fullmatch(target)
+                        or not target.startswith(label) or target == label):
+                    continue
+                head = line.rstrip(' ')
+                tail = lines[index + 1]
+                if not head.endswith(label + '\\') or tail.rstrip(' ') != target[len(label):]:
+                    continue
+                head = head[:-1]
+                first_runs = []
+                offset = 0
+                for text, style in runs:
+                    if offset >= len(head):
+                        break
+                    first_runs.append((text[:len(head)-offset], style))
+                    offset += len(text)
+                tail_runs = (colors or {}).get(str(index + 1), [])
+                if (''.join(text for text, _ in first_runs) == head
+                        and ''.join(text for text, _ in tail_runs) == tail):
+                    runs = first_runs + list(tail_runs)
+                else:
+                    runs = []
+                line = head + tail
+                joined = True
+                break
+        output.append((index, line, runs, joined))
+        index += 2 if joined else 1
+    return output
+
+
+def article_body(body, color_lines, *, start_line=0, targets=None, soft_wrap_lines=(), personalized=False):
     targets = targets if isinstance(targets, dict) else {}
     lines = body.split('\n')
     end = len(lines)
@@ -306,24 +349,32 @@ def article_body(body, color_lines, *, start_line=0, targets=None):
                for _, classes in runs):
             break
         end -= 1
-    # Keep a short final frame aligned to the article's page boundary.
-    frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-(end - start_line)) % FRAME_ROWS}lh"'
+    entries = display_lines(lines, color_lines, targets, start_line if color_lines is not None else 0, end)
+    frame_style = f' style="--frame-rows: {FRAME_ROWS}; --frame-padding: {(-len(entries)) % FRAME_ROWS}lh"'
     if color_lines is None:
-        return f'<pre{frame_style}>\n' + '\n'.join((linkified_line(line, targets=targets) for line in lines[:end])) + '</pre>'
+        return f'<pre{frame_style}>\n' + '\n'.join(linkified_line(line, targets=targets) for _, line, _, _ in entries) + '</pre>'
     rendered = []
-    for index in range(start_line, end):
-        line = lines[index]
-        runs = color_lines.get(str(index), [])
+    soft_wrap_lines = set(soft_wrap_lines)
+    for index, line, runs, joined_url in entries:
+        if personalized:
+            neutral = re.sub(r'(?<![A-Za-z0-9_])[A-Za-z][A-Za-z0-9_]{1,12}(?=\s+你有什麼特別的願望呢)', '〔讀者〕', line)
+            if neutral != line:
+                line, runs = neutral, []
         if runs and ''.join(text for text, _ in runs) == line:
             rendered.append(linkified_line(line, runs, targets))
         else:
             rendered.append(linkified_line(line, targets=targets))
+        if index in soft_wrap_lines or joined_url:
+            rendered[-1] = '<span class="soft-wrap-line">' + rendered[-1] + '</span>'
     return f'<style>{ANSI_STYLE}</style><pre class="color-reference"{frame_style}>\n' + '\n'.join(rendered) + '</pre>'
 
 
 COLOR_ARTICLE_STYLE = '''
 html:has(.ansi-article) { background: #000; }
 body.ansi-article { background: #000; margin: 0 auto; padding: 0; }
+.ansi-article .soft-wrap-line { display: inline-block; vertical-align: top; width: 100%;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+.ansi-article .soft-wrap-line .ansi-run { display: inline; height: auto; line-height: inherit; }
 .ansi-article .article-top { background: #0c0a66; color: #fff; min-height: 38px;
     display: flex; align-items: baseline; flex-wrap: wrap; gap: .75em; padding: 4px .5em 0;
     box-sizing: border-box; font: 20px/19px "MingLiU", "PMingLiU", "細明體", monospace; }
@@ -397,9 +448,26 @@ def color_article(site, board, title, post, body, nav):
         notice = f' · {replacements} 處解碼替代字元' if replacements else ''
         metadata += (f'<p class="meta">人工 ANSI 備份 · {escape(manual["encoding"])}{notice}'
                      f' · 原檔 <code>{escape(manual["original"])}</code></p>')
+    if post.get('replaces_manual'):
+        original = post['replaces_manual'].get('original', '')
+        original_link = (' · <a href="../' + escape(original, quote=True) + '">人工原檔</a>'
+                         if re.fullmatch(r'manual-ansi/[0-9a-f]{64}\.ans', original) else '')
+        metadata += '<p class="meta">已由程式下載取代人工備份；舊正文保留於資料庫歷史' + original_link + '</p>'
+    soft = post.get('soft_wrap_lines', [])
+    # v2.24.0 joined only bright-white system markers in this capture mode.
+    # A resulting line wider than a physical terminal row is therefore a
+    # recoverable join. Manual/SDK captures receive no guessed wrapping.
+    if not soft and post.get('ansi_diagnostics', {}).get('assembly') == 'screen_overlap':
+        from PyPtt import screens
+        soft = [i for i, line in enumerate(body.split('\n')) if screens._cell_len(line) > 80 and '^L' not in line]
+    if '^L' in body:
+        soft = []  # Fixed-position animation source is never reflowed.
+    if post.get('personalized_capture'):
+        metadata += '<p class="meta">含閱讀者替換文字；已辨識的稱呼以〔讀者〕顯示，未宣稱取得作者原始模板。</p>'
     return (f'<style>{COLOR_ARTICLE_STYLE}{METADATA_STYLE}</style>' + header + metadata
             + article_body(body, post.get('ansi_lines', {}), start_line=4 if has_terminal_header else 0,
-                           targets=post.get('link_targets')))
+                           targets=post.get('link_targets'), soft_wrap_lines=soft,
+                           personalized=post.get('personalized_capture', False)))
 
 
 def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):

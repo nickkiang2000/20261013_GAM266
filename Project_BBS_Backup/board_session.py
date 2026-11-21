@@ -21,6 +21,8 @@ END_KEY = '\x1b[4~'
 PAGE_DOWN_KEY = '\x1b[6~'
 FALLBACK_HEIGHT = 24
 FALLBACK_MAX_STEPS = 512
+SCROLL_MAX_STEPS = 20000
+SCROLL_MAX_SECONDS = 2700
 TAIPEI = timezone(timedelta(hours=8))
 
 
@@ -462,11 +464,17 @@ class BoardSession:
             self.operations['animation_prompts_declined'] += 1
             result = self._send_article_key('n')
         numbering = get_numbering()
-        for step in range(FALLBACK_MAX_STEPS + 1):
+        limit = SCROLL_MAX_STEPS if numbering.scrolling is not None else FALLBACK_MAX_STEPS
+        started = time.monotonic()
+        for step in range(limit + 1):
             if result == 0:
                 return numbering.assemble() if not numbering.color_conflicts else None
             if numbering.scrolling is not None:
-                if result == 2 or step == FALLBACK_MAX_STEPS or numbering.scrolling.waiting >= 6:
+                if result == 2 or step == limit or time.monotonic() - started >= SCROLL_MAX_SECONDS or numbering.scrolling.waiting >= 6:
+                    if step == limit:
+                        numbering.scrolling.error = 'screen_safety_limit'
+                    elif time.monotonic() - started >= SCROLL_MAX_SECONDS:
+                        numbering.scrolling.error = 'reading_time_limit'
                     break
                 if self.check_stop:
                     self.check_stop()

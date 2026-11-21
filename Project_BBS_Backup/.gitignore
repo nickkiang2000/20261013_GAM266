@@ -4,3 +4,16 @@ __pycache__/
 data/
 log/
 test-downloads/
+
+*.sqlite3-*
+*.sqlite
+*.db
+*.ans
+.presentation-build/
+output/
+private/
+backups/
+search-data.js
+ANSI-color-reference.html
+BBS-Backup-Research-*.md
+connection-probe-*.json

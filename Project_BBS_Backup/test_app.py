@@ -458,7 +458,7 @@ class StorageTests(unittest.TestCase):
         core = SimpleNamespace(last_timeout_was_silent=False)
         api = SimpleNamespace(connect_core=core, cursor='>')
         for screen, kind, flexible in [
-            ('看板 YP91-304\n編號  日  期 作 者\n> private-title', 'article_list', True),
+            ('看板 SampleBoard\n編號  日  期 作 者\n> private-title', 'article_list', True),
             ('★ 您沒有權限進入此看板\nprivate-notice', 'access_notice', False),
             ('查無此看板', 'missing_board_notice', False),
         ]:
@@ -483,18 +483,18 @@ class StorageTests(unittest.TestCase):
     def test_destination_creates_board_path_and_recognizes_matching_legacy_archive(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d).resolve()
-            child = root / 'PTT_YP91-304'
-            self.assertEqual(app.archive_destination(root, 'PTT', 'YP91-304'), child)
-            self.assertEqual(app.archive_destination(child, 'PTT', 'YP91-304'), child)
+            child = root / 'PTT_SampleBoard'
+            self.assertEqual(app.archive_destination(root, 'PTT', 'SampleBoard'), child)
+            self.assertEqual(app.archive_destination(child, 'PTT', 'SampleBoard'), child)
             db = sqlite3.connect(root / 'articles.sqlite3')
             db.execute('''CREATE TABLE batch_ranges(site TEXT, board TEXT, first_index INTEGER,
                           last_index INTEGER, completed INTEGER, PRIMARY KEY(site,board))''')
-            db.execute("INSERT INTO batch_ranges VALUES('PTT','YP91-304',1,10,0)")
+            db.execute("INSERT INTO batch_ranges VALUES('PTT','SampleBoard',1,10,0)")
             db.commit()
             db.close()
-            self.assertEqual(app.archive_destination(root, 'PTT', 'YP91-304'), root)
-            self.assertEqual(app.archive_destination(root, 'PTT2', 'YP91-304'), root / 'PTT2_YP91-304')
-            self.assertEqual(app.find_pending_range(root, 'PTT', 'YP91-304'), (1, 10, 'newest'))
+            self.assertEqual(app.archive_destination(root, 'PTT', 'SampleBoard'), root)
+            self.assertEqual(app.archive_destination(root, 'PTT2', 'SampleBoard'), root / 'PTT2_SampleBoard')
+            self.assertEqual(app.find_pending_range(root, 'PTT', 'SampleBoard'), (1, 10, 'newest'))
             db = app.database(root)
             self.assertEqual(db.execute('SELECT direction FROM batch_ranges').fetchone(), ('newest',))
             db.close()

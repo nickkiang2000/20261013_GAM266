@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.24.0'
+APP_VERSION = 'v2.25.0'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -520,6 +520,16 @@ def complete_capture(post):
             and coverage.get('matched') == coverage['total'])
 
 
+def manual_capture_ready(post):
+    diagnostic = post.get('ansi_diagnostics') or {}
+    body = post.get('full_content') or ''
+    mapped = set((post.get('link_targets') or {}).values())
+    known = diagnostic.get('hyperlink_targets') or []
+    return (complete_capture(post) and diagnostic.get('reached_end') is True
+            and '8;;' not in body
+            and all(target in body or target in mapped for target in known))
+
+
 def download_article(api, db, site, board, aid, *, source_index=None, existing=None, checkpoint=False):
     from ansi_capture import read_colored_post
 
@@ -607,10 +617,13 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             post['headerless'] = True
     post['capture_version'] = CAPTURE_VERSION
     verified = complete_capture(post)
+    replacing_manual = bool(existing and existing.get('manual_ansi'))
+    if replacing_manual and not manual_capture_ready(post):
+        raise ArticleReadError('人工備份保留：本次擷取或網址控制碼尚未通過核對')
     STATE['ansi_samples'] = STATE.get('ansi_samples', 0) + 1
     STATE['ansi_colored'] = STATE.get('ansi_colored', 0) + bool(post.get('ansi_lines'))
     STATE['ansi_coverage'] = post.get('ansi_coverage', {})
-    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments', 'link_targets')
+    fields = ('title', 'author', 'date', 'full_content', 'ansi_lines', 'comments', 'link_targets', 'soft_wrap_lines', 'personalized_capture')
     unchanged = verified and existing and complete_capture(existing) and all(
         json.dumps(post.get(key), sort_keys=True) == json.dumps(existing.get(key), sort_keys=True)
         for key in fields)
@@ -626,6 +639,11 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             db.execute('UPDATE articles SET source_index=coalesce(?,source_index) WHERE site=? AND board=? AND aid=?',
                        (source_index, site, board, aid))
         else:
+            if replacing_manual:
+                db.execute('CREATE TABLE IF NOT EXISTS article_revisions(site TEXT,board TEXT,aid TEXT,created REAL,data TEXT)')
+                db.execute('INSERT INTO article_revisions VALUES(?,?,?,?,?)',
+                           (site, board, aid, time.time(), json.dumps(existing, ensure_ascii=False)))
+                post['replaces_manual'] = existing['manual_ansi']
             save_article(db, board, post, site=site, source_index=source_index, commit=False)
         db.execute('DELETE FROM unavailable_articles WHERE site=? AND board=? AND (idx=? OR aid=?)',
                    (site, board, source_index, aid))
@@ -647,6 +665,8 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
         STATE['kept_previous'] = STATE.get('kept_previous', 0) + 1
         show_issue(source_index, aid, f'保留舊備份，本次配色對齊 {matched}／{total} 行')
         return 'kept_previous_color', verified
+    if replacing_manual:
+        STATE['manual_replaced'] = STATE.get('manual_replaced', 0) + 1
     STATE['saved'] += 1
     STATE['updated'] = STATE['saved']
     if not verified:
@@ -1132,6 +1152,7 @@ def work(config):
                       reused_local=STATE.get('reused_local', 0),
                       resumed=STATE.get('resumed_verified', 0), unresolved=STATE['unresolved'],
                       unavailable=STATE.get('unavailable', 0), kept_previous=STATE.get('kept_previous', 0),
+                      manual_replaced=STATE.get('manual_replaced', 0),
                       exported=STATE.get('exported', 0), result=result)
         STATE.update(running=False, phase='done', result=result)
 
@@ -1154,8 +1175,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ('/', '/index.html'):
             html = (ROOT/'web.html').read_text(encoding='utf-8')
             return self.reply(200, html.replace('__TOKEN__', TOKEN).replace('__APP_VERSION__', APP_VERSION), 'text/html')
-        if self.path in ('/ReadMe.html', '/help.html'):
-            return self.reply(200, (ROOT / 'ReadMe.html').read_text(encoding='utf-8'), 'text/html')
+        if self.path in ('/downloader-guide.html', '/ReadMe.html', '/help.html'):
+            return self.reply(200, (ROOT / 'downloader-guide.html').read_text(encoding='utf-8'), 'text/html')
         if self.path == '/status':
             return self.reply(200,json.dumps({**STATE, 'rate_limits': active_rate_limits()},ensure_ascii=False))
         if self.path == '/preferences':
@@ -1282,7 +1303,7 @@ class Handler(BaseHTTPRequestHandler):
                              resumed_verified=0, local_count=None, updated=0, issues=[], folder=str(folder),
                              unavailable=0, kept_previous=0, reused_local=0, html_written=0,
                              result=None, wait_kind=None, wait_until=None,
-                             task_id=secrets.token_urlsafe(12),
+                             manual_replaced=0, task_id=secrets.token_urlsafe(12),
                              operation=('test' if mode == 'test' else 'download') if self.path == '/start' else 'export')
                 STOP.clear()
                 threading.Thread(target=target,args=args,daemon=True).start()

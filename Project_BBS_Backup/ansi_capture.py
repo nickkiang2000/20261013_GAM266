@@ -15,7 +15,7 @@ SGR = re.compile(r'\x1b\[([0-9;]*)m')
 LINE_RANGE = re.compile(r'^\s*瀏覽.*?第\s*(\d+)\s*~\s*(\d+)\s*行')
 SINGLE_SCREEN_END = re.compile(r'^\s*瀏覽\s*第\s*1\s*/\s*1\s*頁\s*\(\s*100%\s*\)')
 MAX_FRAME_BYTES = 256_000
-MAX_FRAMES = 4096
+MAX_FRAMES = 20000
 WRAP_MARKER_COLUMNS = (79, 80)
 
 
@@ -253,6 +253,7 @@ class NumberedArticle:
     def __init__(self, *, page_mode=False, allow_wrapping=False, short_wrap_retry=False):
         self.page_mode = page_mode
         self.allow_wrapping = allow_wrapping
+        self.personalized = False
         self.short_wrap_retry = short_wrap_retry
         from scroll_capture import ScrollCapture
         self.scrolling = ScrollCapture() if short_wrap_retry else None
@@ -298,6 +299,11 @@ class NumberedArticle:
         match = LINE_RANGE.search(status)
         bridging = self.bridge_remaining > 0
         if not match:
+            if (self.scrolling is not None and self.scrolling.previous is not None
+                    and '此頁內容會依閱讀者不同' in status):
+                self.personalized = True
+                self._observe_scrolling(styled, None, None, at_end)
+                return
             self.unnumbered += 1
             if bridging:
                 self.bridge_remaining = 0
@@ -313,19 +319,7 @@ class NumberedArticle:
             self.end_range = span
         count = last - first + 1
         if self.scrolling is not None:
-            self.scrolling.observe(styled, first, last, at_end)
-            from scroll_capture import wrap_prefix
-            self.wrap_marker_seen |= any(wrap_prefix(row) is not None for row in self.scrolling.rows)
-            selected = self.scrolling.result
-            visible, _ = self.scrolling.fold(self.scrolling.rows)
-            selected = selected if selected is not None else visible
-            self.rows = {i: text for i, (text, _) in enumerate(selected, 1)}
-            self.colors = {i: runs for i, (_, runs) in enumerate(selected, 1)}
-            self.last_window = (1, len(selected), tuple(text for text, _ in selected)) if selected else None
-            self.end_usable = self.scrolling.result is not None
-            if self.end_usable:
-                self.end_range = [1, len(selected)]
-                self.end_evidence = 'screen_overlap_and_end_count'
+            self._observe_scrolling(styled, first, last, at_end)
             return
         seen_provisional = self.provisional_row
         prior_provisional = self.provisional_content
@@ -525,6 +519,22 @@ class NumberedArticle:
                 if self.colors.setdefault(number, runs) != runs:
                     self.color_conflicts += 1
                     self.color_conflict_rows.add(number)
+
+    def _observe_scrolling(self, styled, first, last, at_end):
+        self.scrolling.observe(styled, first, last, at_end)
+        from scroll_capture import wrap_prefix
+        self.wrap_marker_seen |= any(wrap_prefix(row) is not None for row in self.scrolling.rows)
+        selected = self.scrolling.result
+        visible, _ = self.scrolling.fold(self.scrolling.rows)
+        selected = selected if selected is not None else visible
+        self.rows = {i: text for i, (text, _) in enumerate(selected, 1)}
+        self.colors = {i: runs for i, (_, runs) in enumerate(selected, 1)}
+        self.last_window = (1, len(selected), tuple(text for text, _ in selected)) if selected else None
+        self.end_usable = self.scrolling.result is not None
+        if self.end_usable:
+            self.end_range = [1, len(selected)]
+            self.end_evidence = 'screen_overlap_and_end_count'
+        return
 
     def _check_wrapped_window(self, first, rows):
         anchors = set()
@@ -759,6 +769,7 @@ class NumberedArticle:
             gaps.append([previous + 1, last])
         return {
             'screen_overlap': self.scrolling.diagnostics() if self.scrolling is not None else None,
+            'personalized_footer': self.personalized,
             'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
             'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
@@ -985,6 +996,10 @@ def read_colored_post(api, board, aid):
         core._stream_screen = stream
     capture = diagnostics()
     post['ansi_diagnostics'] = capture
+    if numbered.personalized:
+        post['personalized_capture'] = True
+    if numbered.scrolling is not None and numbered.scrolling.result is not None:
+        post['soft_wrap_lines'] = numbered.scrolling.wrapped_lines
     body = post.get('full_content')
     if body:
         sdk_rows = body.split('\n')

@@ -130,7 +130,7 @@ class ScrollTests(unittest.TestCase):
         # The other 28 multi-frame records all have uniquely verifiable seams.
         checked=[]
         for record in fixtures:
-            if record['index']==3660 or len(record['frames'])<2: continue
+            if record.get('special_redraw') or len(record['frames'])<2: continue
             windows=[[(text,tuple((v,tuple(s)) for v,s in runs))
                       for text,runs in zip(f['screen'].split('\n')[:-1],f['colors'])] for f in record['frames']]
             for previous,current in zip(windows,windows[1:]):
