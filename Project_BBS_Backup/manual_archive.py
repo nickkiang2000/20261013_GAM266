@@ -62,9 +62,10 @@ def check_ansi_target(db, site, board, index, aid, original):
     existing = db.execute('SELECT data FROM articles WHERE site=? AND board=? AND aid=?',
                           (site, board, aid)).fetchone()
     same_source = bool(existing and (json.loads(existing[0]).get('manual_ansi') or {}).get('original') == original)
-    if not issue and not same_source:
+    color = db.execute('SELECT 1 FROM color_line_checks WHERE site=? AND board=? AND idx=? AND aid=?', (site,board,index,aid)).fetchone()
+    if not issue and not color and not same_source:
         raise ValueError('這份備份沒有同編號與 AID 的待查紀錄')
-    if existing and not same_source:
+    if existing and not same_source and not (issue or color):
         raise ValueError('此 AID 已有另一份正文')
     if db.execute('SELECT 1 FROM articles WHERE site=? AND board=? AND source_index=? AND aid<>?',
                   (site, board, index, aid)).fetchone():
@@ -104,7 +105,12 @@ def store_ansi_article(db, data, post, folder, site, board, index, aid, *, save_
             finally:
                 temp.unlink(missing_ok=True)
         if not same_source:
+            previous = db.execute('SELECT data FROM articles WHERE site=? AND board=? AND aid=?',(site,board,aid)).fetchone()
+            if previous:
+                from app import preserve_article_version
+                preserve_article_version(db,site,board,aid,json.loads(previous[0]),'previous')
             save_article(db, board, post, site=site, source_index=index, commit=False)
+            db.execute('DELETE FROM color_line_checks WHERE site=? AND board=? AND aid=?',(site,board,aid))
     return original
 
 

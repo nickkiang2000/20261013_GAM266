@@ -28,13 +28,28 @@ TAIPEI = timezone(timedelta(hours=8))
 
 class ArticleTargetUnit(connect_core.TargetUnit):
     """Recognize the personalized article footer while keeping SDK target IDs."""
-    def __init__(self, target, **kwargs):
+    def __init__(self, target, *, ready=None, **kwargs):
+        self.frame_ready = ready
         if isinstance(target, connect_core.TargetUnit):
             self.__dict__.update(target.__dict__)
+            self.frame_ready = ready
         else:
             super().__init__(target, **kwargs)
 
     def is_match(self, screen, cursor):
+        if self.frame_ready is not None:
+            if not self.frame_ready():
+                return False
+            if self.detect_target in (screens.Target.InPost, screens.Target.PostEnd):
+                footer = screen.rstrip('\n').rsplit('\n', 1)[-1]
+                extent = re.search(r'^\s*瀏覽.*?第\s*\d+\s*~\s*\d+\s*行', footer)
+                personalized = ('此頁內容會依閱讀者不同' in footer and '原文未必有您的資料' in footer)
+                # Legacy servers need a complete range or an explicit end footer.
+                # A partial "目前顯示: 第 3" is never a complete article response.
+                end_footer = ('目前顯示' not in footer and '(h)說明' in footer
+                              and re.search(r'^\s*瀏覽.*?\(\s*100%\s*\)', footer))
+                if not (extent or personalized or end_footer):
+                    return False
         if self._current_match >= self._max_match > 0:
             return False
         if super().is_match(screen, cursor):
@@ -170,7 +185,8 @@ class BoardSession:
         if self.pacing and message:
             article_step = any(t.get_detect_target() == screens.Target.PostEnd for t in targets)
             interval = MIN_COMMAND_INTERVAL
-            if article_step and self.capture_mode == 'line' and message == command.down:
+            if (article_step and self.capture_mode == 'line'
+                    and (message == command.down or (message == command.refresh and getattr(self, 'refresh_each_line', False)))):
                 interval = LINE_DOWN_INTERVAL
             elif article_step and self.capture_mode == 'page' and message == PAGE_DOWN_KEY:
                 interval = PAGE_DOWN_INTERVAL
@@ -486,12 +502,64 @@ class BoardSession:
             return None
         return numbering.confirm_end(end)
 
+    def _verify_scroll_end(self, get_numbering):
+        """Prove EOF with a colored End/Up/End round trip, independent of percent."""
+        from scroll_capture import visible_row
+        from ansi_capture import CapturedLine
+        n = get_numbering()
+        sc = n.scrolling
+        footer = self._screen().rsplit('\n', 1)[-1]
+        pages = re.search(r'瀏覽\s*第\s*(\d+)\s*/\s*(\d+)\s*頁', footer)
+        if (sc is None or sc.revision < 3 or sc.error or sc.waiting or not sc.last_range
+                or not pages or int(pages[1]) != int(pages[2])): return None
+        original_range, original = tuple(sc.last_range), sc.previous[:]
+        def snapshot():
+            match = re.search(r'第\s*(\d+)\s*~\s*(\d+)\s*行', self._screen().rsplit('\n',1)[-1])
+            frame = getattr(self, 'last_article_frame', None)
+            return (tuple(map(int, match.groups())) if match else None,
+                    [visible_row(row) for row in frame] if frame is not None else None)
+        self.probing_scroll_end = True
+        try:
+            if self._send_article_key(END_KEY) not in (0,1): return None
+            if snapshot() != (original_range, original): return None
+            if self._send_article_key(command.up) not in (0,1): return None
+            earlier, _ = snapshot()
+            if not earlier or not (earlier[0] < original_range[0] and earlier[1] <= original_range[1]): return None
+            if self._send_article_key(END_KEY) not in (0,1): return None
+            if snapshot() != (original_range, original): return None
+        finally:
+            self.probing_scroll_end = False
+        styled = [CapturedLine(text, runs) for text, runs in original]
+        n._observe_scrolling(styled, *original_range, True)
+        if n.assemble() is not None:
+            n.end_evidence = 'colored_end_up_end_round_trip'
+            self.operations['end_checks'] += 1
+        return n.assemble()
+
     def _read_numbered_article(self, get_numbering):
+        selected = getattr(self, 'selected', None)
+        body = self._read_numbered_pass(get_numbering)
+        if body is not None or not selected or get_numbering().scrolling is None: return body
+        # One same-session retry, verified by AID, with complete redraws.
+        self._return_to_list()
+        current = self._query(lib_util.check_aid(selected.aid) + command.enter)
+        if current.aid != selected.aid or current.lock_post: return None
+        self.full_redraw_initial_failure = get_numbering().diagnostics()
+        self.operations['full_redraw_retries'] += 1
+        self.refresh_each_line = True
+        try:
+            return self._read_numbered_pass(get_numbering)
+        finally:
+            self.refresh_each_line = False
+
+    def _read_numbered_pass(self, get_numbering):
         result = self._send_article_key(command.enter * 2)
         if result == 4:
             # Match the page reader: use the numbered source view.
             self.operations['animation_prompts_declined'] += 1
             result = self._send_article_key('n')
+        if result in (0,1) and getattr(self, 'refresh_each_line', False):
+            result = self._send_article_key(command.refresh)
         numbering = get_numbering()
         limit = SCROLL_MAX_STEPS if numbering.scrolling is not None else FALLBACK_MAX_STEPS
         started = time.monotonic()
@@ -510,9 +578,11 @@ class BoardSession:
                 revision = numbering.scrolling.revision
                 previous_range = numbering.last_range
                 result = self._send_article_key(command.down)
+                if result in (0,1) and getattr(self, 'refresh_each_line', False):
+                    result = self._send_article_key(command.refresh)
                 if (result == 1 and numbering.scrolling.revision == revision
                         and numbering.scrolling.waiting == 0 and numbering.last_range == previous_range):
-                    return self._verify_end(get_numbering)
+                    return self._verify_scroll_end(get_numbering)
                 continue
             previous = numbering.last_window
             if (result == 2 or step == FALLBACK_MAX_STEPS or previous is None
@@ -589,12 +659,18 @@ class BoardSession:
                     or (pending is None and numbered.pending_wrap is not None
                         and numbered.pending_wrap[0] + numbered.page_line_offset == last + 1
                         and window[1] == last)):
+                footer = self._screen().rsplit('\n',1)[-1]
+                pages = re.search(r'瀏覽\s*第\s*(\d+)\s*/\s*(\d+)\s*頁', footer)
+                if pages and int(pages[1]) == int(pages[2]):
+                    verified = self._verify_end(get_numbering)
+                    if verified is not None: return verified
                 reason = '逐頁擷取未取得新的正文行'
             elif result == 0:
                 body = numbered.assemble()
-                if body is not None:
+                if body is not None and not (self.prefer_line_at_uncertain_seam and numbered.color_conflicts):
                     return body
-                reason = '逐頁擷取已到文末，但未能核對完整正文'
+                reason = ('逐頁正文已完整，但配色衝突需相容讀取' if body is not None
+                          else '逐頁擷取已到文末，但未能核對完整正文')
             elif (previous_start and window[0] - previous_start == 1
                   and not numbered.wrapped_screens):
                 reason = 'Page Down 只前進一行，無法確認整頁位移'
@@ -615,10 +691,14 @@ class BoardSession:
             attempt['stage'] = 'resize_list'
             self._resize_list(FALLBACK_HEIGHT)
             attempt['stage'] = 'verify_selected_article'
-            self._position(selected.index)
-            current = self._query('')
+            if selected.index > 0:
+                self._position(selected.index)
+                current = self._query('')
+            else:
+                current = self._query(lib_util.check_aid(selected.aid) + command.enter)
             body = None
-            if current.aid == selected.aid and current.index == selected.index and not current.lock_post:
+            if (current.aid == selected.aid and (selected.index <= 0 or current.index == selected.index)
+                    and not current.lock_post):
                 attempt['stage'] = 'read_numbered_article'
                 body = self._read_numbered_article(get_numbering)
             self._return_to_list()
@@ -699,6 +779,52 @@ class BoardSession:
             return 0
         self._require_list()
         return _api_get_newest_index._get_newest_index(self.api)
+
+    def capture_board_metadata(self, board):
+        """Walk sticky rows by cursor, query AIDs, and restore a verified list."""
+        from board_metadata import heading, sticky_line
+        self._enter(board)
+        self._return_to_list()
+        self._checked_send('$', self._list_targets())
+        self._require_list()
+        title = heading(self._screen(), board)
+        rows = self._screen().splitlines()
+        sticky_rows = [i for i, row in enumerate(rows) if sticky_line(row, self.cursor)]
+        cursor_rows = [i for i, row in enumerate(rows) if row.lstrip().startswith(self.cursor)]
+        if len(cursor_rows) != 1: raise BoardNavigationError('Board cursor cannot be verified')
+        if sticky_rows and cursor_rows[0] < sticky_rows[-1]:
+            # Some clients put '$' on the newest numbered item, above stickies.
+            for _ in range(sticky_rows[-1]-cursor_rows[0]):
+                self._checked_send(command.down, self._list_targets())
+                self._require_list()
+            if not any(row.lstrip().startswith(self.cursor) and sticky_line(row,self.cursor) for row in self._screen().splitlines()):
+                raise BoardNavigationError('Cannot reach sticky rows')
+        pins = []
+        seen = set()
+        # '$' selects the final entry. Collect backwards, then restore screen order.
+        for _ in range(100):
+            if self.check_stop: self.check_stop()
+            row = next((r for r in self._screen().splitlines() if r.lstrip().startswith(self.cursor)), '')
+            if not row:
+                raise BoardNavigationError('Sticky cursor not visible')
+            if not sticky_line(row, self.cursor):
+                break
+            selected = self._query('')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{8}', selected.aid) or selected.aid in seen:
+                raise BoardNavigationError('Sticky identity cannot be confirmed')
+            seen.add(selected.aid)
+            pins.append({'aid': selected.aid, 'title': selected.title, 'author': selected.author,
+                         'push_number': getattr(selected, 'push_number', None)})
+            self._return_to_list()
+            restored = next((r for r in self._screen().splitlines() if r.lstrip().startswith(self.cursor)), '')
+            if restored.strip() != row.strip(): raise BoardNavigationError('Sticky cursor moved during query')
+            self._checked_send(command.up, self._list_targets())
+            self._require_list()
+        else:
+            raise BoardNavigationError('Sticky scan limit reached')
+        self._checked_send('$', self._list_targets())
+        self._require_list()
+        return {'board': board, 'title': title, 'pins': list(reversed(pins)), 'complete': True}
 
     def _query(self, keys):
         self.operations['post_queries'] += 1

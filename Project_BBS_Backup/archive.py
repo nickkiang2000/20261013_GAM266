@@ -9,6 +9,8 @@ import re
 from terminal_links import WEB_URL
 from issue_records import report as issue_report
 import issue_records
+import board_metadata
+from article_metadata import list_cells, posting_date
 from pathlib import Path
 
 from ansi_style import ANSI_STYLE, METADATA_STYLE, render_metadata, render_run
@@ -51,6 +53,7 @@ const boards = Array.from(document.querySelectorAll('.board'), section => ({
     latest: section.querySelector('.latest'),
     label: section.querySelector('.page-label'),
     name: section.dataset.board,
+    title: section.dataset.title || '',
     currentPage: 0,
     position: -1,
 }));
@@ -73,6 +76,8 @@ function select(board, index, focus = true) {
     }
     activeBoard = board;
     document.getElementById('active-board').textContent = board.name;
+    document.getElementById('board-title').textContent = board.title;
+    document.title = 'BBS時光庫 ' + board.name;
     board.position = index;
     const entry = board.entries[index];
     showPage(board, board.pages.indexOf(entry.closest('.entries')));
@@ -167,7 +172,11 @@ document.addEventListener('keydown', event => {
 });
 '''
 
-ARTICLE_KEYS = '''
+ARTICLE_KEYS = r'''
+if (location.hash === '#sticky') {
+    const key = location.pathname.split('/').pop().replace(/\.html$/, '');
+    if (/^[0-9a-f]{64}$/.test(key)) document.getElementById('back').hash = 'pin-' + key;
+}
 const articleText = document.querySelector('pre');
 const frameButton = document.getElementById('frame-view');
 const frameRows = Number(articleText.style.getPropertyValue('--frame-rows'));
@@ -408,21 +417,59 @@ body.ansi-article { background: #000; margin: 0 auto; padding: 0; }
 '''
 
 INDEX_STYLE = '''
-body:has(.index-top) { margin: 0 auto; padding: 0; background: #000; }
+body:has(.index-top) { margin: 0; padding: 0; background: #000; max-width: none;
+    --index-head-height: 40px; --entry-columns: min(37.5%, 58ch) minmax(0,1fr);
+    font: 14px/1.65 Consolas, 'Microsoft JhengHei', monospace; }
 html:has(.index-top) { background: #000; }
-.index-top { display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
-    background: #0c0a66; padding: .4rem .65rem; }
-.index-top h1 { color: #ffff66; margin: 0; font: 1.3rem/1.3 "MingLiU", "細明體", monospace; }
-.index-top a { margin-left: auto; font-size: .85rem; }
-.board-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem;
-    padding: .22rem .55rem; border-bottom: 1px solid #4a4a4a; }
-.board-tab { background: #b5b5b5; color: #000; padding: .08rem .55rem; }
-.board-tools .pagination { margin-left: auto; gap: .12rem; }
-.board-tools button { background: #3b3b3b; color: #eee; border: 1px solid #676767; padding: .08rem .45rem; }
-.board-tools button:disabled { background: #1e1e1e; color: #8b8b8b; }
-.board-tools .page-label { padding: 0 .25rem; }
-.board .entries { margin: .15rem 0; }
-.board .entries a { padding: .1rem .65rem; font-size: .92rem; line-height: 1.35; }
+.index-top { display: flex; justify-content: space-between;
+    position: sticky; top: 0; z-index: 20; height: var(--index-head-height); align-items: center;
+    padding: 0 8px; background: #0c0a66; white-space: nowrap; box-sizing: border-box; }
+.index-brand, .index-actions { min-width: 0; }
+.index-brand { overflow: hidden; text-overflow: ellipsis; font: 13px/1.5 system-ui; }
+.index-actions { text-align: right; font: 11px/1.5 system-ui; }
+#board-title { position: absolute; left: 50%; transform: translateX(-50%); color: #ffff00;
+    text-align: center; font: 17px/1.3 'MingLiU',serif; max-width: 48%;
+    overflow: hidden; text-overflow: ellipsis; }
+#number-jump { position: absolute; top: 100%; left: 8px; background: #0c0a66; z-index: 22; }
+#number-jump:empty { display: none; }
+.sticky-star { color: #ffff00; text-align: center; }
+.board-tools, .board .entries a, .board .sticky-missing { display: grid;
+    grid-template-columns: var(--entry-columns); padding: 0 8px; }
+.board-tools { position: sticky; top: var(--index-head-height); z-index: 19;
+    align-items: center; height: 30px; box-sizing: border-box;
+    background: #b5b5b5; color: #000; white-space: nowrap; }
+.entry-columns, .entry-meta { display: grid; grid-template-columns: 6ch 4ch 14ch minmax(0,1fr);
+    padding-right: 4ch; white-space: nowrap; min-width: 0; }
+.entry-number, .entry-columns > span:first-child { margin-right: 2ch; }
+.entry-push, .entry-columns > span:nth-child(2) { padding-right: 2ch; text-align: right;
+    font-variant-numeric: tabular-nums; }
+.entry-date, .entry-columns > span:nth-child(3) { padding-right: 4ch; }
+.title-tools { display: flex; align-items: center; gap: 4px; min-width: 0; white-space: nowrap; }
+.board-tools .pagination { display: flex; margin: 0 0 0 auto; gap: 3px; flex-wrap: nowrap;
+    align-items: center; font: 11px/1.5 system-ui; }
+.board-tools button { background: #3b3b3b; color: #eee; border: 1px solid #777;
+    padding: 1px 3px; font: inherit; white-space: nowrap; }
+.board-tools button:disabled { color: #aaa; }
+.board-tools .page-label { padding: 0; color: #000; font-size: inherit; white-space: nowrap; }
+.board .entries { margin: 0; }
+.board .entries a, .board .sticky-missing { padding-top: 4px; padding-bottom: 4px;
+    font: inherit; align-items: start; text-align: left; }
+.entry-number, .entry-date { font-variant-numeric: tabular-nums; }
+.entry-author { min-width: 0; max-width: 30ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.entry-title { overflow-wrap: anywhere; min-width: 0; }
+.board .sticky-missing > small { grid-column: 2; }
+.push-positive { color: #00ff00; } .push-hot { color: #ffff00; }
+.push-boom { color: #ff5555; } .push-negative { color: #bbb; }
+.manual-label { color: #b2bfd0; margin-left: .4em; }
+@media (max-width: 740px) { .title-tools > span { display: none; } }
+@media (max-width: 580px) {
+    #board-title, .index-actions { display: none; }
+    .board-tools { grid-template-columns: 0 minmax(0,1fr); }
+    .entry-columns { visibility: hidden; }
+    .board .entries a, .board .sticky-missing { grid-template-columns: minmax(0,1fr); }
+    .entry-meta { padding-right: 0; }
+    .board .sticky-missing > small { grid-column: 1; }
+}
 #search-dialog { box-sizing: border-box; width: min(43rem, 92vw); max-height: 80vh; border: 1px solid #676767;
     background: #10151c; color: #e0e7ef; padding: 1rem; }
 #search-dialog[open] { display: flex; flex-direction: column; overflow: hidden; }
@@ -504,6 +551,8 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
     cached = {path: (digest, (size, modified)) for path, digest, size, modified in db.execute(
         'SELECT path,fingerprint,size,modified FROM html_render_cache')}
     cache_updates = {}
+    date_sources = {}
+    date_unknown = []
     renderer = sha256(Path(__file__).read_bytes() + Path(__file__).with_name('ansi_style.py').read_bytes()).hexdigest()
 
     def unchanged(path, fingerprint):
@@ -528,6 +577,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
         progress(count, total)
     sections = []
     board_summaries = []
+    archive_boards = []
     search_boards = {}
     search_fingerprint = sha256(renderer.encode())
     for (site, board), group in groupby(rows, key=lambda row: row[:2]):
@@ -545,7 +595,6 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
         for i, (_, _, aid, title, body, data, source_index, _) in enumerate(items):
             key = keys[i]
             title = title or '(無標題)'
-            label = f'{source_index} · ' if source_index is not None else ''
             render_error = None
             try:
                 post = json.loads(data) if data is not None else {}
@@ -555,18 +604,20 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 post = {}
                 render_error = type(exc).__name__
             author = post.get('author') or ''
-            if post.get('manual_ansi'):
-                label += '人工備份 · '
+            if data is not None:
+                display_date, date_source = posting_date(post, body, site=site, board=board, aid=aid)
+                date_sources[date_source] = date_sources.get(date_source, 0) + 1
+                if '待查' in display_date:
+                    date_unknown.append({'site':site, 'board':board, 'index':source_index, 'aid':aid})
             if data is not None:
                 search_rows.append((key, source_index, aid, title, str(author), body, post.get('comments')))
-            label += f'{author} · ' if author else ''
             neighbors = tuple(keys[target] if target is not None else None
                               for target in subject_links.get(i, (None, None)))
             subject_attrs = ''.join(f' data-subject-{direction}="a-{neighbor}"'
                                     for direction, neighbor in zip(('older', 'newer'), neighbors) if neighbor)
             index_attr = f' data-source-index="{source_index}"' if type(source_index) is int and source_index > 0 else ''
             entries.append(f'<li><a id="a-{key}" href="articles/{key}.html"{index_attr}{subject_attrs}>'
-                           f'<span class="meta">{escape(label)}</span>{escape(title)}</a></li>')
+                           f'{list_cells(source_index, post, title, body, site=site, board=board, aid=aid)}</a></li>')
             links = [f'<a id="back" href="../index.html#a-{key}">返回列表</a>']
             if i > 0:
                 links.append(f'<a id="previous" href="{keys[i-1]}.html">上一篇 ↑</a>')
@@ -632,32 +683,40 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 unnumbered.append(entry)
         batches = [unnumbered[start:start + PAGE_SIZE] for start in range(0, len(unnumbered), PAGE_SIZE)]
         batches.extend(numbered_pages[page] for page in sorted(numbered_pages))
+        pins = board_metadata.render_rows(db, site, board)
+        metadata = board_metadata.load(db, site, board)
+        if not batches and pins: batches = [[]]
         pages = []
         for i, batch in enumerate(batches):
             hidden = ' hidden' if i < len(batches) - 1 else ''
-            pages.append(f'<ul class="entries"{hidden}>' + ''.join(batch) + '</ul>')
+            pages.append(f'<ul class="entries"{hidden}>' + ''.join(batch) + (pins if i == len(batches)-1 else '') + '</ul>')
+        search_id = ' id="open-search"' if not sections else ''
         pagination = ('<nav class="pagination" aria-label="看板翻頁">'
+                      f'<button{search_id} class="open-search" type="button">全板搜尋</button>'
                       '<button class="oldest" type="button">最舊</button>'
                       '<button class="older" type="button">‹ 上頁</button>'
                       '<button class="newer" type="button" disabled>下頁 ›</button>'
                       '<button class="latest" type="button" disabled>最新</button>'
                       f'<span class="page-label meta" aria-live="polite">第 {len(batches)}／{len(batches)} 頁</span></nav>')
+        archive_boards.append(f'{site} / {board}')
         board_name = escape(f'{site} / {board}', quote=True)
         article_count = sum(item[5] is not None for item in items)
         skipped_count = len(items) - article_count
         board_summaries.append(f'<li>{board_name} · {article_count} 篇正文</li>')
         board_count = f'{article_count} 篇' + (f' · {skipped_count} 筆站上狀態' if skipped_count else '')
-        sections.append(f'<section class="board" data-board="{board_name}">'
-                        '<div class="board-tools"><strong class="board-tab">看板</strong>'
-                        f'<span class="meta">{board_name} · {board_count}</span>'
-                        + pagination + '</div>' + ''.join(pages) + '</section>')
+        sections.append(f'<section class="board" data-board="{board_name}" data-title="{escape(metadata.get("title",""), quote=True)}">'
+                        '<div class="board-tools"><div class="entry-columns" aria-hidden="true">'
+                        '<span>編號</span><span>推</span><span>日期</span><span>ID（暱稱）</span></div><div class="title-tools"><span>文章標題</span>'
+                        + pagination + '</div></div>' + ''.join(pages) + '</section>')
     index = (f'<style>{INDEX_STYLE}</style><header class="index-top">'
-             '<h1>BBS時光庫</h1><span>› <span id="active-board"></span></span>'
-             '<button id="open-search" type="button">全板搜尋 ?</button>'
-             '<a href="ReadMe.html">操作說明與紀錄</a></header>'
-             '<output id="number-jump" class="meta" aria-live="polite"></output>'
+             '<div class="index-brand">BBS時光庫 <span id="active-board"></span></div>'
+             '<strong id="board-title" aria-live="polite"></strong><div class="index-actions">'
+             '<a href="ReadMe.html">操作說明與紀錄</a></div>'
+             '<output id="number-jump" class="meta" aria-live="polite"></output></header>'
              + (''.join(sections) if sections else '<p>尚無文章</p>') + SEARCH_DIALOG)
+    archive_name = ('BBS時光庫 ' + '、'.join(archive_boards)) if archive_boards else 'BBS時光庫'
     readme = OFFLINE_README.read_text(encoding='utf-8')
+    readme = readme.replace('<title>BBS時光庫－操作說明與紀錄</title>', '<title>' + escape(archive_name) + '－操作說明與紀錄</title>')
     boards = '<ul>' + ''.join(board_summaries) + '</ul>' if board_summaries else '<p>目前尚無離線文章。</p>'
     readme = readme.replace('<!-- BOARD_SUMMARIES -->', boards).replace(
         '<!-- ISSUE_RECORDS -->', issue_report(db, issue_evidence))
@@ -669,7 +728,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
         write_page(folder / 'search-data.js', 'window.bbsSearchData = ' + packed + ';\n', force=force)
         remember('search-data.js', search_digest)
     index_keys = INDEX_KEYS + '\n' + OFFLINE_SEARCH.read_text(encoding='utf-8')
-    write_page(folder / 'index.html', page('BBS時光庫', index, index_keys), force=force)
+    write_page(folder / 'index.html', page(archive_name, index, index_keys), force=force)
     if cache_updates:
         with db:
             db.executemany('INSERT OR REPLACE INTO html_render_cache VALUES(?,?,?,?)',
@@ -677,6 +736,8 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
     if stats is not None:
         stats['written'] = written
         stats['rendered'] = rendered
+        stats['date_sources'] = date_sources
+        stats['date_unknown'] = date_unknown
     return count
 
 

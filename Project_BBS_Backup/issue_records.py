@@ -6,6 +6,7 @@ from contextlib import closing
 from datetime import datetime
 from hashlib import sha256
 from html import escape
+from itertools import groupby
 import json
 from pathlib import Path
 
@@ -212,21 +213,41 @@ def report(db, evidence=None):
                             aid, f'該 AID 目前存為 {stored_index}；請核對站上列表'))
     entries.sort(key=lambda entry: (entry[0], entry[1].casefold(), entry[1],
                                     entry[2] is None, entry[2] or 0, entry[3] or ''))
-    header = ('<section id="issue-records"><h2>錯漏文章</h2>'
-              '<p>此表反映本機已遇到的問題，不是全板完整性證明；未掃描文章不在此表。'
-              '編號可能隨站上文章異動，特案查找請優先使用 AID。補抓成功會清除對應待查，'
-              '核色成功會清除待核色；歷次診斷仍保留在程式 log 資料夾。</p>')
+    intro = ('<section id="issue-records">'
+             '<p>此表反映本機已遇到的問題，不是全板完整性證明；未掃描文章不在此表。'
+             '編號可能隨站上文章異動，特案查找請優先使用 AID。補抓成功會清除對應待查，'
+             '核色成功會清除待核色；歷次診斷仍保留在程式 log 資料夾。</p>')
     if not entries:
-        return header + '<p>目前沒有已記錄的錯漏項目。</p></section>'
-    parts = [header, f'<p>共 {len(entries)} 筆紀錄；同篇可能同時有讀取及配色問題。</p>',
-             '<div class="records-scroll"><table><thead><tr>' +
-             ''.join(f'<th>{name}</th>' for name in ('站台／看板', '編號', 'AID', '狀態', '原因', '處理資訊', '內容')) +
-             '</tr></thead><tbody>']
-    for site, board, idx, aid, status, reason, saved, detail in entries:
-        values = (f'{site} / {board}', str(idx) if idx is not None else '未取得', aid or '未取得', status, reason, detail)
-        link = '尚無可讀存檔'
-        if saved:
-            key = sha256(json.dumps((site, board, saved)).encode()).hexdigest()
-            link = f'<a href="articles/{key}.html">查看已存文章</a>'
-        parts.append('<tr>' + ''.join(f'<td>{escape(str(value))}</td>' for value in values) + f'<td>{link}</td></tr>')
-    return ''.join(parts) + '</tbody></table></div></section>'
+        return intro + '<h2>錯漏文章</h2><p>目前沒有已記錄的錯漏項目。</p></section>'
+    parts = [intro]
+    for (site, board), group in groupby(entries, key=lambda row: row[:2]):
+        rows = list(group)
+        parts.extend(('<section class="issue-board"><h2>' + escape(f'{site} / {board} 錯漏文章') + '</h2>',
+                      f'<p>共 {len(rows)} 筆紀錄；同篇可能同時有讀取及配色問題。</p>',
+                      '<div class="records-scroll"><table class="issue-table"><colgroup>' +
+                      ''.join(f'<col class="issue-{name}">' for name in ('index','aid','state','reason','detail','content')) +
+                      '</colgroup><thead><tr>' + ''.join(f'<th scope="col">{label}</th>' for label in
+                      ('編號','AID','狀態','原因','處理資訊','內容')) + '</tr></thead><tbody>'))
+        for _, _, idx, aid, status, reason, saved, detail in rows:
+            values = (str(idx) if idx is not None else '未取得', aid or '未取得', status, reason, detail)
+            link = '尚無可讀<br>存檔'
+            if saved:
+                key = sha256(json.dumps((site, board, saved)).encode()).hexdigest()
+                link = f'<a href="articles/{key}.html">查看已存<br>文章</a>'
+            parts.append('<tr>' + ''.join(f'<td>{escape(str(value))}</td>' for value in values) +
+                         '<td class="issue-content">' + link + '</td></tr>')
+        parts.append('</tbody></table></div></section>')
+    return ''.join(parts) + '</section>'
+
+
+def resolve_stale_index_issues(db, evidence):
+    verified = evidence[0] if evidence else {}
+    with db:
+        for site, board, key, index, last in db.execute('SELECT site,board,issue_key,idx,last_seen FROM article_issues WHERE aid IS NULL').fetchall():
+            matches = db.execute('SELECT aid,data FROM articles WHERE site=? AND board=? AND source_index=?',(site,board,index)).fetchall()
+            if len(matches) != 1: continue
+            aid, raw = matches[0]
+            post = json.loads(raw); coverage = post.get('ansi_coverage', {})
+            if (verified.get((site,board,index,aid),0) > last and post.get('full_content')
+                    and coverage.get('total',0)>0 and coverage.get('matched')==coverage['total']):
+                db.execute('DELETE FROM article_issues WHERE site=? AND board=? AND issue_key=?',(site,board,key))

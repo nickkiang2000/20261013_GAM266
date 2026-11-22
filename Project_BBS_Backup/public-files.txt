@@ -27,3 +27,14 @@ tests/fixtures/scroll_v223.json
 test_patch.py
 link_positions.py
 test_final_cases.py
+article_frame.py
+test_v2253.py
+color_evidence.py
+test_v2254.py
+board_metadata.py
+test_v2260.py
+test_v2261.py
+article_metadata.py
+test_v2262.py
+test_v2270.py
+test_v2271.py

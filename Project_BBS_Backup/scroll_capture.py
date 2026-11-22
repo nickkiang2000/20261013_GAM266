@@ -53,6 +53,44 @@ def wrap_prefix(row):
     return None
 
 
+def painted_key(row):
+    from itertools import groupby
+    text, runs = row
+    if not runs: return row
+    cells=[]
+    for value, style in runs:
+        for char in value:
+            cells.append((char, () if char==' ' and not any(token.startswith('b') for token in style) else style))
+    if ''.join(char for char,_ in cells) != text: return row
+    normalized=[]
+    for style, group in groupby(cells,key=lambda cell:cell[1]):
+        normalized.append((''.join(char for char,_ in group),style))
+    return text, tuple(normalized) if any(style for _,style in normalized) else ()
+
+
+def edge_extension(a, b, *, allow_background=False):
+    """Choose an observed longer row, never deleting painted background cells."""
+    def parts(row):
+        text,runs=row
+        left=len(text)-len(text.lstrip(' '));right=len(text)-len(text.rstrip(' '))
+        stop=len(text)-right if right else len(text)
+        styles=[style for value,style in runs for _ in value] if runs else [()]*len(text)
+        if len(styles)!=len(text):return None
+        core=(text[left:stop],tuple((text[i],styles[i]) for i in range(left,stop)))
+        return left,right,core,styles
+    x,y=parts(a),parts(b)
+    if x is None or y is None or x[2]!=y[2]:return None
+    if x[0]<=y[0] and x[1]<=y[1]:short,long,small,large=a,b,x,y
+    elif y[0]<=x[0] and y[1]<=x[1]:short,long,small,large=b,a,y,x
+    else:return None
+    if short[0]==long[0]:return None
+    # Added cells must be ordinary spacing. Keep all raw observations in diagnostics.
+    indices=list(range(large[0]-small[0]))
+    if large[1]>small[1]:indices+=list(range(len(long[0])-(large[1]-small[1]),len(long[0])))
+    if not allow_background and any(any(token.startswith('b') for token in large[3][i]) for i in indices):return None
+    return long
+
+
 def overlap_candidates(previous, current):
     """Require matching text AND color, with at least two distinct text anchors."""
     return [size for size in range(2, min(len(previous), len(current)) + 1)
@@ -82,6 +120,11 @@ class ScrollCapture:
         self.trailing_controls_removed = 0
         self.end_padding_rows = 0
         self.expected_end_lines = None
+        self.edge_votes = {}
+        self.edge_repaired_rows = set()
+        self.viewport_edge_reused_rows = set()
+        self.confirmed_repaint_rows = set()
+        self.blank_source_advances = 0
 
     @staticmethod
     def fold(rows):
@@ -119,8 +162,8 @@ class ScrollCapture:
         return text, tuple(merged)
 
     def seam(self, current):
-        previous = [self.row_key(row) for row in self.previous]
-        observed = [self.row_key(row) for row in current]
+        previous = [painted_key(self.row_key(row)) for row in self.previous]
+        observed = [painted_key(self.row_key(row)) for row in current]
         candidates = overlap_candidates(previous, observed)
         if candidates:
             return [(size, 0) for size in candidates]
@@ -151,8 +194,120 @@ class ScrollCapture:
                 supported.append((overlap, trim))
         return (supported, True) if len(supported) == 1 else (choices, False)
 
+    def source_advance_seam(self, current, first, last):
+        # Three already connected windows establish the source/physical relation.
+        # Only established, unpainted empty lines may advance without text anchors.
+        if (self.revision < 3 or self.last_range is None or first is None or last is None): return []
+        advance = first-self.last_range[0]
+        if advance <= 0 or last-self.last_range[1] != advance: return []
+        if current == self.previous:
+            # An established run of truly empty lines is still article content.
+            # Painted blanks and repeated nonempty art do not take this path.
+            if (len(self.offsets) >= 2 and self.offsets[-1] == self.offsets[-2]
+                    and 0 < advance <= len(current)-2
+                    and all(padding(row) for row in current)):
+                self.blank_source_advances += advance
+                return [(len(current)-advance, 0)]
+            return []
+        before=[painted_key(self.row_key(row)) for row in self.previous]
+        after=[painted_key(self.row_key(row)) for row in current]
+        candidates=[]
+        for overlap in range(2,min(len(before),len(after))):
+            removed=len(before)-overlap
+            lines,pending=self.fold(self.previous[:removed])
+            if not pending and len(lines)==advance and before[-overlap:]==after[:overlap]:
+                candidates.append((overlap,0))
+        return candidates if len(candidates)==1 else []
+
+    def repair_observed_edges(self, current, first, last):
+        # Require two distinct redraw positions plus unchanged neighbouring anchors.
+        if (self.last_range is None or first is None or last is None or self.revision<3):return False
+        advance=first-self.last_range[0]
+        if advance<=0 or last-self.last_range[1]!=advance:return False
+        size=len(self.previous)-advance
+        if not 2<=size<=len(current):return False
+        before=self.previous[-size:];after=current[:size]
+        if any(wrap_prefix(row) for row in (*before,*after)):return False
+        differences=[];anchors=set()
+        for i,(old,new) in enumerate(zip(before,after)):
+            if painted_key(self.row_key(old))==painted_key(self.row_key(new)):
+                if old[0].strip():anchors.add(old[0])
+            else:
+                chosen=edge_extension(old,new)
+                if chosen is None:return False
+                differences.append((i,chosen))
+        if not differences or len(differences)>2 or len(anchors)<2:return False
+        if len(differences)==1 and differences[0][0]==0:
+            # The top row may be repainted with different edge spacing. It is
+            # already stored from the preceding full view; preserve that row.
+            # All other overlap rows and at least two anchors still agree.
+            current[0]=before[0]
+            self.viewport_edge_reused_rows.add(first)
+            return True
+        ready=[]
+        for i,chosen in differences:
+            number=first+i;key=(number,chosen)
+            self.edge_votes.setdefault(key,set()).add(first)
+            if len(self.edge_votes[key])>=2:ready.append((i,chosen,number))
+        if len(ready)!=len(differences):return False
+        for i,chosen,number in ready:
+            previous_index=advance+i
+            absolute=len(self.rows)-len(self.previous)+previous_index
+            self.rows[absolute]=chosen
+            self.previous[previous_index]=chosen
+            current[i]=chosen
+            self.edge_repaired_rows.add(number)
+        return True
+
+    def confirmed_repaint_seam(self, current, first, last):
+        """Retain an observed painted edge, or confirm a first-screen blank redraw.
+
+        Two different source positions and at least three exact text/color anchors
+        must identify the same row. Never replace a nonblank glyph or its color.
+        """
+        if self.last_range is None or first is None or last is None: return []
+        advance = first-self.last_range[0]
+        if advance <= 0: return []
+        initial = self.revision == 1 and self.last_range[0] == 1
+        if not initial and (self.revision < 3 or last-self.last_range[1] != advance): return []
+        candidates = []
+        for removed in range(1, len(self.previous)-1):
+            overlap = len(self.previous)-removed
+            if overlap > len(current): continue
+            prefix, pending = self.fold(self.previous[:removed])
+            if pending or not (len(prefix) == advance or (initial and len(prefix) == advance+1)): continue
+            before, after = self.previous[removed:], current[:overlap]
+            if any(wrap_prefix(row) for row in (*before, *after)): continue
+            changes, anchors = [], set()
+            for i, (old, new) in enumerate(zip(before, after)):
+                if painted_key(self.row_key(old)) == painted_key(self.row_key(new)):
+                    if old[0].strip(): anchors.add(old[0])
+                    continue
+                chosen = edge_extension(old, new, allow_background=True)
+                if chosen is None and initial and padding(old) and new[0].strip(): chosen = new
+                if chosen is None: break
+                changes.append((i, chosen))
+            else:
+                if 0 < len(changes) <= 2 and len(anchors) >= 3:
+                    candidates.append((removed, overlap, changes))
+        if len(candidates) != 1: return []
+        removed, overlap, changes = candidates[0]
+        ready = []
+        for i, chosen in changes:
+            absolute = len(self.rows)-len(self.previous)+removed+i
+            key = ('repaint', absolute, chosen)
+            self.edge_votes.setdefault(key, set()).add(first)
+            if len(self.edge_votes[key]) >= 2: ready.append((i, chosen, absolute))
+        if len(ready) != len(changes): return []
+        for i, chosen, absolute in ready:
+            self.rows[absolute] = chosen
+            self.previous[removed+i] = chosen
+            current[i] = chosen
+            self.confirmed_repaint_rows.add(absolute+1)
+        return [(overlap, 0)]
+
     def record_failure(self, current, first, last, reason):
-        snapshot = {'accepted': self.previous, 'observed': current,
+        snapshot = {'accepted': list(self.previous), 'observed': list(current),
                     'accepted_range': self.last_range, 'reported': [first, last], 'reason': reason}
         if self.first_failure is None:
             self.first_failure = snapshot
@@ -185,8 +340,15 @@ class ScrollCapture:
             pass
         else:
             choices = self.seam(current)
+            if not choices and self.repair_observed_edges(current, first, last):
+                choices = self.seam(current)
             candidates = [size for size, _ in choices]
             choices, resolved = self.resolve_ambiguity(choices, first)
+            if not choices:
+                choices = self.confirmed_repaint_seam(current, first, last)
+            if not choices:
+                choices = self.source_advance_seam(current, first, last)
+                resolved = bool(choices)
             self.moves.append({'reported': [first, last], 'overlaps': candidates,
                                'padding_trims': [trim for _, trim in choices],
                                'resolved_by_source_advance': resolved,
@@ -270,4 +432,8 @@ class ScrollCapture:
                 'first_failed_seam': self.first_failure, 'last_failed_seam': self.last_failure,
                 'trailing_controls_removed': self.trailing_controls_removed,
                 'end_padding_rows_retained': self.end_padding_rows, 'expected_end_lines': self.expected_end_lines,
+                'edge_repaired_rows': sorted(self.edge_repaired_rows),
+                'viewport_edge_reused_rows': sorted(self.viewport_edge_reused_rows),
+                'confirmed_repaint_rows': sorted(self.confirmed_repaint_rows),
+                'blank_source_advances': self.blank_source_advances,
                 'accepted_display_rows': self.rows if self.error and self.end is not None else None}

@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.25.2'
+APP_VERSION = 'v2.27.2'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -185,7 +185,7 @@ def stored_article(db, site, board, aid):
     return json.loads(row[0]) if row else None
 
 
-START_INPUT_ERROR = '請輸入一個編號，或用逗號分隔多個正整數。0 只能單獨使用。'
+START_INPUT_ERROR = '輸入正整數指定起始文章；輸入 0 代表從最新文章開始。多篇請用逗號分隔正整數，清單中不可包含 0。'
 
 
 def parse_start_input(value):
@@ -406,22 +406,34 @@ def repair_root(value):
 
 
 def repair_targets(root, aid):
+    """One inventory of missing bodies, failed rereads and pending colors."""
     targets = []
     for folder in (root, *(path for path in root.iterdir() if path.is_dir() and not path.is_symlink())):
-        if not (folder / 'articles.sqlite3').is_file():
-            continue
+        if not (folder / 'articles.sqlite3').is_file(): continue
         with closing(sqlite3.connect((folder / 'articles.sqlite3').as_uri() + '?mode=ro', uri=True)) as db:
-            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='article_issues' AND type='table'").fetchone():
-                continue
-            for site, board, index, record_aid, reason in db.execute('''SELECT i.site,i.board,i.idx,i.aid,i.reason
-                    FROM article_issues i WHERE i.issue_key LIKE 'aid:%' AND i.idx>0 AND i.aid IS NOT NULL
-                    AND (?='' OR i.aid=?) AND NOT EXISTS (
-                        SELECT 1 FROM articles a WHERE a.site=i.site AND a.board=i.board AND a.aid=i.aid
-                        AND json_type(CASE WHEN json_valid(a.data) THEN a.data END, '$.manual_ansi')='object'
-                    )''', (aid, aid)):
-                targets.append({'site': site, 'board': board, 'index': index, 'aid': record_aid,
-                                'folder': str(folder), 'reason': reason})
-    return sorted(targets, key=lambda item: (item['site'], item['board'].casefold(), item['index'], item['folder']))
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='article_issues'").fetchone(): continue
+            records = {}
+            for site, board, index, record_aid, reason in db.execute(
+                    'SELECT site,board,idx,aid,reason FROM article_issues WHERE (?=\'\' OR aid=?)', (aid, aid)):
+                records[site, board, record_aid, index] = reason
+            for site, board, index, record_aid, matched, total in db.execute(
+                    'SELECT site,board,idx,aid,matched,total FROM color_line_checks WHERE (?=\'\' OR aid=?)', (aid, aid)):
+                key = (site, board, record_aid, index)
+                records[key] = records.get(key, '') + f' 配色對齊 {matched}／{total} 行'
+            for (site, board, record_aid, index), reason in records.items():
+                saved = db.execute('SELECT data FROM articles WHERE site=? AND board=? AND aid=?', (site, board, record_aid)).fetchone()
+                post = json.loads(saved[0]) if saved else {}
+                if post.get('manual_ansi'): continue
+                if record_aid is None and index is not None:
+                    matches = db.execute('SELECT aid,data FROM articles WHERE site=? AND board=? AND source_index=?', (site, board, index)).fetchall()
+                    historical = len(matches) == 1 and complete_capture(json.loads(matches[0][1]))
+                else: historical = False
+                color = db.execute('SELECT 1 FROM color_line_checks WHERE site=? AND board=? AND aid=?', (site,board,record_aid)).fetchone()
+                status = ('待核色／重讀待查' if color and reason.strip() and '讀取' in reason else '待核色') if color else ('重讀待查（保留舊文）' if saved else '缺正文')
+                targets.append({'site':site,'board':board,'index':index,'aid':record_aid,'folder':str(folder),
+                                'reason':reason.strip(),'status':'歷史讀取紀錄（已有完整備份）' if historical else status,'has_backup':bool(saved),
+                                'repairable':isinstance(index,int) and index>0 and bool(record_aid)})
+    return sorted(targets, key=lambda item:(item['site'],item['board'].casefold(),item['index'] or 0,item['folder']))
 
 
 def repair_article(data, *, commit):
@@ -470,11 +482,13 @@ def publish_archive(db, folder, job=None, *, force=False):
     publish_color_checks(db, folder)
     stats = {}
     evidence = issue_records.log_evidence(db, job.path.parent if job else LOG_DIRECTORY)
+    issue_records.resolve_stale_index_issues(db, evidence)
     count = export_html(db, folder, progress=export_progress, force=force, stats=stats,
                         issue_evidence=evidence)
     STATE['html_written'] = stats['written']
     STATE['html_rendered'] = stats['rendered']
     if job:
+        job.event('archive_dates', sources=stats.get('date_sources', {}), unknown=stats.get('date_unknown', []))
         for site, board, index, aid, reason, attempts in db.execute(
                 'SELECT site,board,idx,aid,reason,attempts FROM article_issues ORDER BY site,board,idx,aid'):
             job.event('offline_issue', site=site, board=board, index=index, aid=aid,
@@ -546,6 +560,16 @@ def manual_capture_ready(post):
     return not manual_capture_issues(post)
 
 
+def preserve_article_version(db, site, board, aid, post, role):
+    """Keep previous/candidate data in the same backup transaction as the decision."""
+    db.execute('CREATE TABLE IF NOT EXISTS article_revisions(site TEXT,board TEXT,aid TEXT,created REAL,data TEXT)')
+    # Keep the original five-column table compatible with earlier versions.
+    db.execute('CREATE TABLE IF NOT EXISTS article_revision_roles(revision_id INTEGER PRIMARY KEY,role TEXT NOT NULL)')
+    row = db.execute('INSERT INTO article_revisions(site,board,aid,created,data) VALUES(?,?,?,?,?)',
+                     (site, board, aid, time.time(), json.dumps(post, ensure_ascii=False)))
+    db.execute('INSERT INTO article_revision_roles(revision_id,role) VALUES(?,?)', (row.lastrowid, role))
+
+
 def download_article(api, db, site, board, aid, *, source_index=None, existing=None, checkpoint=False):
     from ansi_capture import read_colored_post
 
@@ -557,6 +581,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     if resume_line:
         STATE['message'] = f'編號 {source_index} 上次逐頁接縫中斷，本次直接逐行讀取'
         api.capture_mode = 'line'
+        api.wrapped_line_retry = True
     try:
         post = read_colored_post(api, board, aid)
     except BridgeNavigationError as exc:
@@ -576,7 +601,8 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             raise DownloadStopped() from exc
         STATE['message'] = f'編號 {source_index} 逐頁未通過，正在改用逐行重讀'
         retry_started = time.monotonic()
-        api.wrapped_line_retry = bool(failed_page['capture'].get('numbering', {}).get('wrap_marker_seen'))
+        api.wrapped_line_retry = True
+        failed_page['retry_reader'] = 'screen_overlap_24'
         try:
             api.capture_mode = 'line'
             current = api.get_post(board, index=source_index, query=True)
@@ -601,6 +627,7 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     finally:
         if resume_line:
             api.capture_mode = 'page'
+            api.wrapped_line_retry = False
     if resume_line:
         post.setdefault('ansi_diagnostics', {})['line_retry_on_resume'] = True
     STATE['ansi_diagnostics'] = post.get('ansi_diagnostics', {})
@@ -610,7 +637,9 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
                                          previous_blank_lines=sum(not row.strip() for row in previous_rows))
     if post.get('aid') != aid:
         raise ArticleReadError('文章代碼和要求的 AID 不一致')
-    if source_index is None and type(post.get('index')) is int and post['index'] > 0:
+    if getattr(api, 'sticky_capture', False):
+        post['sticky_capture'] = True
+    if source_index is None and not post.get('sticky_capture') and type(post.get('index')) is int and post['index'] > 0:
         source_index = post['index']
     if post.get('is_lock'):
         note_unavailable(db, site, board, source_index, aid, 'locked', checkpoint=checkpoint)
@@ -649,33 +678,38 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
     unchanged = verified and existing and complete_capture(existing) and all(
         json.dumps(post.get(key), sort_keys=True) == json.dumps(existing.get(key), sort_keys=True)
         for key in fields)
-    keep_previous = (not verified and existing and complete_capture(existing)
-                     and post['full_content'] == existing.get('full_content'))
+    keep_previous = bool(not verified and existing and existing.get('full_content'))
+    if keep_previous:
+        post.setdefault('ansi_diagnostics', {})['version_decision'] = 'candidate_saved_previous_kept'
     coverage = STATE['ansi_coverage']
     matched = coverage.get('matched', 0)
     total = coverage.get('total') or post['full_content'].count('\n') + 1
     with db:
         issue_records.resolve(db, site, board, source_index, aid)
         db.execute('DELETE FROM batch_line_retries WHERE site=? AND board=? AND aid=?', retry_key)
+        if keep_previous:
+            preserve_article_version(db, site, board, aid, post, 'candidate')
         if unchanged or keep_previous:
             db.execute('UPDATE articles SET source_index=coalesce(?,source_index) WHERE site=? AND board=? AND aid=?',
                        (source_index, site, board, aid))
         else:
+            if existing and existing.get('full_content'):
+                preserve_article_version(db, site, board, aid, existing, 'previous')
             if replacing_manual:
-                db.execute('CREATE TABLE IF NOT EXISTS article_revisions(site TEXT,board TEXT,aid TEXT,created REAL,data TEXT)')
-                db.execute('INSERT INTO article_revisions VALUES(?,?,?,?,?)',
-                           (site, board, aid, time.time(), json.dumps(existing, ensure_ascii=False)))
                 post['replaces_manual'] = existing['manual_ansi']
             save_article(db, board, post, site=site, source_index=source_index, commit=False)
         db.execute('DELETE FROM unavailable_articles WHERE site=? AND board=? AND (idx=? OR aid=?)',
                    (site, board, source_index, aid))
-        if verified:
+        retained_coverage = existing.get('ansi_coverage', {}) if keep_previous else coverage
+        retained_complete = complete_capture(existing) if keep_previous else verified
+        if retained_complete:
             db.execute('DELETE FROM color_line_checks WHERE site=? AND board=? AND aid=?', (site, board, aid))
         else:
             db.execute('''INSERT INTO color_line_checks VALUES(?,?,?,?,?,?)
                           ON CONFLICT(site,board,aid) DO UPDATE SET idx=coalesce(excluded.idx,idx),
                           matched=excluded.matched,total=excluded.total''',
-                       (site, board, aid, source_index, matched, total))
+                       (site, board, aid, source_index, retained_coverage.get('matched', 0),
+                        retained_coverage.get('total') or total))
         if checkpoint:
             db.execute('INSERT OR IGNORE INTO batch_verified VALUES(?,?,?)', (site, board, aid))
             db.execute('DELETE FROM batch_unavailable WHERE site=? AND board=? AND idx=?',
@@ -685,7 +719,8 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
         return 'unchanged', verified
     if keep_previous:
         STATE['kept_previous'] = STATE.get('kept_previous', 0) + 1
-        show_issue(source_index, aid, f'保留舊備份，本次配色對齊 {matched}／{total} 行')
+        STATE['ansi_review'] = STATE.get('ansi_review', 0) + 1
+        show_issue(source_index, aid, f'保留舊備份；本次待查版本已另存歷史，配色對齊 {matched}／{total} 行')
         return 'kept_previous_color', verified
     if replacing_manual:
         STATE['manual_replaced'] = STATE.get('manual_replaced', 0) + 1
@@ -695,6 +730,51 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
         STATE['ansi_review'] = STATE.get('ansi_review', 0) + 1
         show_issue(source_index, aid, f'已存正文，配色對齊 {matched}／{total} 行')
     return 'saved', verified
+
+
+def refresh_board_info(session, db, site, board, job, *, snapshot=None, capture_only=False):
+    import board_metadata
+    from PyPtt import command, lib_util
+    STATE['message'] = '正在更新看板標題與置底文章…'
+    if snapshot is None:
+        snapshot = session.capture_board_metadata(board)
+        board_metadata.save(db, site, board, snapshot)
+        job.event('board_metadata', title=snapshot['title'], pins=len(snapshot['pins']), complete=True)
+    if capture_only:
+        return snapshot
+    for pin in snapshot['pins']:
+        if stored_article(db, site, board, pin['aid']): continue
+        if STOP.is_set(): raise DownloadStopped()
+        session._return_to_list()
+        session.index_mode = False
+        # Query by AID; index fields for starred rows can contain a date.
+        session._query(lib_util.check_aid(pin['aid']) + command.enter)
+        if session.selected.aid != pin['aid']: raise BoardNavigationError()
+        original = session.selected
+        from dataclasses import replace, is_dataclass
+        if is_dataclass(original): session.selected = replace(original, index=0)
+        elif hasattr(original, '_replace'): session.selected = original._replace(index=0)
+        else: original.index = 0
+        session.sticky_capture = True
+        previous_mode = session.capture_mode
+        try:
+            try:
+                outcome, verified = download_article(session, db, site, board, pin['aid'])
+            except ArticleStalled:
+                if session.view != 'list': raise
+                session.capture_mode = 'line'
+                session.wrapped_line_retry = True
+                outcome, verified = download_article(session, db, site, board, pin['aid'])
+            if outcome == 'saved': STATE['sticky_saved'] = STATE.get('sticky_saved', 0) + 1
+            job.event('sticky_article', aid=pin['aid'], outcome=outcome, verified=verified)
+        except ArticleStalled as exc:
+            if session.view != 'list': raise
+            record_failure(db, site, board, None, str(exc), article=True, aid=pin['aid'])
+            job.event('sticky_article', aid=pin['aid'], outcome='unreadable', capture=getattr(exc,'capture_diagnostics',{}))
+        finally:
+            session.sticky_capture = False
+            session.capture_mode = previous_mode
+            session.wrapped_line_retry = False
 
 
 def record_rate_limit(site, limit, job):
@@ -777,6 +857,7 @@ def work(config):
                   requested_capture_mode=capture_mode,
                   backup_mode=backup_mode if mode == 'new' else None,
                   all_articles=all_articles, selected_indices=selected_indices, terminal_height=height,
+                  refresh_board_info=bool(config.get('refresh_board_info')),
                   local_count=STATE['local_count'], before_read_seconds=BEFORE_READ_SECONDS,
                   between_items_seconds=BETWEEN_ITEMS_SECONDS, min_command_seconds=MIN_COMMAND_INTERVAL,
                   line_down_seconds=LINE_DOWN_INTERVAL, page_down_seconds=PAGE_DOWN_INTERVAL,
@@ -802,6 +883,20 @@ def work(config):
             result = 'stopped'
             STATE['message'] = '已中止。'
             return
+        board_snapshot = None
+        if mode != 'test' and config.get('refresh_board_info'):
+            stage = 'board_metadata'
+            stage_started = time.monotonic()
+            STATE['message'] = '正在更新看板標題與置底快照…'
+            try:
+                board_snapshot = run_station(lambda: refresh_board_info(session, db, site, board, job, capture_only=True))
+            except DownloadStopped:
+                raise
+            except Exception as metadata_error:
+                job.error('board_metadata', metadata_error)
+                STATE['board_info_error'] = type(metadata_error).__name__
+                # Continue only from a verified list; never send article keys blindly.
+                if not session.confirm_list(board): raise
         if config.get('aid'):
             STATE.update(phase='download', scanned=0, batch_total=1)
             aid = config['aid']
@@ -1063,6 +1158,17 @@ def work(config):
                     db.execute('UPDATE batch_ranges SET completed=1 WHERE site=? AND board=?', (site, board))
                 STATE['message'] = (f'本次範圍處理完畢，{deferred_open} 篇讀取待查。可用「單篇測試修正」重試。'
                                     if deferred_open else '本次範圍處理完畢。')
+        if config.get('refresh_board_info') and result not in ('stopped', 'failed', 'disconnected') and not STOP.is_set():
+            stage = 'board_metadata'
+            stage_started = time.monotonic()
+            try:
+                refresh_board_info(session, db, site, board, job, snapshot=board_snapshot)
+            except DownloadStopped:
+                raise
+            except Exception as metadata_error:
+                job.error('board_metadata', metadata_error)
+                STATE['board_info_error'] = type(metadata_error).__name__
+                STATE['message'] += '\n看板資訊或置底更新未完成，既有正文保留。'
     except DownloadStopped:
         result = 'stopped'
         STATE['message'] = '已中止，已完成的進度已保存。'
@@ -1128,6 +1234,9 @@ def work(config):
                 STATE['message'] += ' 無法寫入失敗紀錄。'
     finally:
         config.clear()
+        if db:
+            STATE['archive_pending_color'] = db.execute(
+                'SELECT count(*) FROM color_line_checks WHERE site=? AND board=?', (site, board)).fetchone()[0]
         if api:
             logout_started = time.monotonic()
             logout_error = None
@@ -1167,14 +1276,15 @@ def work(config):
                       scanned=STATE.get('scanned', 0), updated=STATE.get('updated', 0),
                       planned_count=STATE.get('batch_total', 0),
                       remaining_scan=STATE.get('batch_total', 0) - STATE.get('scanned', 0),
-                      pending_color=STATE.get('ansi_review', 0), timed_samples=STATE.get('timed_samples', 0),
+                      pending_color=STATE.get('ansi_review', 0),
+                      archive_pending_color=STATE.get('archive_pending_color'), timed_samples=STATE.get('timed_samples', 0),
                       rest_count=rest_count, rest_seconds=round(rest_seconds, 3),
                       average_seconds=STATE.get('seconds_per_article'),
                       saved=STATE['saved'], unchanged=STATE['skipped'],
                       reused_local=STATE.get('reused_local', 0),
                       resumed=STATE.get('resumed_verified', 0), unresolved=STATE['unresolved'],
                       unavailable=STATE.get('unavailable', 0), kept_previous=STATE.get('kept_previous', 0),
-                      manual_replaced=STATE.get('manual_replaced', 0),
+                      manual_replaced=STATE.get('manual_replaced', 0), sticky_saved=STATE.get('sticky_saved',0),
                       exported=STATE.get('exported', 0), result=result)
         STATE.update(running=False, phase='done', result=result)
 
@@ -1319,11 +1429,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(409, '{"no_pending": true}')
                 STATE.update(running=True, message='正在啟動…', saved=0, skipped=0,
                              unresolved=0, timed_samples=0, seconds_per_article=None, elapsed=0,
-                             ansi_samples=0, ansi_colored=0, ansi_coverage={}, ansi_review=0, resumed=False, scanned=0,
+                             ansi_samples=0, ansi_colored=0, ansi_coverage={}, ansi_review=0, archive_pending_color=None, resumed=False, scanned=0,
                              batch_total=0, batch_start=None, batch_end=None, direction=None, phase='prepare', selected_indices=None,
                              exported=0, export_total=0, index_path=None, index_url=None, log_path=None,
                              resumed_verified=0, local_count=None, updated=0, issues=[], folder=str(folder),
-                             unavailable=0, kept_previous=0, reused_local=0, html_written=0,
+                             unavailable=0, kept_previous=0, board_info_error=None, sticky_saved=0, reused_local=0, html_written=0,
                              result=None, wait_kind=None, wait_until=None,
                              manual_replaced=0, task_id=secrets.token_urlsafe(12),
                              operation=('test' if mode == 'test' else 'download') if self.path == '/start' else 'export')

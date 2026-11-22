@@ -167,7 +167,13 @@ searchForm.addEventListener('submit', event => {
     if (value) runSearch(value);
 });
 queryInput.addEventListener('input', () => { searchRequest++; });
-document.getElementById('open-search').onclick = () => openSearch('all');
+document.querySelectorAll('.open-search').forEach(button => {
+    button.onclick = () => {
+        const board = boards.find(candidate => candidate.pages.includes(button.closest('.board').querySelector('.entries')));
+        if (board && board !== activeBoard && board.entries.length) select(board, Math.max(0, board.position));
+        openSearch('all');
+    };
+});
 document.getElementById('search-close').onclick = () => dialog.close();
 searchMore.onclick = () => {
     const first = renderedCount;

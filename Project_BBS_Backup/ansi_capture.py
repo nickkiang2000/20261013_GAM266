@@ -9,6 +9,8 @@ import re
 from PyPtt import command, screens
 
 from terminal_links import TerminalLinks
+from article_frame import ArticleFrame, BlankScreenControls
+from color_evidence import ALL, FG, BG, BRIGHT, reconcile
 
 
 SGR = re.compile(r'\x1b\[([0-9;]*)m')
@@ -19,29 +21,57 @@ MAX_FRAMES = 20000
 WRAP_MARKER_COLUMNS = (79, 80)
 
 
+def normalize_reserved_cells(text):
+    """Collapse SDK wide-cell reservations across SGR without dropping SGR.
+
+    Delete only an adjacent literal space/backspace pair (ignoring SGR and
+    CR), never ordinary padding or a visible glyph. Escapes that move the
+    cursor break adjacency, just as in PyPtt's whole-buffer preprocessing.
+    """
+    if '\x08' not in text: return text
+    output, spaces = [], []
+    i = 0
+    while i < len(text):
+        match = SGR.match(text, i) if text[i] == '\x1b' else None
+        if match:
+            output.append(match[0]); i = match.end(); continue
+        char = text[i]; i += 1
+        if char == '\r': continue
+        if char == '\x08' and spaces:
+            output[spaces.pop()] = ''
+            continue
+        if char == ' ': spaces.append(len(output))
+        else: spaces.clear()
+        output.append(char)
+    return ''.join(output)
+
+
 class StyledLine(str):
-    def __new__(cls, text, screen, styles=()):
+    def __new__(cls, text, screen, styles=(), specified=()):
         line = super().__new__(cls, text)
         line.screen = screen
         line.styles = styles
+        line.specified = specified
         return line
 
     def __getitem__(self, index):
         result = super().__getitem__(index)
         if isinstance(index, slice):
-            return StyledLine(result, self.screen, self.styles[index])
+            return StyledLine(result, self.screen, self.styles[index], self.specified[index])
         return result
 
     def __add__(self, text):
         if isinstance(text, StyledLine):
             styles = text.styles
+            specified = text.specified
         else:
             # The SDK fills the gap after cursor positioning with ordinary
             # spaces before writing the next run. Those cells were never painted.
             unpainted = (text.startswith(' ') and text == ' ' *
                          (self.screen._cursor_x - screens._cell_len(self)))
             styles = (() if unpainted else self.screen.classes,) * len(text)
-        return StyledLine(super().__add__(text), self.screen, self.styles + styles)
+            specified = (ALL if unpainted else self.screen.specified,) * len(text)
+        return StyledLine(super().__add__(text), self.screen, self.styles + styles, self.specified + specified)
 
     def runs(self):
         runs = []
@@ -54,9 +84,10 @@ class StyledLine(str):
 
 
 class CapturedLine(str):
-    def __new__(cls, text, runs):
+    def __new__(cls, text, runs, color_mask=None):
         line = super().__new__(cls, text)
         line.color_runs = runs
+        line.color_mask = (ALL,) * len(text) if color_mask is None else color_mask
         return line
 
 
@@ -161,6 +192,7 @@ class ColorScreen(screens._VT100Engine):
     def __init__(self, height):
         self.foreground = self.background = None
         self.bright = self.inverse = False
+        self.specified = 0
         super().__init__(height)
 
     def _reset_screen(self):
@@ -188,30 +220,41 @@ class ColorScreen(screens._VT100Engine):
             if code == 0:
                 self.foreground = self.background = None
                 self.bright = self.inverse = False
+                self.specified = ALL
             elif code == 1:
                 self.bright = True
+                self.specified |= BRIGHT
             elif code in (2, 22):
                 self.bright = False
+                self.specified |= BRIGHT
             elif code in (7, 27):
                 self.inverse = code == 7
+                self.specified = ALL  # Inverse changes both channels; do not infer it.
             elif 30 <= code <= 37:
                 self.foreground = code - 30
+                self.specified |= FG
             elif 40 <= code <= 47:
                 self.background = code - 40
+                self.specified |= BG
             elif code == 39:
                 self.foreground = None
+                self.specified |= FG
             elif code == 49:
                 self.background = None
+                self.specified |= BG
             elif 90 <= code <= 97:
                 self.foreground = code - 90
                 self.bright = True
+                self.specified |= FG | BRIGHT
             elif code in (38, 48):
                 # Extended palettes use extra numeric fields. Do not interpret
                 # those fields as independent SGR commands.
                 break
 
     def replay(self, data, encoding):
-        text = data.decode(encoding, errors='replace')
+        if b'\x1bM' in data:
+            data = BlankScreenControls().feed(data)
+        text = normalize_reserved_cells(data.decode(encoding, errors='replace'))
         start = 0
         for match in SGR.finditer(text):
             if self._run(screens._preprocess(text[start:match.start()])):
@@ -281,6 +324,9 @@ class NumberedArticle:
         self.rows = {}
         self.colors = {}
         self.color_conflict_rows = set()
+        self.color_evidence = {}
+        self.color_resolved_rows = set()
+        self.space_color_equivalent_rows = set()
         self.seen = self.unnumbered = self.width_mismatches = self.conflicts = 0
         self.first_range = self.last_range = self.end_range = None
         self.first_conflict = None
@@ -515,10 +561,28 @@ class NumberedArticle:
                     self.first_conflict = number
                 continue
             if styled is not None:
-                runs = styled[offset].color_runs
-                if self.colors.setdefault(number, runs) != runs:
-                    self.color_conflicts += 1
-                    self.color_conflict_rows.add(number)
+                current = styled[offset]
+                prior = self.color_evidence.get(number)
+                if prior is not None and (prior.color_runs != current.color_runs
+                                          or prior.color_mask != current.color_mask):
+                    from scroll_capture import painted_key
+                    space_equivalent = (prior.color_runs != current.color_runs and
+                        painted_key((str(prior),prior.color_runs)) == painted_key((str(current),current.color_runs)))
+                    resolved = ((prior.color_runs, tuple(a|b for a,b in zip(prior.color_mask,current.color_mask)))
+                                if space_equivalent else reconcile(prior, current))
+                    if resolved is not None:
+                        runs, mask = resolved
+                        if space_equivalent:
+                            self.space_color_equivalent_rows.add(number)
+                        elif prior.color_runs != current.color_runs:
+                            self.color_resolved_rows.add(number)
+                        current = CapturedLine(row, runs, mask)
+                    elif prior.color_runs != current.color_runs:
+                        self.color_conflicts += 1
+                        self.color_conflict_rows.add(number)
+                        continue
+                self.color_evidence[number] = current
+                self.colors[number] = current.color_runs
 
     def _observe_scrolling(self, styled, first, last, at_end):
         self.scrolling.observe(styled, first, last, at_end)
@@ -772,7 +836,10 @@ class NumberedArticle:
             'personalized_footer': self.personalized,
             'screen_count': self.seen, 'unnumbered_screens': self.unnumbered,
             'width_mismatches': self.width_mismatches, 'overlap_conflicts': self.conflicts,
-            'overlap_color_conflicts': self.color_conflicts, 'end_evidence': self.end_evidence,
+            'overlap_color_conflicts': self.color_conflicts,
+            'omitted_sgr_resolved_rows': len(self.color_resolved_rows),
+            'space_color_equivalent_rows': len(self.space_color_equivalent_rows),
+            'omitted_sgr_resolved_sample': sorted(self.color_resolved_rows)[:12], 'end_evidence': self.end_evidence,
             'wrapped_screens': self.wrapped_screens, 'wrap_joins': self.wrap_joins,
             'wrap_marker_seen': self.wrap_marker_seen,
             'tail_wrap_hints': self.tail_wrap_hints,
@@ -800,6 +867,9 @@ def read_colored_post(api, board, aid):
     """Observe received article screens only. Login and navigation stay outside capture."""
     from board_session import ArticleTargetUnit, BoardSession, END_KEY, FALLBACK_HEIGHT, PAGE_DOWN_KEY
 
+    if isinstance(api, BoardSession):
+        api.full_redraw_initial_failure = None
+    redraw_before = api.operations.get('full_redraw_retries', 0) if isinstance(api, BoardSession) else 0
     core = api.connect_core
     send = core.send
     stream = core._stream_screen
@@ -808,8 +878,11 @@ def read_colored_post(api, board, aid):
     terminal_steps = deque(maxlen=6)
     observed_rows = deque(maxlen=3)
     capture_samples = deque(maxlen=3)
+    alignment_samples = []
     link_decoders = {}
     link_frames = []
+    frame_boundaries = {}
+    screen_controls = {}
     link_stream = None
     line_cache = {}
     mode = getattr(api, 'capture_mode', 'line') if isinstance(api, BoardSession) else 'line'
@@ -829,7 +902,7 @@ def read_colored_post(api, board, aid):
     received_bytes = 0
     key_names = {None: 'receive_only', command.enter * 2: 'open', command.down: 'down',
                  command.up: 'up', command.right: 'right', command.left: 'left',
-                 PAGE_DOWN_KEY: 'page_down', END_KEY: 'end', 'n': 'decline_animation'}
+                 PAGE_DOWN_KEY: 'page_down', END_KEY: 'end', command.refresh: 'redraw', 'n': 'decline_animation'}
 
     def record_step(message, outcome, silent=None):
         queue = core.get_screen_queue()
@@ -853,6 +926,12 @@ def read_colored_post(api, board, aid):
                 'numbering': numbered.diagnostics(), 'end_fallback': fallback_attempts,
                 'osc8_commands': max((decoder.commands for decoder in link_decoders.values()), default=0),
                 'link_frames': len(link_frames),
+                'frame_completion': {encoding: state.diagnostics() for encoding, state in frame_boundaries.items()},
+                'first_alignment_failure_saved': bool(alignment_samples),
+                'empty_screen_reverse_indices_removed': sum(control.removed for control in screen_controls.values()),
+                'unsupported_reverse_indices': sum(control.unhandled for control in screen_controls.values()),
+                'full_redraw_initial_failure': getattr(api, 'full_redraw_initial_failure', None),
+                'full_redraw_retries': api.operations.get('full_redraw_retries', 0)-redraw_before if isinstance(api, BoardSession) else 0,
                 'hyperlink_targets': sorted({target for decoder in link_decoders.values() for target in decoder.targets}),
                 'bridge_navigation': list(api.bridge_events) if isinstance(api, BoardSession) else [],
                 'recent_row_layouts': [
@@ -871,8 +950,12 @@ def read_colored_post(api, board, aid):
             received_bytes += len(chunk)
         if link_stream is not core._stream_parsers:
             link_stream = core._stream_parsers
+            frame_boundaries.clear()
+            for control in screen_controls.values(): control.reset_frame()
             for decoder in link_decoders.values():
                 decoder.reset_frame()
+        frame_boundaries.setdefault(encoding, ArticleFrame()).feed(chunk)
+        chunk = screen_controls.setdefault(encoding, BlankScreenControls()).feed(chunk)
         decoder = link_decoders.get(encoding)
         if decoder is None:
             decoder = link_decoders[encoding] = TerminalLinks()
@@ -894,15 +977,21 @@ def read_colored_post(api, board, aid):
     def capture_send(message, targets, *args, **kwargs):
         nonlocal capturing, frame_limit_hit, reached_end, numbered, page_turns, received_bytes
         article_targets = (screens.Target.PostEnd, screens.Target.InPost)
-        targets = [ArticleTargetUnit(target) if target.get_detect_target() in article_targets
-                   and not isinstance(target, ArticleTargetUnit) else target for target in targets]
         article_screen = any(target.get_detect_target() in article_targets for target in targets)
+        if article_screen:
+            # Also gate list/animation targets: body text can resemble a target
+            # before the synchronized redraw has finished. IDs remain unchanged.
+            def frame_ready():
+                boundary = frame_boundaries.get(getattr(core, 'current_encoding', None))
+                return boundary is None or boundary.ready()
+            targets = [ArticleTargetUnit(target, ready=frame_ready) for target in targets]
         if article_screen and message == command.enter * 2:
             # PyPtt can retry from the beginning when metadata validation fails.
             # Keep completion and colors tied to the attempt it actually returns.
             frames.clear()
             observed_rows.clear()
             capture_samples.clear()
+            alignment_samples.clear()
             line_cache.clear()
             link_frames.clear()
             for decoder in link_decoders.values():
@@ -954,7 +1043,7 @@ def read_colored_post(api, board, aid):
                             packed = []
                             for line in frame[:-1]:
                                 runs = tuple(line.runs()) if any(line.styles) else ()
-                                key = (str(line), runs)
+                                key = (str(line), runs, tuple(line.specified))
                                 if key not in line_cache:
                                     line_cache[key] = CapturedLine(*key)
                                 packed.append(line_cache[key])
@@ -974,14 +1063,27 @@ def read_colored_post(api, board, aid):
                         and core.config.screen_height == FALLBACK_HEIGHT and numbered.scrolling is None):
                     from scroll_capture import ScrollCapture
                     numbered.scrolling = ScrollCapture()
-                numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed, linked_screen=linked_screen)
+                if isinstance(api, BoardSession):
+                    api.last_article_frame = ([(str(row), tuple(row.color_runs)) for row in packed]
+                                              if packed is not None else None)
+                probe = isinstance(api, BoardSession) and getattr(api, 'probing_scroll_end', False)
+                redraw_pending = (isinstance(api, BoardSession) and getattr(api, 'refresh_each_line', False)
+                                  and message in (command.down, command.enter * 2, 'n'))
+                conflicts_before = numbered.conflicts + numbered.color_conflicts
+                if not probe and not redraw_pending:
+                    numbered.observe(rows[:-1], rows[-1], at_end=at_end, styled=packed, linked_screen=linked_screen)
                 observed_rows.append((numbered.last_range, packed or rows[:-1]))
-                capture_samples.append({
+                sample = {
                     'screen': plain, 'encoding': core.current_encoding, 'height': core.config.screen_height,
                     'key': key_names.get(message, 'other'), 'at_end': at_end, 'linked_screen': linked_screen,
                     'colors': [list(line.color_runs) for line in packed] if packed is not None else None,
                     'raw': bytes(data) if data else b'',
-                })
+                }
+                if not alignment_samples and numbered.conflicts + numbered.color_conflicts > conflicts_before:
+                    if capture_samples:
+                        alignment_samples.append(capture_samples[-1])
+                    alignment_samples.append(sample)
+                capture_samples.append(sample)
             return result
         finally:
             capturing = False
@@ -990,7 +1092,8 @@ def read_colored_post(api, board, aid):
         if capture_samples:
             from local_state import save_reading_capture
             try:
-                path = save_reading_capture(board, aid, mode, list(capture_samples), capture, reason)
+                samples = alignment_samples + [sample for sample in capture_samples if sample not in alignment_samples]
+                path = save_reading_capture(board, aid, mode, samples, capture, reason)
             except OSError as exc:
                 capture['reading_capture_error'] = type(exc).__name__
             else:
@@ -1059,6 +1162,6 @@ def read_colored_post(api, board, aid):
                 (n for n, (old, new) in enumerate(zip(sdk_rows, selected_rows), 1) if old != new),
                 min(len(sdk_rows), len(selected_rows)) + 1 if len(sdk_rows) != len(selected_rows) else None),
         )
-    if body and numbered.assemble() is None and numbered.single_screen_body is None:
+    if body and (covered < len(selected_rows) or (numbered.assemble() is None and numbered.single_screen_body is None)):
         save_diagnostic(capture, 'Text or color alignment needs review')
     return post

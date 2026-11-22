@@ -5,11 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BBS時光庫－操作說明與紀錄</title>
 <style>
-body { margin: 2rem auto; padding: 0 1rem; max-width: 50rem; font: 1rem/1.65 system-ui,sans-serif;
+body { margin: 2rem auto; padding: 0 1rem; max-width: 76rem; font: 1rem/1.65 system-ui,sans-serif;
        background: #10151c; color: #e0e7ef; color-scheme: dark; }
 a { color: #a8d7ff; } h2 { margin-top: 1.7rem; }
 .records-scroll { overflow-x: auto; } table { border-collapse: collapse; width: 100%; font-size: .9rem; }
 th, td { border: 1px solid #526174; padding: .4rem; text-align: left; vertical-align: top; }
+.issue-table { table-layout: fixed; min-width: 43rem; }
+.issue-index { width: 4.5em; } .issue-aid { width: 7em; } .issue-state { width: 8em; }
+.issue-reason { width: 30%; } .issue-content { width: 6em; white-space: nowrap; }
+.issue-table td { overflow-wrap: anywhere; }
+.issue-table td:nth-child(2) { font-family: Consolas, monospace; }
 .shortcuts { width: 100%; }
 .shortcuts th { width: 12ch; background: #182332; }
 kbd { white-space: nowrap; }
@@ -34,6 +39,8 @@ kbd { white-space: nowrap; }
   <section id="keyboard">
     <h2>操作教學（鍵盤操作）</h2>
     <h3 id="list-keys">文章列表</h3>
+    <p>列表依序顯示文章編號、推文數、完整日期、作者 ID（暱稱）、文章標題；欄距為四個半形空白寬度。推文數採備份當時站方列表的數值或爆／X 標記，未保存時留白，不以所有回應數推算。非回覆主題前有 □，過長暱稱以單行省略，停留可看完整文字。桌面固定區有兩行：看板與亮黃標題在第一行；欄位名稱、全板搜尋、翻頁及頁數在第二行。手機窄畫面會將文章標題移至下一列。</p>
+    <p>日期提示可查看資料來源。時間欄缺少時，僅在文章識別碼時間戳能與列表月日或同站網址核對時補顯示日期；無法確認的年份明示待查，不取轉錄內文或下載時間代替。置底文章同樣顯示日期及 ID。</p>
     <p>開啟時選在最新一篇。列表按編號 1～20、21～40 等固定範圍分頁，空範圍略過。</p>
     <table class="shortcuts" aria-labelledby="list-keys"><tbody>
       <tr><th scope="row"><kbd>↑</kbd>／<kbd>↓</kbd></th><td>選取文章。</td></tr>
@@ -66,6 +73,7 @@ kbd { white-space: nowrap; }
       <tr><th scope="row"><kbd>h</kbd>／<kbd>H</kbd></th><td>開啟本段操作說明。</td></tr>
     </tbody></table>
   </section>
+  <p>列表採 Sample B 版面：推文數靠右、ID（暱稱）最多 30 個半形字寬，過長時停留查看完整文字。更新程式後請執行「離線內容重整」更新既有時光庫。</p>
   <!-- ISSUE_RECORDS -->
 </main>
 </body></html>

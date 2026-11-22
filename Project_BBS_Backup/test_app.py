@@ -1108,7 +1108,7 @@ class StorageTests(unittest.TestCase):
             index_page = (folder / 'index.html').read_text(encoding='utf-8')
             pages = re.findall(r'<ul class="entries"( hidden)?>(.*?)</ul>', index_page)
             self.assertEqual([bool(hidden) for hidden, _ in pages], [True, True, False])
-            numbers = [[int(number) for number in re.findall(r'Article (\d+)</a>', body)]
+            numbers = [[int(number) for number in re.findall(r'data-source-index="(\d+)"', body)]
                        for _, body in pages]
             self.assertEqual(numbers, [
                 [n for n in range(1, 21) if n != 17],
@@ -1117,7 +1117,7 @@ class StorageTests(unittest.TestCase):
             ])
 
             links = dict((int(number), path) for path, number in re.findall(
-                r'href="(articles/[^\"]+)"[^>]*><span[^>]*>[^<]*</span>Article (\d+)</a>', index_page))
+                r'href="(articles/[^\"]+)" data-source-index="(\d+)"', index_page))
             boundary = (folder / links[21]).read_text(encoding='utf-8')
             self.assertIn(f'id="previous" href="{Path(links[20]).name}"', boundary)
             self.assertIn(f'id="next" href="{Path(links[23]).name}"', boundary)
@@ -1495,6 +1495,7 @@ class BoardSessionTests(unittest.TestCase):
 
         core = SimpleNamespace(_decode_screen=Mock(), send=Mock())
         session = BoardSession(SimpleNamespace(connect_core=core))
+        session._screen = Mock(return_value='')
         for label, last_rows, span, result, reason in (
             ('complete', ['', 'same', 'last', '   '], '2~4', 0, None),
             ('gap', ['last'], '5~5', 0, '缺少第 4～4 行'),

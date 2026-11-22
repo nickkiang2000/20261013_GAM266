@@ -31,7 +31,10 @@ input:disabled, select:disabled { opacity: .5; }
 .form-row { display: grid; grid-column: 1 / -1; gap: 9px; align-items: start; }
 .login-fields { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .scan-fields { grid-template-columns: minmax(0, 1.22fr) minmax(0, .86fr) minmax(0, 1fr) minmax(0, 1.24fr); }
-.backup-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 3fr); }
+.backup-fields { grid-template-columns: minmax(0, 2.25fr) minmax(0, 1fr) minmax(0, .75fr); }
+.board-refresh { white-space: normal; display: flex; align-items: center; gap: .3em; align-self: end; min-height: 35px; }
+.board-refresh span { white-space: nowrap; }
+.board-refresh input { flex: 0 0 auto; margin: 0; }
 .form-row label { grid-column: auto; }
 .scan-fields label, .range-caption { font-size: .92rem; }
 .range-value { display: flex; align-items: center; margin-top: 3px; min-height: 35px; padding: 6px 8px;
@@ -102,6 +105,7 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     form, section { padding: 10px; }
 }
 @media (max-width: 600px) {
+    .backup-fields { grid-template-columns: 1fr; }
     .login-fields, .scan-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .repair-search { grid-template-columns: minmax(0, 1fr) auto; }
     .repair-search label:last-child { grid-column: 1 / -1; }
@@ -138,13 +142,14 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     </div>
 </div>
 <div class="form-row backup-fields">
-    <label>下載方式<select name="backup_mode"><option value="fill">補齊備份</option><option value="recheck">重新核對</option></select></label>
     <label>備份完整目錄（子目錄自動生成）
         <div class="folder-control">
             <input name="folder" required placeholder="D:\BBS_Backup\" aria-describedby="folder-suffix">
             <span class="folder-suffix" id="folder-suffix" hidden></span>
         </div>
     </label>
+    <label>下載方式<select name="backup_mode"><option value="fill">補齊備份</option><option value="recheck">重新核對</option></select></label>
+    <label class="board-refresh"><input type="checkbox" name="refresh_board_info" checked> <span>更新標題<br>／置底文</span></label>
 </div>
 <div class="download-actions wide">
     <div class="download-action">
@@ -175,8 +180,8 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
         <strong>匯入人工 ANSI 備份</strong>
         <div class="repair-search">
             <label>搜尋備份根目錄<input id="repair-root" name="repair_root" placeholder="使用首頁的備份根目錄"></label>
-            <button type="button" id="repair-find">查找待查文章</button>
-            <label>待查文章<select id="repair-target" disabled><option value="">請先查找待查文章</option></select></label>
+            <button type="button" id="repair-find">查找問題文章</button>
+            <label>待查文章<select id="repair-target" disabled><option value="">請先查找問題文章</option></select></label>
         </div>
         <div class="repair-upload">
             <label>本機 ANSI 檔<input id="repair-file" type="file" accept=".ans"></label>
@@ -416,7 +421,7 @@ function updateFormSummary() {
     const listMode = parts.length > 1;
     const validStart = parts.length <= 10000 && parts.every(part =>
         /^[0-9]{1,10}$/.test(part) && Number(part) <= 2147483647 && (!listMode || Number(part) > 0));
-    const error = validStart ? '' : '請輸入一個編號，或用逗號分隔多個正整數。0 只能單獨使用。';
+    const error = validStart ? '' : '輸入正整數指定起始文章；輸入 0 代表從最新文章開始。多篇請用逗號分隔正整數，清單中不可包含 0。';
     start.setCustomValidity(error);
     const startError = document.getElementById('start-error');
     startError.textContent = error;
@@ -616,7 +621,7 @@ function updateRepairButtons() {
     document.getElementById('repair-find').disabled = repairBusy;
     repairTarget.disabled = repairBusy || !repairTargets.length;
     repairRoot.disabled = repairFile.disabled = repairBusy;
-    repairPreview.disabled = repairBusy || !repairTarget.value || !repairFile.files.length;
+    repairPreview.disabled = repairBusy || !repairTarget.value || repairTargets[Number(repairTarget.value)]?.repairable === false || !repairFile.files.length;
     repairConfirm.disabled = repairBusy || running || !repairDraft;
 }
 
@@ -631,7 +636,7 @@ function clearRepairPreview() {
 function clearRepairTargets() {
     repairTargets = [];
     repairSearchRoot = '';
-    repairTarget.replaceChildren(new Option('請先查找待查文章', ''));
+    repairTarget.replaceChildren(new Option('請先查找問題文章', ''));
     clearRepairPreview();
 }
 
@@ -644,7 +649,7 @@ async function repairRequest(path, data) {
 }
 
 function repairLabel(target) {
-    return `${target.site}／${target.board}／第 ${target.index} 篇 · AID ${target.aid}`;
+    return `${target.site}／${target.board}／第 ${target.index ?? '未取得'} 篇 · AID ${target.aid ?? '未取得'} · ${target.status ?? '讀取待查'}`;
 }
 
 function renderRepairTargets() {
@@ -842,8 +847,11 @@ async function refresh() {
     if (state.unresolved) review.push(`文章待查 ${state.unresolved} 筆`);
     if (state.unavailable) review.push(`刪除、鎖定或無正文 ${state.unavailable} 筆`);
     if (state.manual_replaced) review.push(`人工備份替換 ${state.manual_replaced} 篇`);
+    if (state.sticky_saved) review.push(`新增置底正文 ${state.sticky_saved} 篇`);
+    if (state.board_info_error) review.push('看板資訊／置底待更新');
     if (state.kept_previous) review.push(`保留舊備份 ${state.kept_previous} 篇`);
-    if (state.ansi_review) review.push(`配色待核對 ${state.ansi_review} 篇`);
+    if (state.ansi_review) review.push(`本批配色待核對 ${state.ansi_review} 篇`);
+    if (state.archive_pending_color != null) review.push(`此看板備份待核色共 ${state.archive_pending_color} 篇`);
     const issues = document.getElementById('issues');
     const issueList = state.issues || [];
     document.getElementById('issue-details').hidden = !review.length && !issueList.length;
