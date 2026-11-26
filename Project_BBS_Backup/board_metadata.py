@@ -60,10 +60,10 @@ def render(db, site, board):
     return title+'<aside class="sticky-posts"><strong>置底文章</strong><ul>'+''.join(items)+'</ul><small>備份時狀態：'+escape(data.get('captured_at',''))+'</small></aside>'
 
 
-def render_rows(db, site, board):
+def render_rows(db, site, board, *, pins=None):
     data = load(db, site, board)
     items = []
-    for pin in data.get('pins', []):
+    for pin in data.get('pins', []) if pins is None else pins:
         key = sha256(json.dumps((site, board, pin['aid'])).encode()).hexdigest()
         saved = db.execute('SELECT body,data FROM articles WHERE site=? AND board=? AND aid=?',
                            (site, board, pin['aid'])).fetchone()

@@ -5,6 +5,9 @@ from html import escape
 from itertools import groupby
 import json
 import re
+import os
+import tempfile
+from contextlib import contextmanager
 
 from terminal_links import WEB_URL
 from issue_records import report as issue_report
@@ -58,6 +61,16 @@ const boards = Array.from(document.querySelectorAll('.board'), section => ({
     position: -1,
 }));
 let activeBoard = null;
+function highlightSubject(board, entry) {
+    for (const section of boards) for (const row of section.entries) {
+        row.classList.remove('thread-root', 'thread-reply', 'thread-related');
+    }
+    if (!entry?.dataset.subject) return;
+    for (const row of board.entries) if (row.dataset.subject === entry.dataset.subject) {
+        row.classList.add('thread-related', row.dataset.reply === 'true' ? 'thread-reply' : 'thread-root');
+    }
+}
+
 
 function showPage(board, page) {
     board.pages[board.currentPage].hidden = true;
@@ -95,7 +108,15 @@ function turnPage(board, step) {
 
 for (const board of boards) {
     board.entries.forEach((entry, index) => {
+        if (!entry.dataset.subject) {
+            const original = board.entries.find(row => row.dataset.subject && row.getAttribute('href')?.split('#')[0] === entry.getAttribute('href')?.split('#')[0]);
+            if (original) { entry.dataset.subject = original.dataset.subject; entry.dataset.reply = original.dataset.reply; }
+        }
         entry.addEventListener('focus', () => select(board, index, false));
+        entry.addEventListener('click', event => {
+            if (event.defaultPrevented || event.button || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+            try { history.replaceState(null, '', '#' + entry.id + '/thread'); } catch (_) {}
+        });
     });
     board.older.onclick = () => turnPage(board, -1);
     board.newer.onclick = () => turnPage(board, 1);
@@ -107,11 +128,15 @@ for (const board of boards) {
 function restoreSelection() {
     const returning = document.getElementById(location.hash.slice(1).split('/')[0]);
     const board = boards.find(candidate => candidate.entries.includes(returning));
-    if (board) select(board, board.entries.indexOf(returning));
+    if (board) {
+        select(board, board.entries.indexOf(returning));
+        if (location.hash.endsWith('/thread')) highlightSubject(board, returning);
+    }
     else if (boards.length) select(boards[0], boards[0].entries.length - 1);
 }
 restoreSelection();
 window.addEventListener('hashchange', restoreSelection);
+window.addEventListener('pageshow', restoreSelection);
 let numberInput = '';
 const numberStatus = document.getElementById('number-jump');
 
@@ -173,9 +198,13 @@ document.addEventListener('keydown', event => {
 '''
 
 ARTICLE_KEYS = r'''
+// Mark the topic only after the article page has actually opened.
+const topicBack = document.getElementById('back');
+if (topicBack && !topicBack.hash.endsWith('/thread')) topicBack.hash += '/thread';
+
 if (location.hash === '#sticky') {
     const key = location.pathname.split('/').pop().replace(/\.html$/, '');
-    if (/^[0-9a-f]{64}$/.test(key)) document.getElementById('back').hash = 'pin-' + key;
+    if (/^[0-9a-f]{64}$/.test(key)) document.getElementById('back').hash = 'pin-' + key + '/thread';
 }
 const articleText = document.querySelector('pre');
 const frameButton = document.getElementById('frame-view');
@@ -208,7 +237,7 @@ document.addEventListener('keydown', event => {
     const mode = {'?': 'all', '/': 'title', a: 'author', '#': 'aid', S: 'subject', '!': 'exclude'}[key];
     if (mode) {
         event.preventDefault();
-        location.href = document.getElementById('back').href + '/' + mode;
+        location.href = document.getElementById('back').href.replace(/\/thread$/, '') + '/' + mode + '/thread';
         return;
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
@@ -257,9 +286,13 @@ def write_page(path, content, *, force=False):
                 return False
         except FileNotFoundError:
             pass
-    temp = path.with_suffix(path.suffix + '.tmp')
-    temp.write_bytes(data)
-    temp.replace(path)
+    temp=None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent,prefix=path.name+'.',suffix='.tmp',delete=False) as stream:
+            temp=Path(stream.name);stream.write(data)
+        temp.replace(path)
+    finally:
+        if temp is not None:temp.unlink(missing_ok=True)
     return True
 
 
@@ -456,7 +489,11 @@ html:has(.index-top) { background: #000; }
     font: inherit; align-items: start; text-align: left; }
 .entry-number, .entry-date { font-variant-numeric: tabular-nums; }
 .entry-author { min-width: 0; max-width: 30ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.entry-title { overflow-wrap: anywhere; min-width: 0; }
+.entry-title { overflow-wrap: anywhere; min-width: 0; color: #999999; }
+.thread-related .entry-author { color: #ffffff; }
+.thread-root .entry-title { color: #ff0000; }
+.board[data-site="CCNS"] .thread-root .entry-title { color: #00ff00; }
+.thread-reply .entry-title { color: #ffff00; }
 .board .sticky-missing > small { grid-column: 2; }
 .push-positive { color: #00ff00; } .push-hot { color: #ffff00; }
 .push-boom { color: #ff5555; } .push-negative { color: #bbb; }
@@ -501,7 +538,7 @@ SEARCH_DIALOG = '''
 
 
 def subject_key(title):
-    return re.sub(r'^(?:\s*re\s*:\s*)+', '', title, flags=re.I).strip().lower()
+    return re.sub(r'^(?:\s*(?:re|r)\s*:\s*)+', '', title, flags=re.I).strip().lower()
 
 
 def color_article(site, board, title, post, body, nav):
@@ -543,7 +580,42 @@ def color_article(site, board, title, post, body, nav):
                            link_occurrences=post.get('link_occurrences', [])))
 
 
+class ArchiveBusyError(RuntimeError):
+    pass
+
+
+@contextmanager
+def archive_lock(folder):
+    """An OS-held lock prevents two processes exporting the same archive."""
+    lock_dir=Path(__file__).with_name('log')/'archive-locks'
+    lock_dir.mkdir(parents=True,exist_ok=True)
+    key=sha256(os.path.normcase(str(Path(folder).resolve())).encode()).hexdigest()
+    with (lock_dir/(key+'.lock')).open('a+b') as stream:
+        stream.seek(0,2)
+        if stream.tell()==0:stream.write(b'0');stream.flush()
+        stream.seek(0)
+        try:
+            if os.name=='nt':
+                import msvcrt
+                msvcrt.locking(stream.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(stream,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except OSError as exc:
+            raise ArchiveBusyError('另一個程式正在更新此備份目錄，請等候完成後再重試') from exc
+        try:yield
+        finally:
+            stream.seek(0)
+            if os.name=='nt':msvcrt.locking(stream.fileno(),msvcrt.LK_UNLCK,1)
+            else:fcntl.flock(stream,fcntl.LOCK_UN)
+
+
 def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
+    with archive_lock(folder):
+        return _export_html(db,folder,progress,force=force,stats=stats,issue_evidence=issue_evidence)
+
+
+def _export_html(db, folder, progress=None, *, force=False, stats=None, issue_evidence=None):
     articles = folder / 'articles'
     articles.mkdir(exist_ok=True)
     db.execute('''CREATE TABLE IF NOT EXISTS html_render_cache(
@@ -592,6 +664,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                              group[pos + 1] if pos + 1 < len(group) else None)
                          for group in subjects.values() for pos, i in enumerate(group)}
         entries = []
+        ccns_pins = []
         for i, (_, _, aid, title, body, data, source_index, _) in enumerate(items):
             key = keys[i]
             title = title or '(無標題)'
@@ -603,6 +676,8 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
             except (ValueError, TypeError) as exc:
                 post = {}
                 render_error = type(exc).__name__
+            if site == 'CCNS' and post.get('ccns_sticky') is True:
+                ccns_pins.append(dict(aid=aid,title=title,source_index=source_index))
             author = post.get('author') or ''
             if data is not None:
                 display_date, date_source = posting_date(post, body, site=site, board=board, aid=aid)
@@ -615,6 +690,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                               for target in subject_links.get(i, (None, None)))
             subject_attrs = ''.join(f' data-subject-{direction}="a-{neighbor}"'
                                     for direction, neighbor in zip(('older', 'newer'), neighbors) if neighbor)
+            subject_attrs += f' data-subject="{escape(subject_key(title), quote=True)}" data-reply="{str(bool(re.match(r"^\s*(?:re\s*:|r:)", title, re.I))).lower()}"'
             index_attr = f' data-source-index="{source_index}"' if type(source_index) is int and source_index > 0 else ''
             entries.append(f'<li><a id="a-{key}" href="articles/{key}.html"{index_attr}{subject_attrs}>'
                            f'{list_cells(source_index, post, title, body, site=site, board=board, aid=aid)}</a></li>')
@@ -683,7 +759,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
                 unnumbered.append(entry)
         batches = [unnumbered[start:start + PAGE_SIZE] for start in range(0, len(unnumbered), PAGE_SIZE)]
         batches.extend(numbered_pages[page] for page in sorted(numbered_pages))
-        pins = board_metadata.render_rows(db, site, board)
+        pins = board_metadata.render_rows(db, site, board, pins=ccns_pins) if site == 'CCNS' else board_metadata.render_rows(db, site, board)
         metadata = board_metadata.load(db, site, board)
         if not batches and pins: batches = [[]]
         pages = []
@@ -704,7 +780,7 @@ def export_html(db, folder, progress=None, *, force=False, stats=None, issue_evi
         skipped_count = len(items) - article_count
         board_summaries.append(f'<li>{board_name} · {article_count} 篇正文</li>')
         board_count = f'{article_count} 篇' + (f' · {skipped_count} 筆站上狀態' if skipped_count else '')
-        sections.append(f'<section class="board" data-board="{board_name}" data-title="{escape(metadata.get("title",""), quote=True)}">'
+        sections.append(f'<section class="board" data-site="{escape(site, quote=True)}" data-board="{board_name}" data-title="{escape(metadata.get("title",""), quote=True)}">'
                         '<div class="board-tools"><div class="entry-columns" aria-hidden="true">'
                         '<span>編號</span><span>推</span><span>日期</span><span>ID（暱稱）</span></div><div class="title-tools"><span>文章標題</span>'
                         + pagination + '</div></div>' + ''.join(pages) + '</section>')

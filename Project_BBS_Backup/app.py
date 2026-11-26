@@ -15,7 +15,7 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from archive import export_html
+from archive import export_html, archive_lock, ArchiveBusyError
 import issue_records
 from board_session import (ArticleStalled, BoardNavigationError, BoardSession, BoardTemporarilyClosed, BridgeNavigationError,
                            FALLBACK_HEIGHT, LINE_DOWN_INTERVAL, MIN_COMMAND_INTERVAL, PAGE_DOWN_INTERVAL,
@@ -24,7 +24,7 @@ from local_state import LOG_DIRECTORY, JobLog, load_preferences, load_rate_limit
 from manual_archive import check_ansi_target, prepare_ansi_article, store_ansi_article
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = 'v2.27.2'
+APP_VERSION = 'v2.28.8'
 LOCAL_PORT = 18761
 TOKEN = secrets.token_urlsafe(32)
 REPAIR_KEY = secrets.token_bytes(32)
@@ -40,9 +40,14 @@ logging.disable(logging.CRITICAL)
 ARTICLE_TABLE = '''CREATE TABLE IF NOT EXISTS articles(
     site TEXT NOT NULL, board TEXT, aid TEXT, title TEXT, body TEXT, data TEXT,
     fetched REAL, source_index INTEGER, PRIMARY KEY(site,board,aid))'''
-SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2'}
+SITES = {'PTT': 'PTT1', 'PTT2': 'PTT2', 'CCNS': 'CCNS'}
+
+def valid_board(site, board):
+    pattern = r'[A-Za-z0-9_.-]{1,30}' if site == 'CCNS' else r'[A-Za-z0-9_-]{1,30}'
+    return isinstance(board, str) and re.fullmatch(pattern, board) is not None
+
 DIRECTIONS = {'newest': '新到舊', 'oldest': '舊到新'}
-CAPTURE_MODES = {'line': '逐行', 'page': '自動擷取'}
+CAPTURE_MODES = {'line': '逐行', 'page': '自動擷取', 'ccns_page': 'CCNS 逐頁核對'}
 BACKUP_MODES = {'recheck': '重新核對', 'fill': '補齊備份'}
 BEFORE_READ_SECONDS = 1
 BETWEEN_ITEMS_SECONDS = 1
@@ -442,7 +447,7 @@ def repair_article(data, *, commit):
     site, board, index, aid = (data[key] for key in ('site', 'board', 'index', 'aid'))
     if (folder != root and folder.parent != root) or not (folder / 'articles.sqlite3').is_file():
         raise ValueError('所選文章的備份資料夾已無法辨識')
-    if (site not in SITES or not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', board) or type(index) is not int
+    if (site not in SITES or not valid_board(site, board) or type(index) is not int
             or not re.fullmatch(r'[A-Za-z0-9_-]{8}', aid)):
         raise ValueError('待查文章的站台、看板、篇號或 AID 無效')
     raw = base64.b64decode(data['file'], validate=True)
@@ -521,7 +526,7 @@ def export_existing(folder):
         result = 'done'
         job.event('finish', exported=count, html_written=STATE['html_written'])
     except Exception as exc:
-        STATE['message'] = f'離線內容重整失敗：{type(exc).__name__}'
+        STATE['message'] = str(exc) if isinstance(exc,ArchiveBusyError) else f'離線內容重整失敗：{type(exc).__name__}'
         if job:
             job.error('refresh_offline', exc)
     finally:
@@ -572,6 +577,9 @@ def preserve_article_version(db, site, board, aid, post, role):
 
 def download_article(api, db, site, board, aid, *, source_index=None, existing=None, checkpoint=False):
     from ansi_capture import read_colored_post
+
+    if site == 'CCNS':
+        read_colored_post = lambda session, board, aid: session.read_colored_post(board, aid)
 
     read_started = time.monotonic()
     retry_key = (site, board, aid)
@@ -698,6 +706,17 @@ def download_article(api, db, site, board, aid, *, source_index=None, existing=N
             if replacing_manual:
                 post['replaces_manual'] = existing['manual_ansi']
             save_article(db, board, post, site=site, source_index=source_index, commit=False)
+            if site=='CCNS' and verified and post.get('identity_kind')=='ccns_e_without_aid':
+                # Retire the old v2.28.7 local key only after the same complete body was saved.
+                old_rows=db.execute('SELECT aid,data FROM articles WHERE site=? AND board=? AND source_index=? AND aid<>?',
+                                    (site,board,source_index,aid)).fetchall()
+                for old_aid,old_data in old_rows:
+                    previous=json.loads(old_data)
+                    if (old_aid.startswith('CCNS-E-') and previous.get('identity_kind')=='ccns_e_without_aid'
+                            and previous.get('full_content')==post['full_content']):
+                        preserve_article_version(db,site,board,old_aid,previous,'previous')
+                        db.execute('DELETE FROM articles WHERE site=? AND board=? AND aid=?',(site,board,old_aid))
+
         db.execute('DELETE FROM unavailable_articles WHERE site=? AND board=? AND (idx=? OR aid=?)',
                    (site, board, source_index, aid))
         retained_coverage = existing.get('ansi_coverage', {}) if keep_previous else coverage
@@ -846,7 +865,9 @@ def work(config):
             mode = 'single'
         capture_mode = (config.get('capture_mode') or 'line') if config.get('aid') else 'page'
         backup_mode = config.get('backup_mode', 'recheck')
-        height = FALLBACK_HEIGHT if config.get('aid') and config.get('short_terminal') else 100
+        height = 24 if site == 'CCNS' else (FALLBACK_HEIGHT if config.get('aid') and config.get('short_terminal') else 100)
+        if site == 'CCNS':
+            capture_mode = 'ccns_page'
         all_articles = mode == 'new' and config.get('all_articles', False)
         selected_indices = config.get('selected_indices')
         job.event('start', version=APP_VERSION, site=site, board=board, capture_version=CAPTURE_VERSION,
@@ -865,10 +886,16 @@ def work(config):
         stage = 'login'
         stage_started = time.monotonic()
         STATE['message'] = f'正在登入 {site}…'
-        api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
-                        check_update=False, verify_ssl=True, screen_height=height)
-        session = BoardSession(api)
-        session.capture_mode = capture_mode
+        if site == 'CCNS':
+            from ccns_session import CCNSSession
+            api = session = CCNSSession(event=job.event)
+            height = 24
+            config['refresh_board_info'] = False
+        else:
+            api = PyPtt.API(host=getattr(PyPtt.HOST, SITES[site]), log_level=PyPtt.LogLevel.SILENT,
+                            check_update=False, verify_ssl=True, screen_height=height)
+            session = BoardSession(api)
+        session.capture_mode = 'ccns_page' if site == 'CCNS' else capture_mode
         session.prefer_line_at_uncertain_seam = mode != 'test'
         def check_stop():
             if STOP.is_set():
@@ -878,6 +905,19 @@ def work(config):
         job.event('login', seconds=round(time.monotonic() - stage_started, 3))
         def run_station(action, *, retry=None):
             return station_action(session, board, site, job, action, retry=retry)
+
+        def query_article_index(index):
+            try:
+                return run_station(lambda: session.get_post(board,index=index,query=True))
+            except BoardNavigationError as exc:
+                if site!='CCNS' or not session.recover_list_after_read_error(board):
+                    raise
+                diagnostic=getattr(exc,'capture_diagnostics',{})
+                reason=str(exc)
+                job.event('ccns_query_recovered',index=index,error=type(exc).__name__,
+                          reason=reason,capture=diagnostic,continued=True)
+                return dict(index=index,query_error=reason,query_diagnostics=diagnostic)
+
 
         if STOP.is_set():
             result = 'stopped'
@@ -1015,7 +1055,7 @@ def work(config):
                 stage_started = time.monotonic()
                 aid = anchor_aid
                 idx = anchor_index
-                anchor = run_station(lambda: session.get_post(board, index=anchor_index, query=True))
+                anchor = query_article_index(anchor_index)
                 idx = indices[position]
                 matches_aid = anchor.get('aid') == anchor_aid and anchor.get('index') in (None, anchor_index)
                 if status == 'deleted':
@@ -1041,24 +1081,30 @@ def work(config):
             added = False
             stage = 'query_article'
             aid = None
-            query = run_station(lambda: session.get_post(board, index=idx, query=True))
+            query = query_article_index(idx)
             query_seconds = round(time.monotonic() - stage_started, 3)
             aid = query.get('aid')
             query_index = query.get('index')
             wrong_index = bool(query_index and query_index != idx)
             existing = stored_article(db, site, board, aid) if aid and not wrong_index else None
+            if site == 'CCNS' and existing and 'ccns_sticky' in query:
+                existing['ccns_sticky'] = query['ccns_sticky']
+                with db:
+                    db.execute('UPDATE articles SET data=? WHERE site=? AND board=? AND aid=?',
+                               (json.dumps(existing,ensure_ascii=False),site,board,aid))
             locked = not wrong_index and query.get('is_lock') and (aid or query_index == idx)
             if confirmed_deleted(session, query, idx) or locked:
                 status = 'locked' if locked else 'deleted'
                 note_unavailable(db, site, board, idx, aid, status, checkpoint=True)
                 outcome = status
             elif not aid or wrong_index:
-                reason = '站方回傳的編號與要求不符' if wrong_index else '未取得 AID'
+                reason = '站方回傳的編號與要求不符' if wrong_index else query.get('query_error','未取得 AID')
                 record_failure(db, site, board, idx, f'查詢文章：{reason}', article=True)
                 STATE['unresolved'] += 1
                 show_issue(idx, aid, reason, notify=True, stage='查詢文章', continues=True)
                 outcome = 'wrong_index' if wrong_index else 'no_aid'
                 details['reason'] = reason
+                if query.get('query_diagnostics'):details['capture']=query['query_diagnostics']
             elif existing and ((backup_mode == 'fill' and existing.get('full_content')) or db.execute(
                     'SELECT 1 FROM batch_verified WHERE site=? AND board=? AND aid=?', (site, board, aid)).fetchone()):
                 with db:
@@ -1186,11 +1232,20 @@ def work(config):
                           capture=getattr(exc, 'capture_diagnostics', None))
         detail = str(exc) if isinstance(exc, ArticleReadError) else {
             'ConnectionClosed': '等網路恢復後，重新登入同一看板即可接續。',
+            'CCNSError': 'CCNS 畫面尚未通過辨識或接合核對，請提供本次 log 及文章診斷。',
             'BoardNavigationError': '終端位置無法確認，已停止送鍵。原批次可稍後續傳。',
             'BridgeNavigationError': '逐頁接縫後終端位置無法確認，已停止送鍵。登入續傳會對這篇改用逐行。',
             'BoardTemporarilyClosed': '看板仍暫時關閉，已保留進度。',
             'TwoFactorAuthRequired': '此版尚未支援輸入二階段驗證碼。',
         }.get(name, '請查看程式 log 資料夾內的診斷紀錄。')
+        if site == 'CCNS':
+            from ccns_session import CCNSError
+            if isinstance(exc, CCNSError):
+                phase = {'main': '已登入，停在主選單／進板操作。',
+                         'list': '已登入並進入看板，停在列表定位或查詢。',
+                         'query': '已登入並進入看板，停在文章資訊查詢。',
+                         'article': '已登入並進入看板，停在正文讀取核對。'}.get(getattr(session,'view',None),'登入流程尚未完成。')
+                detail = phase + str(exc)
         if isinstance(exc, StationRateLimit) or name == 'UseTooManyResources':
             result = 'rate_limited'
             limit = exc.details if isinstance(exc, StationRateLimit) else detect_rate_limit('程式耗用過多')
@@ -1357,7 +1412,7 @@ class Handler(BaseHTTPRequestHandler):
             if self.path not in ('/start', '/export', '/pending'):
                 return self.reply(404,'{}')
             site, board = data.get('site'), data.get('board', '')
-            if site not in SITES or not re.fullmatch(r'[A-Za-z0-9_-]{1,30}', board):
+            if site not in SITES or not valid_board(site, board):
                 raise ValueError()
             mode = data.get('mode', 'new') if self.path == '/start' else None
             if mode != 'test':
@@ -1382,6 +1437,10 @@ class Handler(BaseHTTPRequestHandler):
                 data['aid'] = aid
                 data['new_batch'] = mode == 'new'
                 data['short_terminal'] = bool(aid) and data.get('short_terminal') == 'on'
+                if site == 'CCNS':
+                    data['refresh_board_info'] = False
+                    data['short_terminal'] = bool(aid)
+                    data['capture_mode'] = 'page'
                 if mode == 'test':
                     capture_mode = data.get('capture_mode') or 'line'
                     if capture_mode not in ('line', 'page'):
@@ -1461,10 +1520,37 @@ def create_server():
         return LocalHTTPServer(('127.0.0.1', 0), Handler)
 
 
-if __name__ == '__main__':
+def existing_downloader_url():
+    from urllib.request import urlopen
+    url=f'http://127.0.0.1:{LOCAL_PORT}'
+    try:
+        with urlopen(url+'/status',timeout=2) as response:status=json.load(response)
+        with urlopen(url+'/',timeout=2) as response:html=response.read().decode('utf-8')
+        if isinstance(status,dict) and 'running' in status and 'BBS文章備份程式' in html:return url
+    except (OSError,ValueError):pass
+    return None
+
+
+def main():
+    existing=existing_downloader_url()
+    if existing:
+        print('程式已在執行，沿用現有視窗；不停止下載或離線更新：',existing,flush=True)
+        webbrowser.open(existing)
+        return
+    try:
+        with archive_lock(ROOT/'program-instance'):
+            serve_local_app()
+    except ArchiveBusyError:
+        print('程式已在啟動或執行中，請沿用原視窗；下載及離線更新不受影響。',flush=True)
+
+
+def serve_local_app():
     server=create_server()
     url=f'http://127.0.0.1:{server.server_port}'
-    print('PTT / PTT2 downloader:',url,flush=True)
+    print('PTT / PTT2 / CCNS downloader:',url,flush=True)
     webbrowser.open(url)
     try: server.serve_forever()
     except KeyboardInterrupt: STOP.set()
+
+
+if __name__ == '__main__':main()

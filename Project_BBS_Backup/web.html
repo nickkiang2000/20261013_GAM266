@@ -125,14 +125,14 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
 <form id="form" method="post" autocomplete="off">
 <input type="hidden" name="theme" value="dark">
 <div class="form-row login-fields">
-    <label>站名<select name="site"><option value="PTT2">PTT2</option><option value="PTT">PTT</option></select></label>
-    <label>版名<input name="board" required pattern="[A-Za-z0-9_\-]{1,30}"></label>
+    <label>站名<select name="site"><option value="PTT2">PTT2</option><option value="PTT">PTT</option><option value="CCNS">CCNS</option></select></label>
+    <label>版名<input name="board" required pattern="[A-Za-z0-9_.\-]{1,30}"></label>
     <label>帳號<input name="user" required autocomplete="off"></label>
     <label>密碼<input name="password" type="password" required autocomplete="new-password"></label>
 </div>
 <div class="form-row scan-fields">
     <label>起始編號<input name="start" id="scan-start" type="text" value="0" required autocomplete="off"
-        title="0為最新，或可輸入想下載的編號，以逗號分隔" aria-describedby="start-error">
+        title="輸入正整數指定起始文章；輸入 0 代表從最新文章開始。多篇請用逗號分隔正整數，清單中不可包含 0。" aria-describedby="start-error">
         <small id="start-error" hidden></small></label>
     <label>掃描篇數<input name="count" id="scan-count-input" type="number" min="1" max="10000" value="5" required></label>
     <label>掃描方向<select name="direction" id="scan-direction"><option value="newest">新到舊</option><option value="oldest">舊到新</option></select></label>
@@ -151,6 +151,7 @@ html[data-theme="light"] .notice { background: #fff; color: #172b3d; }
     <label>下載方式<select name="backup_mode"><option value="fill">補齊備份</option><option value="recheck">重新核對</option></select></label>
     <label class="board-refresh"><input type="checkbox" name="refresh_board_info" checked> <span>更新標題<br>／置底文</span></label>
 </div>
+<p id="ccns-note" hidden></p>
 <div class="download-actions wide">
     <div class="download-action">
         <button id="run" aria-describedby="new-summary">登入新下載</button>
@@ -414,6 +415,13 @@ window.addEventListener('focus', updateDesktopToggle);
 updateDesktopToggle();
 
 function updateFormSummary() {
+    const ccns = form.elements.site.value === 'CCNS';
+    form.elements.board.pattern = ccns ? '[A-Za-z0-9_.\\-]{1,30}' : '[A-Za-z0-9_\\-]{1,30}';
+    form.elements.refresh_board_info.disabled = ccns;
+    form.elements.test_capture_mode.disabled = ccns;
+    form.elements.test_short_terminal.disabled = ccns;
+    document.getElementById('ccns-note').hidden = true;
+
     const {start, direction, site, board, count, folder, backup_mode,
         test_aid, test_capture_mode, test_short_terminal} = form.elements;
     const raw = start.value.replace(/[０-９]/g, char => String(char.charCodeAt(0) - 0xFF10)).replace(/，/g, ',');
@@ -424,8 +432,8 @@ function updateFormSummary() {
     const error = validStart ? '' : '輸入正整數指定起始文章；輸入 0 代表從最新文章開始。多篇請用逗號分隔正整數，清單中不可包含 0。';
     start.setCustomValidity(error);
     const startError = document.getElementById('start-error');
-    startError.textContent = error;
-    startError.hidden = !error;
+    startError.textContent = '';
+    startError.hidden = true;
     count.disabled = direction.disabled = listMode;
     const first = Number(parts[0]);
     const amount = Number(count.value);
@@ -457,11 +465,11 @@ function updateFormSummary() {
     const warning = pending ? `。將取代未完成範圍 ${pendingRange(pending)}` : '';
     setText('new-summary', `${backupLabel(backup_mode.value)} · ${range} · ${path || '未填備份目錄'}${warning}`);
     const testAid = test_aid.value.trim().replace(/^#/, '');
-    const height = test_short_terminal.checked ? 24 : 100;
-    const testMode = test_capture_mode.value;
-    const testMethod = testMode === 'page' ? '逐頁（Page Down）' : '逐行 ↓';
+    const height = ccns || test_short_terminal.checked ? 24 : 100;
+    const testMode = ccns ? 'ccns_page' : test_capture_mode.value;
+    const testMethod = ccns ? 'CCNS 逐頁核對' : testMode === 'page' ? '逐頁（Page Down）' : '逐行 ↓';
     const destination = testAid && board.value
-        ? `test-downloads/${site.value}_${board.value}/${testAid}/${testMode}-${height}/`
+        ? `test-downloads/${site.value}_${board.value}/${testAid}/${ccns ? 'page' : testMode}-${height}/`
         : 'test-downloads/';
     setText('test-summary', `${testMethod} · ${height} 列 · 每次在 ${destination} 建立新測試目錄。`);
     showResumeSummary();
